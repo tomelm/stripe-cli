@@ -1,29 +1,57 @@
-all: test
+SOURCE_FILES?=./...
+TEST_PATTERN?=.
+TEST_OPTIONS?=
 
-install-deps:
-	GO111MODULE=on go get
+export GO111MODULE := on
 
-update-deps:
-	GO111MODULE=on go get -u
+# Install all the build and lint dependencies
+setup:
+	go mod download
+.PHONY: setup
 
+# Run all the tests
+test:
+	go test $(TEST_OPTIONS) -failfast -race -coverpkg=./... -covermode=atomic -coverprofile=coverage.txt $(SOURCE_FILES) -run $(TEST_PATTERN) -timeout=2m
+.PHONY: test
+
+# Run all the tests and opens the coverage report
+cover: test
+	go tool cover -html=coverage.txt
+.PHONY: cover
+
+# gofmt and goimports all go files
+fmt:
+	find . -name '*.go' -not -wholename './vendor/*' | while read -r file; do gofmt -w -s "$$file"; goimports -w "$$file"; done
+.PHONY: fmt
+
+# Run the linter
 lint:
-# In travis, we need to install golint explicitly. Don't do this in other
-# environments
-ifeq ($(ENVIRONMENT), travis)
-	go get golang.org/x/lint/golint
-	git checkout .
-endif
 	golint -set_exit_status ./...
+.PHONY: lint
 
+# Run Vet
 vet:
-	go vet $(shell go list ./... | grep -v /vendor/)
+	go vet ./...
+.PHONY: vet
 
-test: install-deps lint vet
-	go test -race -cover -v ./...
-	@echo '\o/ yay, we did it!'
+# Clean go.mod
+go-mod-tidy:
+	@go mod tidy -v
+	@git diff HEAD
+	@git diff-index --quiet HEAD
+.PHONY: go-mod-tidy
 
-# This does not release anything from your local machine but creates a tag
-# for our CI to handle it
+# Run all the tests and code checks
+ci: build test lint vet go-mod-tidy
+.PHONY: ci
+
+# Build a beta version of stripe
+build:
+	go build -o stripe cmd/stripe/main.go
+.PHONY: build
+
+# Release a new version of stripe by creating a tag and pushing it to remote.
+# The actual release is done by our CI upon detecting the new tag.
 release:
 	git pull origin master
 
@@ -33,3 +61,6 @@ release:
 	@read -p "Enter new version (of the format vN.N.N): " version; \
 	git tag $$version
 	git push --tags
+.PHONY: release
+
+.DEFAULT_GOAL := build

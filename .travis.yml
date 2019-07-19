@@ -1,20 +1,17 @@
 language: go
-
-go:
-- 1.12.x
-
+go: '1.12.x'
 addons:
   apt:
     packages:
     - rpm
-
-env:
-- GO111MODULE=on
-
+install: make setup
+script: make ci
 deploy:
 - provider: script
   skip_cleanup: true
-  script: ./travis-goreleaser
+  script: curl -sL http://git.io/goreleaser | bash
   on:
     tags: true
     condition: $TRAVIS_OS_NAME = linux
+notifications:
+  email: false
