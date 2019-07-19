@@ -37,9 +37,9 @@ func TestLogin(t *testing.T) {
 	}
 
 	c := &config.Config{
-		Color: "auto",
-		LogLevel: "info",
-		Profile: p,
+		Color:        "auto",
+		LogLevel:     "info",
+		Profile:      p,
 		ProfilesFile: profilesFile,
 	}
 

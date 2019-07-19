@@ -15,13 +15,13 @@ func TestWriteProfile(t *testing.T) {
 	p := Profile{
 		DeviceName:  "st-testing",
 		ProfileName: "tests",
-		SecretKey: "sk_test_123",
+		SecretKey:   "sk_test_123",
 	}
 
 	c := &Config{
-		Color: "auto",
-		LogLevel: "info",
-		Profile: p,
+		Color:        "auto",
+		LogLevel:     "info",
+		Profile:      p,
 		ProfilesFile: profilesFile,
 	}
 	c.InitConfig()
@@ -49,13 +49,13 @@ func TestWriteProfilesMerge(t *testing.T) {
 	p := Profile{
 		ProfileName: "tests",
 		DeviceName:  "st-testing",
-		SecretKey: "sk_test_123",
+		SecretKey:   "sk_test_123",
 	}
 
 	c := &Config{
-		Color: "auto",
-		LogLevel: "info",
-		Profile: p,
+		Color:        "auto",
+		LogLevel:     "info",
+		Profile:      p,
 		ProfilesFile: profilesFile,
 	}
 	c.InitConfig()
