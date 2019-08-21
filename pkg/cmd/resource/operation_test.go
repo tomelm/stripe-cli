@@ -16,11 +16,11 @@ import (
 func TestNewOperationCmd(t *testing.T) {
 	parentCmd := &cobra.Command{Annotations: make(map[string]string)}
 
-	oc := NewOperationCmd(parentCmd, "foo", "/v1/bars/{id}", "get", &config.Config{})
+	oc := NewOperationCmd(parentCmd, "foo", "/v1/bars/{id}", http.MethodGet, &config.Config{})
 
 	require.Equal(t, "foo", oc.Name)
 	require.Equal(t, "/v1/bars/{id}", oc.Path)
-	require.Equal(t, "GET", oc.HTTPVerb)
+	require.Equal(t, http.MethodGet, oc.HTTPVerb)
 	require.Equal(t, []string{"{id}"}, oc.URLParams)
 	require.True(t, parentCmd.HasSubCommands())
 	val, ok := parentCmd.Annotations["foo"]
@@ -45,7 +45,7 @@ func TestRunOperationCmd(t *testing.T) {
 	viper.Reset()
 	viper.Set("api_key", "sk_test_1234")
 	parentCmd := &cobra.Command{Annotations: make(map[string]string)}
-	oc := NewOperationCmd(parentCmd, "foo", "/v1/bars/{id}", "post", &config.Config{})
+	oc := NewOperationCmd(parentCmd, "foo", "/v1/bars/{id}", http.MethodPost, &config.Config{})
 	oc.APIBaseURL = ts.URL
 
 	err := oc.runOperationCmd(oc.Cmd, []string{"bar_123", "param1=value1", "param2=value2"})
@@ -56,7 +56,7 @@ func TestRunOperationCmd(t *testing.T) {
 func TestRunOperationCmd_NoAPIKey(t *testing.T) {
 	viper.Reset()
 	parentCmd := &cobra.Command{Annotations: make(map[string]string)}
-	oc := NewOperationCmd(parentCmd, "foo", "/v1/bars/{id}", "post", &config.Config{})
+	oc := NewOperationCmd(parentCmd, "foo", "/v1/bars/{id}", http.MethodPost, &config.Config{})
 
 	err := oc.runOperationCmd(oc.Cmd, []string{"bar_123", "param1=value1", "param2=value2"})
 
