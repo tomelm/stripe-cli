@@ -12,6 +12,13 @@ import (
 // error if the string is invalid, or nil otherwise.
 type ArgValidator func(string) error
 
+var (
+	// ErrAPIKeyNotConfigured is the error returned when the loaded profile is missing the api key property
+	ErrAPIKeyNotConfigured = errors.New("you have not configured API keys yet")
+	// ErrDeviceNameNotConfigured is the error returned when the loaded profile is missing the device name property
+	ErrDeviceNameNotConfigured = errors.New("you have not configured your device name yet")
+)
+
 // CallNonEmptyArray calls an argument validator on all non-empty elements of
 // a string array.
 func CallNonEmptyArray(validator ArgValidator, values []string) error {
@@ -42,7 +49,7 @@ func CallNonEmpty(validator ArgValidator, value string) error {
 // APIKey validates that a string looks like an API key.
 func APIKey(input string) error {
 	if len(input) == 0 {
-		return errors.New("you have not configured API keys yet. To do so, run `stripe login` which will configure your API keys from Stripe")
+		return ErrAPIKeyNotConfigured
 	} else if len(input) < 12 {
 		return errors.New("the API key provided is too short, it must be at least 12 characters long")
 	}
@@ -54,6 +61,26 @@ func APIKey(input string) error {
 
 	if keyParts[0] != "sk" && keyParts[0] != "rk" {
 		return errors.New("the CLI only supports using a secret or restricted key")
+	}
+
+	return nil
+}
+
+// APIKeyNotRestricted validates that a string looks like a secret API key and is not a restricted key.
+func APIKeyNotRestricted(input string) error {
+	if len(input) == 0 {
+		return ErrAPIKeyNotConfigured
+	} else if len(input) < 12 {
+		return errors.New("the API key provided is too short, it must be at least 12 characters long")
+	}
+
+	keyParts := strings.Split(input, "_")
+	if len(keyParts) < 3 {
+		return errors.New("you are using a legacy-style API key which is unsupported by the CLI. Please generate a new test mode API key")
+	}
+
+	if keyParts[0] != "sk" || keyParts[0] == "rk" {
+		return errors.New("this CLI command only supports using a secret key. Please re-run using the --api-key flag override with your secret API key")
 	}
 
 	return nil
@@ -132,4 +159,18 @@ func StatusCodeType(code string) error {
 	}
 
 	return nil
+}
+
+// OneDollar validates that a provided number is at least 100 (ie. 1 dollar)
+func OneDollar(number string) error {
+	num, err := strconv.Atoi(number)
+	if err != nil {
+		return fmt.Errorf("Provided amount %v to charge should be an integer (eg. 100)", number)
+	}
+
+	if num >= 100 {
+		return nil
+	}
+
+	return fmt.Errorf("Provided amount %v to charge is not at least 100", number)
 }

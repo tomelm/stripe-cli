@@ -10,7 +10,7 @@ import (
 	"github.com/briandowns/spinner"
 	"github.com/logrusorgru/aurora"
 	"github.com/tidwall/pretty"
-	"golang.org/x/crypto/ssh/terminal"
+	"golang.org/x/term"
 )
 
 var darkTerminalStyle = &pretty.Style{
@@ -120,24 +120,30 @@ func Linkify(text, url string, w io.Writer) string {
 	return fmt.Sprintf("\x1b]8;;%s\x1b\\%s\x1b]8;;\x1b\\", url, text)
 }
 
-// StartSpinner starts a spinner with the given message. If the writer doesn't
-// support colors, it simply prints the message.
-func StartSpinner(msg string, w io.Writer) *spinner.Spinner {
-	if !shouldUseColors(w) {
+type charset = []string
+
+func getCharset() charset {
+	// See https://github.com/briandowns/spinner#available-character-sets for
+	// list of available charsets
+	if runtime.GOOS == "windows" {
+		// Less fancy, but uses ASCII characters so works with Windows default
+		// console.
+		return spinner.CharSets[8]
+	}
+	return spinner.CharSets[11]
+}
+
+const duration = time.Duration(100) * time.Millisecond
+
+// StartNewSpinner starts a new spinner with the given message. If the writer is not
+// a terminal or doesn't support colors, it simply prints the message.
+func StartNewSpinner(msg string, w io.Writer) *spinner.Spinner {
+	if !isTerminal(w) || !shouldUseColors(w) {
 		fmt.Fprintln(w, msg)
 		return nil
 	}
 
-	// See https://github.com/briandowns/spinner#available-character-sets for
-	// list of available charsets
-	charSetIdx := 11
-	if runtime.GOOS == "windows" {
-		// Less fancy, but uses ASCII characters so works with Windows default
-		// console.
-		charSetIdx = 8
-	}
-
-	s := spinner.New(spinner.CharSets[charSetIdx], 100*time.Millisecond)
+	s := spinner.New(getCharset(), duration)
 	s.Writer = w
 
 	if msg != "" {
@@ -149,10 +155,24 @@ func StartSpinner(msg string, w io.Writer) *spinner.Spinner {
 	return s
 }
 
-// StopSpinner stops a spinner with the given message. If the writer doesn't
-// support colors, it simply prints the message.
+// StartSpinner updates an existing spinner's message, and starts it if it was stopped
+func StartSpinner(s *spinner.Spinner, msg string, w io.Writer) {
+	if s == nil {
+		fmt.Fprintln(w, msg)
+		return
+	}
+	if msg != "" {
+		s.Suffix = " " + msg
+	}
+	if !s.Active() {
+		s.Start()
+	}
+}
+
+// StopSpinner stops a spinner with the given message. If the writer is not
+// a terminal or doesn't support colors, it simply prints the message.
 func StopSpinner(s *spinner.Spinner, msg string, w io.Writer) {
-	if !shouldUseColors(w) {
+	if !isTerminal(w) || !shouldUseColors(w) {
 		fmt.Fprintln(w, msg)
 		return
 	}
@@ -174,17 +194,17 @@ func StrikeThrough(text string) string {
 // Private functions
 //
 
-func checkIfTerminal(w io.Writer) bool {
+func isTerminal(w io.Writer) bool {
 	switch v := w.(type) {
 	case *os.File:
-		return terminal.IsTerminal(int(v.Fd()))
+		return term.IsTerminal(int(v.Fd()))
 	default:
 		return false
 	}
 }
 
 func shouldUseColors(w io.Writer) bool {
-	useColors := ForceColors || checkIfTerminal(w)
+	useColors := ForceColors || isTerminal(w)
 
 	if EnvironmentOverrideColors {
 		force, ok := os.LookupEnv("CLICOLOR_FORCE")

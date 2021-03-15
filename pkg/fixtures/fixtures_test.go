@@ -1,6 +1,7 @@
 package fixtures
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -55,6 +56,46 @@ const testFixture = `
 		}
 	]
 }`
+
+const failureTestFixture = `
+{
+	"_meta": {
+	  "template_version": 0
+	},
+	"fixtures": [
+	  {
+		"name": "charge_expected_failure",
+		"expected_error_type": "card_error",
+		"path": "/v1/charges",
+		"method": "post",
+		"params": {
+		  "source": "tok_chargeDeclined",
+		  "amount": 100,
+		  "currency": "usd",
+		  "description": "(created by Stripe CLI)"
+		}
+	  }
+	]
+  }`
+
+func TestParseInterfaceFromRaw(t *testing.T) {
+	var rawFixtureData = []byte(`{
+		"salary": 1000000000,
+		"email": "person@example.com"
+	}`)
+
+	parsedFixtureData := make(map[string]interface{})
+	json.Unmarshal(rawFixtureData, &parsedFixtureData)
+
+	fxt := Fixture{}
+
+	output := (fxt.parseInterface(parsedFixtureData))
+	sort.Strings(output)
+
+	require.Equal(t, len(output), 2)
+	require.Equal(t, output[0], "email=person@example.com")
+	require.Equal(t, output[1], "salary=1000000000")
+}
 
 func TestParseInterface(t *testing.T) {
 	address := make(map[string]interface{})
@@ -133,7 +174,15 @@ func TestParseWithLocalEnv(t *testing.T) {
 	data := make(map[string]interface{})
 	data["phone"] = "${.env:PHONE_LOCAL|+1234567890}"
 
+	os.Setenv("CUST_ID", "cust_12345")
 	os.Setenv("PHONE_LOCAL", "+1234")
+
+	http := fixture{
+		Path: "/v1/customers/${.env:CUST_ID}",
+	}
+
+	path := fxt.parsePath(http)
+	assert.Equal(t, "/v1/customers/cust_12345", path)
 
 	output := (fxt.parseInterface(data))
 
@@ -198,6 +247,39 @@ func TestMakeRequest(t *testing.T) {
 
 	fxt.responses["char_bender"].Reset()
 	require.True(t, fxt.responses["char_bender"].Find("charge").(bool))
+}
+
+func TestMakeRequestExpectedFailure(t *testing.T) {
+	fs := afero.NewMemMapFs()
+	ts := httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
+		res.WriteHeader(402)
+		res.Write([]byte(`{"error": {"type": "card_error"}}`))
+	}))
+
+	defer func() { ts.Close() }()
+	afero.WriteFile(fs, "failured_test_fixture.json", []byte(failureTestFixture), os.ModePerm)
+	fxt, err := NewFixture(fs, "sk_test_1234", "", ts.URL, "failured_test_fixture.json")
+	require.NoError(t, err)
+
+	err = fxt.Execute()
+	require.NoError(t, err)
+	require.NotNil(t, fxt.responses["charge_expected_failure"])
+}
+
+func TestMakeRequestUnexpectedFailure(t *testing.T) {
+	fs := afero.NewMemMapFs()
+	ts := httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
+		res.WriteHeader(500)
+		res.Write([]byte(`{"error": "Internal Failure Occurred."}`))
+	}))
+
+	defer func() { ts.Close() }()
+	afero.WriteFile(fs, "failured_test_fixture.json", []byte(failureTestFixture), os.ModePerm)
+	fxt, err := NewFixture(fs, "sk_test_1234", "", ts.URL, "failured_test_fixture.json")
+	require.NoError(t, err)
+
+	err = fxt.Execute()
+	require.NotNil(t, err)
 }
 
 func TestParsePathDoNothing(t *testing.T) {
@@ -279,4 +361,64 @@ func TestUpdateEnv(t *testing.T) {
 CUST_ID="char_12345"`
 	output, _ := afero.ReadFile(fs, filepath.Join(wd, ".env"))
 	assert.Equal(t, expected, string(output))
+}
+
+func TestToFixtureQuery(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected fixtureQuery
+		didMatch bool
+	}{
+		{
+			"/v1/charges",
+			fixtureQuery{},
+			false,
+		},
+		{
+			"/v1/charges/${char_bender:id}/capture",
+			fixtureQuery{"char_bender", "id", ""},
+			true,
+		},
+		{
+			"${.env:PHONE_NOT_SET|+1234567890}",
+			fixtureQuery{".env", "PHONE_NOT_SET", "+1234567890"},
+			true,
+		},
+		{
+			"/v1/customers/${.env:CUST_ID}",
+			fixtureQuery{".env", "CUST_ID", ""},
+			true,
+		},
+		{
+			"${.env:CUST_ID}",
+			fixtureQuery{".env", "CUST_ID", ""},
+			true,
+		},
+		{
+			"${cust_bender:subscriptions.data.[0].id}",
+			fixtureQuery{"cust_bender", "subscriptions.data.[0].id", ""},
+			true,
+		},
+		{
+			"${cust_bender:subscriptions.data.[0].name|Unknown Person}",
+			fixtureQuery{"cust_bender", "subscriptions.data.[0].name", "Unknown Person"},
+			true,
+		},
+		{
+			"${cust_bender:billing_details.address.country}",
+			fixtureQuery{"cust_bender", "billing_details.address.country", ""},
+			true,
+		},
+		{
+			"${cust_bender:billing_details.address.country|San Mateo}",
+			fixtureQuery{"cust_bender", "billing_details.address.country", "San Mateo"},
+			true,
+		},
+	}
+
+	for _, test := range tests {
+		actualQuery, actualDidMatch := toFixtureQuery(test.input)
+		assert.Equal(t, test.expected, actualQuery)
+		assert.Equal(t, test.didMatch, actualDidMatch)
+	}
 }

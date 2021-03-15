@@ -20,6 +20,7 @@ import (
 )
 
 var openBrowser = open.Browser
+var canOpenBrowser = open.CanOpenBrowser
 
 const stripeCLIAuthPath = "/stripecli/auth"
 
@@ -30,7 +31,7 @@ type Links struct {
 	VerificationCode string `json:"verification_code"`
 }
 
-//TODO
+// TODO
 /*
 4. Observability and associated alerting? Business metrics (how many users use this flow)?
 5. Rate limiting for each operation?
@@ -51,25 +52,25 @@ func Login(baseURL string, config *config.Config, input io.Reader) error {
 
 	var s *spinner.Spinner
 
-	if isSSH() {
+	if isSSH() || !canOpenBrowser() {
 		fmt.Printf("To authenticate with Stripe, please go to: %s\n", links.BrowserURL)
 
-		s = ansi.StartSpinner("Waiting for confirmation...", os.Stdout)
+		s = ansi.StartNewSpinner("Waiting for confirmation...", os.Stdout)
 	} else {
 		fmt.Printf("Press Enter to open the browser (^C to quit)")
 		fmt.Fscanln(input)
 
-		s = ansi.StartSpinner("Waiting for confirmation...", os.Stdout)
+		s = ansi.StartNewSpinner("Waiting for confirmation...", os.Stdout)
 
 		err = openBrowser(links.BrowserURL)
 		if err != nil {
 			msg := fmt.Sprintf("Failed to open browser, please go to %s manually.", links.BrowserURL)
 			ansi.StopSpinner(s, msg, os.Stdout)
-			s = ansi.StartSpinner("Waiting for confirmation...", os.Stdout)
+			s = ansi.StartNewSpinner("Waiting for confirmation...", os.Stdout)
 		}
 	}
 
-	//Call poll function
+	// Call poll function
 	response, account, err := PollForKey(links.PollURL, 0, 0)
 	if err != nil {
 		return err
@@ -84,6 +85,7 @@ func Login(baseURL string, config *config.Config, input io.Reader) error {
 	config.Profile.LiveModePublishableKey = response.LiveModePublishableKey
 	config.Profile.TestModeAPIKey = response.TestModeAPIKey
 	config.Profile.TestModePublishableKey = response.TestModePublishableKey
+	config.Profile.DisplayName = response.AccountDisplayName
 
 	profileErr := config.Profile.CreateProfile()
 	if profileErr != nil {

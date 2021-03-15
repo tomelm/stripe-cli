@@ -9,12 +9,15 @@ import (
 
 // Events is a mapping of pre-built trigger events and the corresponding json file
 var Events = map[string]string{
+	"account.updated":                          "/account.updated.json",
 	"balance.available":                        "/balance.available.json",
 	"charge.captured":                          "/charge.captured.json",
 	"charge.dispute.created":                   "/charge.disputed.created.json",
 	"charge.failed":                            "/charge.failed.json",
 	"charge.refunded":                          "/charge.refunded.json",
 	"charge.succeeded":                         "/charge.succeeded.json",
+	"checkout.session.async_payment_failed":    "/checkout.session.async_payment_failed.json",
+	"checkout.session.async_payment_succeeded": "/checkout.session.async_payment_succeeded.json",
 	"checkout.session.completed":               "/checkout.session.completed.json",
 	"customer.created":                         "/customer.created.json",
 	"customer.deleted":                         "/customer.deleted.json",

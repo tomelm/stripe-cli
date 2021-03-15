@@ -9,7 +9,7 @@ import (
 	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
-	"golang.org/x/crypto/ssh/terminal"
+	"golang.org/x/term"
 
 	"github.com/stripe/stripe-cli/pkg/ansi"
 	"github.com/stripe/stripe-cli/pkg/config"
@@ -124,7 +124,7 @@ func getUsageTemplate() string {
   {{rpad "payment_intents" 29}} Make requests (cancel, capture, confirm, etc) on payment intents
   {{rpad "..." 29}} %s
 
-%s{{range $index, $cmd := .Commands}}{{if (not (index $.Annotations $cmd.Name))}}
+%s{{range $index, $cmd := .Commands}}{{if (not (or (index $.Annotations $cmd.Name) $cmd.Hidden))}}
   {{rpad $cmd.Name $cmd.NamePadding}} {{$cmd.Short}}{{end}}{{end}}{{else}}
 
 %s{{range .Commands}}{{if (or .IsAvailableCommand (eq .Name "help"))}}
@@ -155,7 +155,7 @@ Use "{{.CommandPath}} [command] --help" for more information about a command.{{e
 func getTerminalWidth() int {
 	var width int
 
-	width, _, err := terminal.GetSize(0)
+	width, _, err := term.GetSize(0)
 	if err != nil {
 		width = 80
 	}

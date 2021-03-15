@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,10 +37,17 @@ type fixtureFile struct {
 }
 
 type fixture struct {
-	Name   string      `json:"name"`
-	Path   string      `json:"path"`
-	Method string      `json:"method"`
-	Params interface{} `json:"params"`
+	Name              string      `json:"name"`
+	ExpectedErrorType string      `json:"expected_error_type"`
+	Path              string      `json:"path"`
+	Method            string      `json:"method"`
+	Params            interface{} `json:"params"`
+}
+
+type fixtureQuery struct {
+	Name         string
+	Query        string
+	DefaultValue string
 }
 
 // Fixture contains a mapping of an individual fixtures responses for querying
@@ -89,7 +97,7 @@ func NewFixture(fs afero.Fs, apiKey, stripeAccount, baseURL, file string) (*Fixt
 	}
 
 	if fxt.fixture.Meta.Version > SupportedVersions {
-		return nil, fmt.Errorf("Fixture version not supported: %s", string(fxt.fixture.Meta.Version))
+		return nil, fmt.Errorf("Fixture version not supported: %s", fmt.Sprint(fxt.fixture.Meta.Version))
 	}
 
 	return &fxt, nil
@@ -102,7 +110,7 @@ func (fxt *Fixture) Execute() error {
 		fmt.Printf("Setting up fixture for: %s\n", data.Name)
 
 		resp, err := fxt.makeRequest(data)
-		if err != nil {
+		if err != nil && !errWasExpected(err, data.ExpectedErrorType) {
 			return err
 		}
 
@@ -110,6 +118,13 @@ func (fxt *Fixture) Execute() error {
 	}
 
 	return nil
+}
+
+func errWasExpected(err error, expectedErrorType string) bool {
+	if rerr, ok := err.(requests.RequestError); ok {
+		return rerr.ErrorType == expectedErrorType
+	}
+	return false
 }
 
 // UpdateEnv uses the results of the fixtures command just executed and
@@ -144,8 +159,7 @@ func (fxt *Fixture) makeRequest(data fixture) ([]byte, error) {
 }
 
 func (fxt *Fixture) parsePath(http fixture) string {
-	r := regexp.MustCompile(`(\${[\w-]+:[\w-\.]+})`)
-	if r.Match([]byte(http.Path)) {
+	if r, containsQuery := matchFixtureQuery(http.Path); containsQuery {
 		var newPath []string
 
 		matches := r.FindAllStringSubmatch(http.Path, -1)
@@ -222,7 +236,26 @@ func (fxt *Fixture) parseMap(params map[string]interface{}, parent string, index
 		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 			data = append(data, fmt.Sprintf("%s=%v", keyname, v.Int()))
 		case reflect.Float32, reflect.Float64:
-			data = append(data, fmt.Sprintf("%s=%v", keyname, v.Float()))
+			/*
+				When converting fixture values to JSON, numeric values
+				reflect as float types. Thus in order to output the correct
+				value we should parse as such:
+
+				10 => 10
+				3.145 => 3.145
+				25.00 => 25
+				20.10 => 20.1
+
+				In order to preserve decimal places but strip them when
+				unnecessary (i.e 1.0), we must use strconv with the special
+				precision value of -1.
+
+				We cannot use %v here because it reverts to %g which uses
+				%e (scientific notation) for larger values otherwise %f
+				(float), which will not strip the decimal places from 4.00
+			*/
+			s64 := strconv.FormatFloat(v.Float(), 'f', -1, 64)
+			data = append(data, fmt.Sprintf("%s=%s", keyname, s64))
 		case reflect.Bool:
 			data = append(data, fmt.Sprintf("%s=%t", keyname, v.Bool()))
 		case reflect.Map:
@@ -268,22 +301,17 @@ func (fxt *Fixture) parseArray(params []interface{}, parent string, index int) [
 }
 
 func (fxt *Fixture) parseQuery(value string) string {
-	// Queries to fill data will start with #$ and contain a : -- search for both
-	// to make sure that we're trying to parse a query.
-	// Additionally look for an optional default value: ${name:json_path|default_value}
-	r := regexp.MustCompile(`\${([^\|]+):([^\|]+)\|?(.+)?}`)
-	if r.Match([]byte(value)) {
-		nameAndQuery := r.FindStringSubmatch(value)
-		name := nameAndQuery[1]
+	if query, isQuery := toFixtureQuery(value); isQuery {
+		name := query.Name
 
 		// Check if there is a default value specified
-		if nameAndQuery[3] != "" {
-			value = nameAndQuery[3]
+		if query.DefaultValue != "" {
+			value = query.DefaultValue
 		}
 
 		// Catch and insert .env values
 		if name == ".env" {
-			key := nameAndQuery[2]
+			key := query.Query
 			// Check if env variable is present
 			envValue := os.Getenv(key)
 			if envValue == "" {
@@ -308,7 +336,7 @@ func (fxt *Fixture) parseQuery(value string) string {
 		// Reset just in case someone else called a query here
 		fxt.responses[name].Reset()
 
-		query := nameAndQuery[2]
+		query := query.Query
 		findResult, err := fxt.responses[name].FindR(query)
 		if err != nil {
 			return value
@@ -356,4 +384,35 @@ func (fxt *Fixture) updateEnv(env map[string]string) error {
 	afero.WriteFile(fxt.Fs, envFile, []byte(content), os.ModePerm)
 
 	return nil
+}
+
+// toFixtureQuery will parse a string into a fixtureQuery struct, additionally
+// returning a bool indicating the value did contain a fixtureQuery.
+func toFixtureQuery(value string) (fixtureQuery, bool) {
+	var query fixtureQuery
+	isQuery := false
+
+	if r, didMatch := matchFixtureQuery(value); didMatch {
+		isQuery = true
+		match := r.FindStringSubmatch(value)
+		query = fixtureQuery{Name: match[1], Query: match[2], DefaultValue: match[3]}
+	}
+
+	return query, isQuery
+}
+
+// matchQuery will attempt to find matches for a fixture query pattern
+// returning a *Regexp which can be used to further parse and a boolean
+// indicating a match was found.
+func matchFixtureQuery(value string) (*regexp.Regexp, bool) {
+	// Queries will start with `${` and end with `}`. The `:` is a
+	// separator for `name:json_path`. Additionally, default value will
+	// be specified after the `|`.
+	// example: ${name:json_path|default_value}
+	r := regexp.MustCompile(`\${([^\|}]+):([^\|}]+)\|?([^/\n]+)?}`)
+	if r.Match([]byte(value)) {
+		return r, true
+	}
+
+	return nil, false
 }
