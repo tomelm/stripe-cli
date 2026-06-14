@@ -1,0 +1,26 @@
+{
+  "id": "one-time-payment-debug",
+  "description": "Validates the eval harness, review gate automation, request-changes recovery, and completion flow with the deterministic debug agent.",
+  "blueprint": "one-time-payment",
+  "language": "node",
+  "fixture": "minimal-node",
+  "agent": "debug",
+  "timeout_seconds": 30,
+  "tags": ["debug", "protocol"],
+  "human_actions": [
+    {
+      "when": "first_review",
+      "action": "request_changes",
+      "note": "Please tighten the checkout path and report concrete verification."
+    },
+    {
+      "when": "next_review",
+      "action": "confirm"
+    },
+    {
+      "when": "completion",
+      "action": "select",
+      "select": "done"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "scripts": {
+    "test": "node server.js"
+  },
+  "dependencies": {}
+}
