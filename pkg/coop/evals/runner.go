@@ -705,7 +705,9 @@ func scoreCase(result *CaseResult, c Case, session *coop.Session, sessionErr err
 	}
 
 	scoreWorkspaceChecks(result, c)
-	scoreImplementationIntegration(result, session)
+	if c.Agent != "debug" {
+		scoreImplementationIntegration(result, session)
+	}
 	result.Scores["overall"] = weightedScore(result.Checks)
 	result.Scores["protocol"] = namedScore(result.Checks, "session_completed", "all_steps_terminal", "reviews_awaited", "request_changes_recovered")
 	result.Scores["evidence"] = namedScore(result.Checks, "review_evidence_present")

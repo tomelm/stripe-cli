@@ -175,6 +175,41 @@ func TestScoreImplementationIntegrationFailsForCLIOnlyWork(t *testing.T) {
 	require.False(t, checkPassed(result.Checks, "app_flow_verified"))
 }
 
+func TestScoreCaseSkipsImplementationIntegrationForDebugAgent(t *testing.T) {
+	result := &CaseResult{
+		Agent:     "debug",
+		Workspace: gitFixtureWorkspace(t),
+		Scores:    map[string]float64{},
+	}
+	session := &coop.Session{
+		Status: coop.SessionCompleted,
+		NextSteps: &coop.NextStepsState{
+			Suggestions: []coop.NextStepSuggestion{{ID: "done", Title: "Done"}},
+		},
+		Chapters: []coop.SessionChapter{{
+			Nodes: []coop.SessionNode{{
+				Type:  coop.NodeAPIRequest,
+				Title: "Create a Checkout Session",
+				State: coop.StepDone,
+				Implementation: &coop.Implementation{
+					File: "README.md",
+					Note: "Debug agent reported work without editing app source",
+				},
+				Verifications: []coop.Verification{{
+					Check:  "stripe checkout sessions create returned a session",
+					Passed: true,
+				}},
+			}},
+		}},
+	}
+
+	scoreCase(result, Case{Agent: "debug"}, session, nil, nil, "")
+
+	require.False(t, hasCheck(result.Checks, "app_source_changed"))
+	require.False(t, hasCheck(result.Checks, "implementation_reports_app_source"))
+	require.False(t, hasCheck(result.Checks, "app_flow_verified"))
+}
+
 func gitFixtureWorkspace(t *testing.T) string {
 	t.Helper()
 	workspace := t.TempDir()
@@ -199,6 +234,15 @@ func checkPassed(checks []CheckResult, name string) bool {
 	for _, check := range checks {
 		if check.Name == name {
 			return check.Passed
+		}
+	}
+	return false
+}
+
+func hasCheck(checks []CheckResult, name string) bool {
+	for _, check := range checks {
+		if check.Name == name {
+			return true
 		}
 	}
 	return false
