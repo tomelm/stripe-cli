@@ -163,6 +163,78 @@ func TestCommandAgentInvocationAllowsSandboxOptOut(t *testing.T) {
 	require.Equal(t, []string{"-c", "codex exec prompt"}, args)
 }
 
+func TestParseJudgeOutputAcceptsFencedJSONAndNormalizesScores(t *testing.T) {
+	result, err := parseJudgeOutput([]byte("```json\n{\"schema_version\":1,\"judge\":\"command:test\",\"case_id\":\"case_1\",\"score\":82,\"confidence\":60,\"passed\":true,\"scores\":{\"implementation_correctness\":75},\"summary\":\"Looks good.\"}\n```"), "command", 0.75)
+
+	require.NoError(t, err)
+	require.Equal(t, "command:test", result.Judge)
+	require.Equal(t, "case_1", result.CaseID)
+	require.True(t, result.Passed)
+	require.InDelta(t, 0.82, result.Score, 0.001)
+	require.InDelta(t, 0.60, result.Confidence, 0.001)
+	require.InDelta(t, 0.75, result.Scores["implementation_correctness"], 0.001)
+	require.Equal(t, judgePromptVersion, result.PromptVersion)
+}
+
+func TestRunJudgeAdvisoryDoesNotAddFailingCheck(t *testing.T) {
+	workspace := t.TempDir()
+	writeFile(t, filepath.Join(workspace, "COOP_EVAL_FIXTURE.md"), "fixture instructions")
+	resultDir := t.TempDir()
+	diffPath := filepath.Join(resultDir, "workspace.diff")
+	writeFile(t, diffPath, "diff --git a/server.js b/server.js\n")
+	result := &CaseResult{
+		ID:        "judge-advisory",
+		Workspace: workspace,
+		Scores:    map[string]float64{"overall": 1},
+		Artifacts: map[string]string{
+			"workspace_diff": diffPath,
+		},
+	}
+	r := NewRunner(Options{
+		Judge: "command",
+		JudgeCommand: `cat > "$COOP_EVAL_JUDGE_OUTPUT_FILE" <<'JSON'
+{"score":0.2,"passed":false,"summary":"Integrated as a side demo.","blocking_issues":["bypasses app flow"]}
+JSON`,
+		JudgeMinScore: 0.75,
+	})
+
+	records, artifacts := r.runJudge(context.Background(), Case{ID: "judge-advisory", Blueprint: "one-time-payment", Fixture: "minimal-node"}, result, workspace, resultDir, os.Environ())
+
+	require.Len(t, records, 1)
+	require.Equal(t, 0, records[0].ExitCode)
+	require.NotNil(t, result.Judge)
+	require.InDelta(t, 0.2, result.Judge.Score, 0.001)
+	require.False(t, result.Judge.Passed)
+	require.False(t, hasCheck(result.Checks, "llm_judge_required"))
+	require.InDelta(t, 0.2, result.Scores["llm_judge"], 0.001)
+	require.FileExists(t, artifacts["judge_prompt"])
+	require.FileExists(t, artifacts["judge_output"])
+}
+
+func TestRunJudgeRequiredAddsGateCheck(t *testing.T) {
+	workspace := t.TempDir()
+	resultDir := t.TempDir()
+	result := &CaseResult{
+		ID:        "judge-required",
+		Workspace: workspace,
+		Scores:    map[string]float64{},
+		Artifacts: map[string]string{},
+	}
+	r := NewRunner(Options{
+		Judge:         "command",
+		JudgeCommand:  `printf '{"score":0.4,"passed":false,"summary":"Not enough app integration."}'`,
+		JudgeRequired: true,
+		JudgeMinScore: 0.75,
+	})
+
+	records, _ := r.runJudge(context.Background(), Case{ID: "judge-required", Blueprint: "one-time-payment"}, result, workspace, resultDir, os.Environ())
+
+	require.Len(t, records, 1)
+	require.NotNil(t, result.Judge)
+	require.True(t, hasCheck(result.Checks, "llm_judge_required"))
+	require.False(t, checkPassed(result.Checks, "llm_judge_required"))
+}
+
 func TestMarkdownSummaryIncludesTimingAndInterruption(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "summary.md")
 	suite := &SuiteResult{
@@ -182,6 +254,12 @@ func TestMarkdownSummaryIncludesTimingAndInterruption(t *testing.T) {
 			AgentDurationMS: 1200,
 			Scores:          map[string]float64{"overall": 1},
 			Checks:          []CheckResult{{Name: "session_completed", Passed: true}},
+			Judge: &JudgeResult{
+				Score:          0.7,
+				Confidence:     0.8,
+				Summary:        "Good shape with one caveat.",
+				BlockingIssues: []string{"webhook not idempotent"},
+			},
 		}},
 	}
 
@@ -195,6 +273,8 @@ func TestMarkdownSummaryIncludesTimingAndInterruption(t *testing.T) {
 	require.Contains(t, summary, "- agent runtime: 2s")
 	require.Contains(t, summary, "- interrupted: context canceled")
 	require.Contains(t, summary, "## PASS metered-subscription-node")
+	require.Contains(t, summary, "- judge: score 0.70 confidence 0.80 - Good shape with one caveat.")
+	require.Contains(t, summary, "- judge blocking issue: webhook not idempotent")
 }
 
 func TestTerminateProcessGroupStopsChildProcess(t *testing.T) {

@@ -37,6 +37,11 @@ type Options struct {
 	StripeBin           string
 	Agent               string
 	AgentCommand        string
+	Judge               string
+	JudgeCommand        string
+	JudgeRequired       bool
+	JudgeMinScore       float64
+	JudgeTimeout        time.Duration
 	CaseIDs             []string
 	Suite               string
 	MinSteps            int
@@ -83,6 +88,12 @@ func (r *Runner) Run(ctx context.Context) (*SuiteResult, error) {
 	}
 	if r.opts.Timeout <= 0 {
 		r.opts.Timeout = defaultTimeout
+	}
+	if r.opts.JudgeMinScore <= 0 {
+		r.opts.JudgeMinScore = 0.75
+	}
+	if r.opts.JudgeTimeout <= 0 {
+		r.opts.JudgeTimeout = 5 * time.Minute
 	}
 	if err := os.MkdirAll(r.opts.ResultsDir, 0755); err != nil {
 		return nil, err
@@ -456,12 +467,18 @@ func (r *Runner) runCase(parent context.Context, c Case, realStripeBin string) C
 	for name, path := range checkArtifacts {
 		result.Artifacts[name] = path
 	}
-	writeCommandLog(resultDir, records)
 
 	if agentErr != nil {
 		result.FailureReason = agentErr.Error()
 	}
 	scoreCase(&result, c, finalSession, readErr, actions, stripeLog)
+	writeCommandLog(resultDir, records)
+	judgeRecords, judgeArtifacts := r.runJudge(ctx, c, &result, workspace, resultDir, env)
+	records = append(records, judgeRecords...)
+	for name, path := range judgeArtifacts {
+		result.Artifacts[name] = path
+	}
+	writeCommandLog(resultDir, records)
 	result.DurationMS = time.Since(start).Milliseconds()
 	result.Passed = checksPassed(result.Checks)
 	if result.FailureReason != "" {
@@ -1848,6 +1865,23 @@ func writeMarkdownSummary(path string, suite *SuiteResult) error {
 		}
 		for _, score := range orderedScores(c.Scores) {
 			fmt.Fprintf(&b, "- %s: %.2f\n", score, c.Scores[score])
+		}
+		if c.Judge != nil {
+			if c.Judge.Error != "" {
+				fmt.Fprintf(&b, "- judge: ERROR %s\n", c.Judge.Error)
+			} else {
+				fmt.Fprintf(&b, "- judge: score %.2f", c.Judge.Score)
+				if c.Judge.Confidence > 0 {
+					fmt.Fprintf(&b, " confidence %.2f", c.Judge.Confidence)
+				}
+				if c.Judge.Summary != "" {
+					fmt.Fprintf(&b, " - %s", c.Judge.Summary)
+				}
+				b.WriteString("\n")
+				for _, issue := range c.Judge.BlockingIssues {
+					fmt.Fprintf(&b, "- judge blocking issue: %s\n", issue)
+				}
+			}
 		}
 		if c.FailureReason != "" {
 			fmt.Fprintf(&b, "- failure: %s\n", c.FailureReason)

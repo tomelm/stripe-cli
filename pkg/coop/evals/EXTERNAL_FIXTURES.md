@@ -68,6 +68,12 @@ step is to harden each smoke script into a true live verification:
 Hosted Checkout is the preferred card-collection path. Evals must not pass full
 card numbers to Stripe APIs.
 
+LLM judging is useful for the app-fit questions that are expensive to encode
+deterministically, such as whether an implementation reused Hive's order flow or
+bolted on a side demo. Use the optional `--judge command` adapter to score those
+semantic qualities, but keep deterministic live verification as the hard
+foundation.
+
 ## Running
 
 Run all external fixture cases:

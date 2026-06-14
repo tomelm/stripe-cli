@@ -95,6 +95,7 @@ type CaseResult struct {
 	Scores          map[string]float64 `json:"scores"`
 	Checks          []CheckResult      `json:"checks"`
 	HumanActions    []DriverAction     `json:"human_actions,omitempty"`
+	Judge           *JudgeResult       `json:"judge,omitempty"`
 	Artifacts       map[string]string  `json:"artifacts"`
 	FailureReason   string             `json:"failure_reason,omitempty"`
 }
@@ -115,6 +116,30 @@ type DriverAction struct {
 	Selected      string    `json:"selected,omitempty"`
 	HeartbeatSeen bool      `json:"heartbeat_seen,omitempty"`
 	At            time.Time `json:"at"`
+}
+
+type JudgeResult struct {
+	SchemaVersion       int                `json:"schema_version,omitempty"`
+	Judge               string             `json:"judge"`
+	Model               string             `json:"model,omitempty"`
+	PromptVersion       string             `json:"prompt_version,omitempty"`
+	CaseID              string             `json:"case_id,omitempty"`
+	Passed              bool               `json:"passed"`
+	Score               float64            `json:"score"`
+	Confidence          float64            `json:"confidence,omitempty"`
+	Scores              map[string]float64 `json:"scores,omitempty"`
+	Summary             string             `json:"summary,omitempty"`
+	Findings            []JudgeFinding     `json:"findings,omitempty"`
+	BlockingIssues      []string           `json:"blocking_issues,omitempty"`
+	RequiresHumanReview bool               `json:"requires_human_review,omitempty"`
+	Error               string             `json:"error,omitempty"`
+}
+
+type JudgeFinding struct {
+	Severity string `json:"severity,omitempty"`
+	Category string `json:"category,omitempty"`
+	Message  string `json:"message"`
+	Evidence string `json:"evidence,omitempty"`
 }
 
 type commandRecord struct {

@@ -74,6 +74,24 @@ case deliberately tests browser-launch behavior.
 Agent stdout/stderr and workspace diffs redact Stripe API-key-shaped values before
 they are written into the final artifact set.
 
+Run with an optional LLM judge:
+
+```sh
+scripts/coop-eval.sh \
+  --case hive-one-time-payment-python \
+  --agent command \
+  --agent-command 'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_PROMPT_FILE")"' \
+  --judge command \
+  --judge-command 'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_JUDGE_PROMPT_FILE")" > "$COOP_EVAL_JUDGE_OUTPUT_FILE"'
+```
+
+The judge is advisory by default. It writes a `judge` block and `llm_judge`
+score, but deterministic checks still decide pass/fail. Use `--judge-required`
+when you want the judge to act as a veto gate with `--judge-min-score`.
+Judge commands must return strict JSON to stdout or
+`$COOP_EVAL_JUDGE_OUTPUT_FILE`. They should exit nonzero only for adapter or
+infrastructure failures, not for a negative verdict.
+
 Each run writes:
 
 ```text
@@ -90,6 +108,10 @@ eval-results/<run-id>/
     agent.stderr.txt
     final-session.json
     fixture.json
+    judge-prompt.txt
+    judge-output.json
+    judge.stdout.txt
+    judge.stderr.txt
     session-history/
     checks/
     workspace/
