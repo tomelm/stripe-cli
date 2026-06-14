@@ -11,6 +11,7 @@ type Case struct {
 	Fixture        string        `json:"fixture"`
 	Agent          string        `json:"agent,omitempty"`
 	Tags           []string      `json:"tags,omitempty"`
+	SkipDefault    bool          `json:"skip_default,omitempty"`
 	TimeoutSeconds int           `json:"timeout_seconds,omitempty"`
 	HumanActions   []HumanAction `json:"human_actions,omitempty"`
 	Checks         CaseChecks    `json:"checks,omitempty"`

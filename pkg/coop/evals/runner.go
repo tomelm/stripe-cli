@@ -155,6 +155,9 @@ func (r *Runner) loadCases() ([]Case, error) {
 		if len(wanted) > 0 && !wanted[c.ID] {
 			continue
 		}
+		if len(wanted) == 0 && c.SkipDefault {
+			continue
+		}
 		if err := validateCase(c, path); err != nil {
 			return nil, err
 		}
@@ -712,8 +715,7 @@ func scoreWorkspaceChecks(result *CaseResult, c Case) {
 		result.Checks = append(result.Checks, CheckResult{Name: "expected_file", Passed: passed, Message: path, Weight: 4})
 	}
 	for _, check := range c.Checks.ExpectedPatterns {
-		full := filepath.Join(result.Workspace, filepath.FromSlash(check.Path))
-		passed := pathContainsPattern(full, check.Pattern)
+		passed := workspacePathContainsPattern(result.Workspace, check.Path, check.Pattern)
 		msg := check.Description
 		if msg == "" {
 			msg = check.Path + " matches " + check.Pattern
@@ -721,8 +723,7 @@ func scoreWorkspaceChecks(result *CaseResult, c Case) {
 		result.Checks = append(result.Checks, CheckResult{Name: "expected_pattern", Passed: passed, Message: msg, Weight: 5})
 	}
 	for _, check := range c.Checks.ForbiddenPatterns {
-		full := filepath.Join(result.Workspace, filepath.FromSlash(check.Path))
-		passed := !pathContainsPattern(full, check.Pattern)
+		passed := !workspacePathContainsPattern(result.Workspace, check.Path, check.Pattern)
 		msg := check.Description
 		if msg == "" {
 			msg = check.Path + " does not match " + check.Pattern
@@ -1090,19 +1091,113 @@ func fileContains(path, needle string) bool {
 	return err == nil && strings.Contains(string(data), needle)
 }
 
-func pathContainsPattern(path, pattern string) bool {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
+func sanitizeFileName(s string) string {
+	replacer := strings.NewReplacer("/", "-", "\\", "-", " ", "-", ":", "-")
+	return replacer.Replace(s)
+}
+
+func workspacePathContainsPattern(workspace, pathSpec, pattern string) bool {
 	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return false
 	}
-	return re.Match(data)
+	paths, err := matchingWorkspaceFiles(workspace, pathSpec)
+	if err != nil {
+		return false
+	}
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if re.Match(data) {
+			return true
+		}
+	}
+	return false
 }
 
-func sanitizeFileName(s string) string {
-	replacer := strings.NewReplacer("/", "-", "\\", "-", " ", "-", ":", "-")
-	return replacer.Replace(s)
+func matchingWorkspaceFiles(workspace, pathSpec string) ([]string, error) {
+	pathSpec = filepath.ToSlash(strings.TrimSpace(pathSpec))
+	if pathSpec == "" {
+		return nil, fmt.Errorf("path spec must not be empty")
+	}
+	if !containsGlobMeta(pathSpec) {
+		return []string{filepath.Join(workspace, filepath.FromSlash(pathSpec))}, nil
+	}
+	re, err := pathSpecRegexp(pathSpec)
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	err = filepath.WalkDir(workspace, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			if shouldSkipEvalScanDir(entry.Name()) && path != workspace {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(workspace, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if re.MatchString(rel) {
+			paths = append(paths, path)
+		}
+		return nil
+	})
+	return paths, err
+}
+
+func containsGlobMeta(pathSpec string) bool {
+	return strings.ContainsAny(pathSpec, "*?[")
+}
+
+func shouldSkipEvalScanDir(name string) bool {
+	switch name {
+	case ".git", "node_modules", "vendor", "dist", "build", "coverage":
+		return true
+	default:
+		return false
+	}
+}
+
+func pathSpecRegexp(pathSpec string) (*regexp.Regexp, error) {
+	var b strings.Builder
+	b.WriteString("^")
+	start := 0
+	if strings.HasPrefix(pathSpec, "**/") {
+		b.WriteString(`(?:.*/)?`)
+		start = 3
+	}
+	for i := start; i < len(pathSpec); i++ {
+		switch pathSpec[i] {
+		case '*':
+			if i+1 < len(pathSpec) && pathSpec[i+1] == '*' {
+				b.WriteString(".*")
+				i++
+			} else {
+				b.WriteString(`[^/]*`)
+			}
+		case '?':
+			b.WriteString(`[^/]`)
+		case '[':
+			end := strings.IndexByte(pathSpec[i+1:], ']')
+			if end < 0 {
+				b.WriteString(`\[`)
+			} else {
+				class := pathSpec[i : i+end+2]
+				b.WriteString(class)
+				i += end + 1
+			}
+		default:
+			b.WriteString(regexp.QuoteMeta(string(pathSpec[i])))
+		}
+	}
+	b.WriteString("$")
+	return regexp.Compile(b.String())
 }
