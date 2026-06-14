@@ -45,6 +45,45 @@ upstream app source is cloned into each result directory and is not committed to
 this repository. See [EXTERNAL_FIXTURES.md](EXTERNAL_FIXTURES.md) for the
 fixture manifest format, current app targets, and the verification roadmap.
 
+Quick rerun recipe for external-app evals with a judge:
+
+```sh
+export PATH="/opt/homebrew/Cellar/docker/29.5.3/bin:/opt/homebrew/bin:$PATH"
+export STRIPE_SECRET_KEY="$(tr -d '\n' < /tmp/stripe-coop-eval-key)"
+
+colima status || colima start
+docker info >/dev/null
+docker-compose version
+```
+
+Run one canary case first:
+
+```sh
+scripts/coop-eval.sh \
+  --case hive-one-time-payment-python \
+  --timeout 60m \
+  --agent command \
+  --agent-command 'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_PROMPT_FILE")"' \
+  --judge command \
+  --judge-command 'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_JUDGE_PROMPT_FILE")" > "$COOP_EVAL_JUDGE_OUTPUT_FILE"'
+```
+
+Run the full external-app suite:
+
+```sh
+scripts/coop-eval.sh \
+  --suite tag:external-fixture \
+  --timeout 60m \
+  --agent command \
+  --agent-command 'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_PROMPT_FILE")"' \
+  --judge command \
+  --judge-command 'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_JUDGE_PROMPT_FILE")" > "$COOP_EVAL_JUDGE_OUTPUT_FILE"'
+```
+
+Set `COOP_EVAL_RUN_DOCKER=1` when you want fixture smoke scripts to start
+Docker services, not just validate Compose configuration and source-level
+integration evidence.
+
 Pass `--timeout` to override a case's `timeout_seconds` value for longer
 real-agent trials.
 

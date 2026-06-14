@@ -76,6 +76,10 @@ foundation.
 
 ## Running
 
+The main quick-run recipes, including the canary run, full external suite, judge
+adapter, temp key file, and Docker/Colima preflight are in
+[`README.md`](README.md).
+
 Run all external fixture cases:
 
 ```sh
