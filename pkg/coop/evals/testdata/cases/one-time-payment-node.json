@@ -1,0 +1,117 @@
+{
+  "id": "one-time-payment-node",
+  "description": "Runs the one-time-payment blueprint with a real agent against the minimal Node fixture and scores workspace-level integration correctness.",
+  "blueprint": "one-time-payment",
+  "language": "node",
+  "fixture": "minimal-node",
+  "agent": "command",
+  "skip_default": true,
+  "timeout_seconds": 1800,
+  "tags": ["real-agent", "node", "correctness"],
+  "human_actions": [
+    {
+      "when": "first_review",
+      "action": "request_changes",
+      "note": "Please tighten the checkout path and report concrete verification."
+    },
+    {
+      "when": "next_review",
+      "action": "confirm"
+    },
+    {
+      "when": "completion",
+      "action": "select",
+      "select": "done"
+    }
+  ],
+  "checks": {
+    "expected_files": [
+      "package.json",
+      "server.js"
+    ],
+    "expected_patterns": [
+      {
+        "path": "package.json",
+        "pattern": "\"stripe\"\\s*:",
+        "description": "Node Stripe SDK is declared as a dependency"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "require\\(['\"]stripe['\"]\\)|from ['\"]stripe['\"]",
+        "description": "integration imports the Stripe SDK"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "checkout\\.sessions\\.create",
+        "description": "integration creates a Checkout Session"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "mode\\s*:\\s*['\"]payment['\"]",
+        "description": "Checkout Session uses payment mode"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "line_items\\s*:",
+        "description": "Checkout Session includes line items"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "success_url\\s*:",
+        "description": "Checkout Session configures a success URL"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "cancel_url\\s*:",
+        "description": "Checkout Session configures a cancel URL"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "webhooks\\.constructEvent",
+        "description": "webhook endpoint verifies Stripe signatures"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "checkout\\.session\\.completed",
+        "description": "webhook handler processes checkout.session.completed"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "process\\.env\\.STRIPE_SECRET_KEY|process\\.env\\[['\"]STRIPE_SECRET_KEY['\"]\\]",
+        "description": "secret key is read from environment"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "process\\.env\\.STRIPE_WEBHOOK_SECRET|process\\.env\\[['\"]STRIPE_WEBHOOK_SECRET['\"]\\]",
+        "description": "webhook secret is read from environment"
+      },
+      {
+        "path": "server.js",
+        "pattern": "/success",
+        "description": "app exposes a success route"
+      },
+      {
+        "path": "server.js",
+        "pattern": "/cancel",
+        "description": "app exposes a cancel route"
+      }
+    ],
+    "forbidden_patterns": [
+      {
+        "path": "**/*",
+        "pattern": "\\b(?:rkcs|rk|sk|pk)_(?:test|live)_[A-Za-z0-9_]+\\b",
+        "description": "workspace does not contain hardcoded Stripe API keys"
+      },
+      {
+        "path": "**/*",
+        "pattern": "\\bwhsec_[A-Za-z0-9_]+\\b",
+        "description": "workspace does not contain hardcoded webhook secrets"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "https://example\\.com/(success|cancel)",
+        "description": "integration does not leave placeholder redirect URLs in code"
+      }
+    ]
+  }
+}

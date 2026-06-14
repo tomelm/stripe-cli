@@ -23,12 +23,16 @@ scripts/coop-eval.sh --case one-time-payment-debug
 Pass `--timeout` to override a case's `timeout_seconds` value for longer
 real-agent trials.
 
+Cases with `skip_default: true` are skipped unless selected with `--case`.
+
 Run with an external agent command:
 
 ```sh
 scripts/coop-eval.sh \
+  --case one-time-payment-node \
+  --timeout 30m \
   --agent command \
-  --agent-command 'codex exec --dangerously-bypass-approvals-and-sandbox "$(cat "$COOP_EVAL_PROMPT_FILE")"'
+  --agent-command 'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_PROMPT_FILE")"'
 ```
 
 The external command runs inside the fixture workspace. The runner puts a
