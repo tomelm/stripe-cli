@@ -1,0 +1,107 @@
+{
+  "id": "invoice-payments-node",
+  "description": "Runs the invoice-payments blueprint with a real agent against the minimal Node fixture and scores hosted invoice payment integration correctness.",
+  "blueprint": "invoice-payments",
+  "language": "node",
+  "fixture": "minimal-node",
+  "agent": "command",
+  "skip_default": true,
+  "timeout_seconds": 2400,
+  "tags": ["real-agent", "node", "correctness", "complex-blueprint"],
+  "human_actions": [
+    {
+      "when": "first_review",
+      "action": "confirm"
+    },
+    {
+      "when": "completion",
+      "action": "select",
+      "select": "done"
+    }
+  ],
+  "checks": {
+    "expected_files": [
+      "package.json",
+      "server.js"
+    ],
+    "expected_patterns": [
+      {
+        "path": "package.json",
+        "pattern": "\"stripe\"\\s*:",
+        "description": "Node Stripe SDK is declared as a dependency"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "require\\(['\"]stripe['\"]\\)|from ['\"]stripe['\"]",
+        "description": "integration imports the Stripe SDK"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "products\\.create|/v1/products",
+        "description": "integration creates a Stripe product"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "customers\\.create|/v1/customers",
+        "description": "integration creates a Stripe customer"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "invoices\\.create|/v1/invoices",
+        "description": "integration creates an invoice"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "invoiceItems\\.create|invoiceitems|/v1/invoiceitems",
+        "description": "integration adds an invoice item"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "sendInvoice|/send",
+        "description": "integration sends the invoice"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "hosted_invoice_url|invoice_pdf|invoice_url",
+        "description": "integration exposes a hosted invoice payment URL"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "webhooks\\.constructEvent",
+        "description": "webhook endpoint verifies Stripe signatures"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "invoice\\.paid",
+        "description": "webhook handler processes invoice.paid"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "process\\.env\\.STRIPE_SECRET_KEY|process\\.env\\[['\"]STRIPE_SECRET_KEY['\"]\\]",
+        "description": "secret key is read from environment"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "process\\.env\\.STRIPE_WEBHOOK_SECRET|process\\.env\\[['\"]STRIPE_WEBHOOK_SECRET['\"]\\]",
+        "description": "webhook secret is read from environment"
+      }
+    ],
+    "forbidden_patterns": [
+      {
+        "path": "**/*",
+        "pattern": "\\b(?:rkcs|rk|sk|pk)_(?:test|live)_[A-Za-z0-9_]+\\b",
+        "description": "workspace does not contain hardcoded Stripe API keys"
+      },
+      {
+        "path": "**/*",
+        "pattern": "\\bwhsec_[A-Za-z0-9_]+\\b",
+        "description": "workspace does not contain hardcoded webhook secrets"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "https://example\\.com|localhost:4242",
+        "description": "integration does not leave placeholder URLs in code"
+      }
+    ]
+  }
+}

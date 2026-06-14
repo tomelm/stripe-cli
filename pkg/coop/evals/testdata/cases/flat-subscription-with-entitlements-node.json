@@ -1,0 +1,117 @@
+{
+  "id": "flat-subscription-with-entitlements-node",
+  "description": "Runs the flat-subscription-with-entitlements blueprint with a real agent against the minimal Node fixture and scores subscription plus entitlement integration correctness.",
+  "blueprint": "flat-subscription-with-entitlements",
+  "language": "node",
+  "fixture": "minimal-node",
+  "agent": "command",
+  "skip_default": true,
+  "timeout_seconds": 3000,
+  "tags": ["real-agent", "node", "correctness", "complex-blueprint"],
+  "human_actions": [
+    {
+      "when": "first_review",
+      "action": "confirm"
+    },
+    {
+      "when": "completion",
+      "action": "select",
+      "select": "done"
+    }
+  ],
+  "checks": {
+    "expected_files": [
+      "package.json",
+      "server.js"
+    ],
+    "expected_patterns": [
+      {
+        "path": "package.json",
+        "pattern": "\"stripe\"\\s*:",
+        "description": "Node Stripe SDK is declared as a dependency"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "require\\(['\"]stripe['\"]\\)|from ['\"]stripe['\"]",
+        "description": "integration imports the Stripe SDK"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "products\\.create|/v1/products",
+        "description": "integration creates a subscription product"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "entitlements|features",
+        "description": "integration creates or attaches entitlement features"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "testHelpers|test_helpers|test_clock",
+        "description": "integration uses test clocks for subscription testing"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "customers\\.create|/v1/customers",
+        "description": "integration creates a Stripe customer"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "checkout\\.sessions\\.create",
+        "description": "integration creates a Checkout Session"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "mode\\s*:\\s*['\"]subscription['\"]",
+        "description": "Checkout Session uses subscription mode"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "webhooks\\.constructEvent",
+        "description": "webhook endpoint verifies Stripe signatures"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "customer\\.subscription\\.created",
+        "description": "webhook handler processes customer.subscription.created"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "entitlements\\.active_entitlement_summary\\.updated",
+        "description": "webhook handler processes entitlement summary updates"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "invoice\\.created",
+        "description": "webhook handler processes invoice.created"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "process\\.env\\.STRIPE_SECRET_KEY|process\\.env\\[['\"]STRIPE_SECRET_KEY['\"]\\]",
+        "description": "secret key is read from environment"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "process\\.env\\.STRIPE_WEBHOOK_SECRET|process\\.env\\[['\"]STRIPE_WEBHOOK_SECRET['\"]\\]",
+        "description": "webhook secret is read from environment"
+      }
+    ],
+    "forbidden_patterns": [
+      {
+        "path": "**/*",
+        "pattern": "\\b(?:rkcs|rk|sk|pk)_(?:test|live)_[A-Za-z0-9_]+\\b",
+        "description": "workspace does not contain hardcoded Stripe API keys"
+      },
+      {
+        "path": "**/*",
+        "pattern": "\\bwhsec_[A-Za-z0-9_]+\\b",
+        "description": "workspace does not contain hardcoded webhook secrets"
+      },
+      {
+        "path": "**/*.js",
+        "pattern": "https://example\\.com/(success|cancel)|localhost:4242",
+        "description": "integration does not leave placeholder redirect URLs in code"
+      }
+    ]
+  }
+}
