@@ -74,7 +74,9 @@ func TestStripeShimBlocksLoginAndBrowserOpen(t *testing.T) {
 
 func TestRedactSensitiveArtifactsRedactsAuthURLs(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "artifact.txt")
-	artifact := `key=sk_test_123
+	artifact := "ansi_key=\x1b[1msk_test_ansi123\x1b[0m\n" +
+		"webhook_secret=\x1b[1mwhsec_123abc\x1b[0m\n" +
+		`key=sk_test_123
 browser_url=https://dashboard.stripe.com/stripecli/confirm_auth?t=confirmSecret123
 escaped_url=https://dashboard.stripe.com/stripecli/confirm_auth\?t=escapedSecret123
 next_step=stripe login --complete 'https://dashboard.stripe.com/stripecli/auth/cliauth_abc123?secret=pollSecret123'
@@ -87,6 +89,8 @@ next_step=stripe login --complete 'https://dashboard.stripe.com/stripecli/auth/c
 	require.NoError(t, err)
 	redacted := string(data)
 	require.NotContains(t, redacted, "sk_test_123")
+	require.NotContains(t, redacted, "sk_test_ansi123")
+	require.NotContains(t, redacted, "whsec_123abc")
 	require.NotContains(t, redacted, "confirmSecret123")
 	require.NotContains(t, redacted, "escapedSecret123")
 	require.NotContains(t, redacted, "cliauth_abc123")

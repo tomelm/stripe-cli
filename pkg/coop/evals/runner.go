@@ -1111,8 +1111,8 @@ func redactSensitiveArtifacts(paths ...string) {
 		pattern     *regexp.Regexp
 		replacement []byte
 	}{
-		{regexp.MustCompile(`\b(?:rkcs|rk|sk|pk)_(?:test|live)_[A-Za-z0-9_]+\b`), []byte("[redacted]")},
-		{regexp.MustCompile(`\bwhsec_[A-Za-z0-9_]+\b`), []byte("[redacted]")},
+		{regexp.MustCompile(`(?:rkcs|rk|sk|pk)_(?:test|live)_[A-Za-z0-9_]+`), []byte("[redacted]")},
+		{regexp.MustCompile(`whsec_[A-Za-z0-9_]+`), []byte("[redacted]")},
 		{regexp.MustCompile(`(/stripecli/auth/)cliauth_[A-Za-z0-9_%-]+`), []byte("$1[redacted]")},
 		{regexp.MustCompile(`(confirm_auth(?:\\)?\?t=)[A-Za-z0-9_%-]+`), []byte("$1[redacted]")},
 		{regexp.MustCompile(`(secret=)[A-Za-z0-9_%-]+`), []byte("$1[redacted]")},
