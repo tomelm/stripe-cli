@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -249,8 +250,13 @@ func (r *Runner) runCase(parent context.Context, c Case, realStripeBin string) C
 		return failCase(result, start, err)
 	}
 	shimStripe := filepath.Join(shimDir, "stripe")
+	port, err := reserveEvalPort()
+	if err != nil {
+		return failCase(result, start, err)
+	}
+	result.Port = port
 
-	env := evalEnv(xdgHome, homeDir, shimDir, realStripeBin, stripeLog)
+	env := evalEnv(xdgHome, homeDir, shimDir, realStripeBin, stripeLog, port)
 	records := []commandRecord{}
 	startStdout := filepath.Join(resultDir, "coop-run.stdout.json")
 	startStderr := filepath.Join(resultDir, "coop-run.stderr.txt")
@@ -745,6 +751,7 @@ Work in the current directory. Use the "stripe" command from PATH; it is a local
 Follow the co-op JSON response exactly. Run the "next" command, continue following each JSON response's "next" field, and await human review when instructed. Do not bypass review gates.
 The runner isolates HOME and XDG_CONFIG_HOME for this eval. Do not read ~/.config/stripe, ~/.stripe, or other host machine config. If a local SDK command needs a Stripe key, use the eval-scoped config under $XDG_CONFIG_HOME/stripe/config.toml.
 Avoid scanning generated dependency trees such as node_modules, vendor, dist, build, or coverage directories.
+Use the eval-provided PORT environment variable for any local server. Do not hardcode localhost:4242 unless PORT is 4242.
 
 Eval case: %s
 Blueprint: %s
@@ -754,7 +761,7 @@ Initial co-op response:
 `, c.ID, c.Blueprint, string(data))
 }
 
-func evalEnv(xdgHome, homeDir, shimDir, realStripeBin, stripeLog string) []string {
+func evalEnv(xdgHome, homeDir, shimDir, realStripeBin, stripeLog string, port int) []string {
 	env := append([]string{}, os.Environ()...)
 	hostHome := os.Getenv("HOME")
 	codexHome := os.Getenv("CODEX_HOME")
@@ -767,12 +774,27 @@ func evalEnv(xdgHome, homeDir, shimDir, realStripeBin, stripeLog string) []strin
 		"COOP_EVAL_HOST_HOME="+hostHome,
 		"COOP_EVAL_REAL_STRIPE="+realStripeBin,
 		"COOP_EVAL_STRIPE_LOG="+stripeLog,
+		fmt.Sprintf("COOP_EVAL_PORT=%d", port),
+		fmt.Sprintf("PORT=%d", port),
 		"PATH="+shimDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
 	if codexHome != "" {
 		env = append(env, "CODEX_HOME="+codexHome)
 	}
 	return env
+}
+
+func reserveEvalPort() (int, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	defer listener.Close()
+	addr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		return 0, fmt.Errorf("unexpected listener address %T", listener.Addr())
+	}
+	return addr.Port, nil
 }
 
 func runLoggedCommand(ctx context.Context, name string, args []string, cwd string, env []string, stdoutPath, stderrPath string) commandRecord {

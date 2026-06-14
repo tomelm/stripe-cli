@@ -109,7 +109,7 @@
       },
       {
         "path": "**/*.js",
-        "pattern": "https://example\\.com/(success|cancel)",
+        "pattern": "https://example\\.com/(success|cancel)|localhost:4242",
         "description": "integration does not leave placeholder redirect URLs in code"
       }
     ]

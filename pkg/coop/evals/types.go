@@ -50,6 +50,7 @@ type CaseResult struct {
 	Passed        bool               `json:"passed"`
 	DurationMS    int64              `json:"duration_ms"`
 	SessionID     string             `json:"session_id,omitempty"`
+	Port          int                `json:"port,omitempty"`
 	Workspace     string             `json:"workspace"`
 	ResultDir     string             `json:"result_dir"`
 	Scores        map[string]float64 `json:"scores"`
