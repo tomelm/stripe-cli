@@ -707,15 +707,19 @@ func scoreCase(result *CaseResult, c Case, session *coop.Session, sessionErr err
 	scoreWorkspaceChecks(result, c)
 	if c.Agent != "debug" {
 		scoreImplementationIntegration(result, session)
+		scoreEvalHygiene(result, session, stripeLog)
 	}
 	result.Scores["overall"] = weightedScore(result.Checks)
 	result.Scores["protocol"] = namedScore(result.Checks, "session_completed", "all_steps_terminal", "reviews_awaited", "request_changes_recovered")
 	result.Scores["evidence"] = namedScore(result.Checks, "review_evidence_present")
-	if hasNamedChecks(result.Checks, "app_source_changed", "implementation_reports_app_source", "app_flow_verified") {
-		result.Scores["implementation"] = namedScore(result.Checks, "app_source_changed", "implementation_reports_app_source", "app_flow_verified")
+	if hasNamedChecks(result.Checks, "app_source_changed", "implementation_reports_app_source", "app_flow_verified", "async_events_reported") {
+		result.Scores["implementation"] = namedScore(result.Checks, "app_source_changed", "implementation_reports_app_source", "app_flow_verified", "async_events_reported")
+	}
+	if hasNamedChecks(result.Checks, "stripe_commands_use_eval_port", "stripe_commands_avoid_raw_card_numbers") {
+		result.Scores["eval_hygiene"] = namedScore(result.Checks, "stripe_commands_use_eval_port", "stripe_commands_avoid_raw_card_numbers")
 	}
 	if hasNamedChecks(result.Checks, "expected_file", "expected_pattern", "forbidden_pattern", "app_source_changed", "implementation_reports_app_source", "app_flow_verified") {
-		result.Scores["blueprint_correctness"] = namedScore(result.Checks, "expected_file", "expected_pattern", "forbidden_pattern", "app_source_changed", "implementation_reports_app_source", "app_flow_verified")
+		result.Scores["blueprint_correctness"] = namedScore(result.Checks, "expected_file", "expected_pattern", "forbidden_pattern", "app_source_changed", "implementation_reports_app_source", "app_flow_verified", "async_events_reported")
 	}
 }
 
@@ -783,6 +787,142 @@ func scoreImplementationIntegration(result *CaseResult, session *coop.Session) {
 		Message: "verification should exercise the app, not only direct Stripe CLI/API calls",
 		Weight:  6,
 	})
+}
+
+func scoreEvalHygiene(result *CaseResult, session *coop.Session, stripeLog string) {
+	scoreRawCardCommands(result, stripeLog)
+	scoreStripeCommandPort(result, session, stripeLog)
+	scoreAsyncEventEvidence(result, session)
+}
+
+func scoreRawCardCommands(result *CaseResult, stripeLog string) {
+	data, err := os.ReadFile(stripeLog)
+	if err != nil {
+		return
+	}
+	log := string(data)
+	result.Checks = append(result.Checks, CheckResult{
+		Name:    "stripe_commands_avoid_raw_card_numbers",
+		Passed:  !stripeLogContainsRawCardAttempt(log),
+		Message: "Stripe API calls must not pass full card numbers; use hosted/client-side payment collection or test PaymentMethod IDs",
+		Weight:  8,
+	})
+}
+
+func stripeLogContainsRawCardAttempt(log string) bool {
+	rawCardMarkers := []string{
+		"blocked=raw_card_number",
+		"card[number]",
+		`card\[number\]`,
+		"card.number",
+	}
+	for _, marker := range rawCardMarkers {
+		if strings.Contains(log, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func scoreStripeCommandPort(result *CaseResult, session *coop.Session, stripeLog string) {
+	if !sessionHasAsyncEvents(session) {
+		return
+	}
+	data, err := os.ReadFile(stripeLog)
+	if err != nil {
+		return
+	}
+	log := string(data)
+	if !strings.Contains(log, "forward-to") {
+		return
+	}
+	result.Checks = append(result.Checks, CheckResult{
+		Name:    "stripe_commands_use_eval_port",
+		Passed:  !usesHardcodedForwardToPort(log, result.Port),
+		Message: fmt.Sprintf("Stripe listen commands should forward to the eval PORT=%d, not a hardcoded app port", result.Port),
+		Weight:  4,
+	})
+}
+
+func usesHardcodedForwardToPort(log string, evalPort int) bool {
+	if evalPort == 4242 {
+		return false
+	}
+	patterns := []string{
+		"--forward-to localhost:4242",
+		"--forward-to 127.0.0.1:4242",
+		"--forward-to http://localhost:4242",
+		"--forward-to http://127.0.0.1:4242",
+		"forward-to localhost:4242",
+		"forward-to 127.0.0.1:4242",
+		"forward-to http://localhost:4242",
+		"forward-to http://127.0.0.1:4242",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(log, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func scoreAsyncEventEvidence(result *CaseResult, session *coop.Session) {
+	var missing []string
+	for _, ch := range session.Chapters {
+		for _, node := range ch.Nodes {
+			if !isActiveAsyncEventNode(node) {
+				continue
+			}
+			for _, event := range node.Events {
+				if !nodeEvidenceMentions(node, event) {
+					missing = append(missing, fmt.Sprintf("%s: %s", node.Title, event))
+				}
+			}
+		}
+	}
+	if !sessionHasAsyncEvents(session) {
+		return
+	}
+	result.Checks = append(result.Checks, CheckResult{
+		Name:    "async_events_reported",
+		Passed:  len(missing) == 0,
+		Message: strings.Join(missing, ", "),
+		Weight:  6,
+	})
+}
+
+func sessionHasAsyncEvents(session *coop.Session) bool {
+	for _, ch := range session.Chapters {
+		for _, node := range ch.Nodes {
+			if isActiveAsyncEventNode(node) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isActiveAsyncEventNode(node coop.SessionNode) bool {
+	return node.Type == coop.NodeAsyncHandler && node.State != coop.StepSkipped && len(node.Events) > 0
+}
+
+func nodeEvidenceMentions(node coop.SessionNode, event string) bool {
+	event = strings.ToLower(strings.TrimSpace(event))
+	if event == "" {
+		return true
+	}
+	var evidence strings.Builder
+	if node.Implementation != nil {
+		evidence.WriteString(" ")
+		evidence.WriteString(node.Implementation.Snippet)
+		evidence.WriteString(" ")
+		evidence.WriteString(node.Implementation.Note)
+	}
+	for _, verification := range node.Verifications {
+		evidence.WriteString(" ")
+		evidence.WriteString(verification.Check)
+	}
+	return strings.Contains(strings.ToLower(evidence.String()), event)
 }
 
 func sessionRequiresAppImplementation(session *coop.Session) bool {
@@ -956,6 +1096,7 @@ Follow the co-op JSON response exactly. Run the "next" command, continue followi
 The runner isolates HOME and XDG_CONFIG_HOME for this eval. Do not read ~/.config/stripe, ~/.stripe, or other host machine config. If a local SDK command needs a Stripe key, use the eval-scoped config under $XDG_CONFIG_HOME/stripe/config.toml.
 Avoid scanning generated dependency trees such as node_modules, vendor, dist, build, or coverage directories.
 Use the eval-provided PORT environment variable for any local server. Do not hardcode localhost:4242 unless PORT is 4242.
+Never pass full card numbers to Stripe's API. Do not run commands like "stripe payment_methods create -d card[number]=..."; use hosted Checkout or client-side Stripe integrations for card collection, and use test PaymentMethod IDs such as pm_card_visa only when an API explicitly requires an existing payment method.
 Browser-based auth is disabled in this eval. Do not run stripe login or complete Dashboard auth URLs; if sandbox provisioning cannot complete without browser auth, continue with local implementation and checks that do not require credentials.
 
 Eval case: %s
@@ -1066,6 +1207,16 @@ set +e
   printf '%%q ' "$@"
   printf '\n'
 } >> %q
+for arg in "$@"; do
+  case "$arg" in
+    *'card[number]'*|*'card.number'*|*4242424242424242*|*4000000000000002*|*4000000000009995*|*5555555555554444*|*378282246310005*)
+      printf 'Full card numbers are disabled inside co-op evals. Use hosted/client-side Stripe collection or a test PaymentMethod ID such as pm_card_visa.\n' >&2
+      status=126
+      printf 'time=%%s exit=%%s blocked=raw_card_number\n' "$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)" "$status" >> %q
+      exit "$status"
+      ;;
+  esac
+done
 if [[ "${1:-}" == "login" ]]; then
   printf 'stripe login is disabled inside co-op evals; use local checks or eval-scoped config instead.\n' >&2
   status=126
@@ -1076,7 +1227,7 @@ fi
 status=$?
 printf 'time=%%s exit=%%s\n' "$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)" "$status" >> %q
 exit "$status"
-`, logPath, logPath, realStripeBin, logPath)
+`, logPath, logPath, logPath, realStripeBin, logPath)
 	if err := os.WriteFile(filepath.Join(dir, "stripe"), []byte(script), 0755); err != nil {
 		return err
 	}
@@ -1113,6 +1264,8 @@ func redactSensitiveArtifacts(paths ...string) {
 	}{
 		{regexp.MustCompile(`(?:rkcs|rk|sk|pk)_(?:test|live)_[A-Za-z0-9_]+`), []byte("[redacted]")},
 		{regexp.MustCompile(`whsec_[A-Za-z0-9_]+`), []byte("[redacted]")},
+		{regexp.MustCompile(`card\\?\[number\\?\]=[^\s'"]+`), []byte("card[number]=[redacted-card-number]")},
+		{regexp.MustCompile(`\b(?:4242424242424242|4000000000000002|4000000000009995|5555555555554444|378282246310005)\b`), []byte("[redacted-card-number]")},
 		{regexp.MustCompile(`(/stripecli/auth/)cliauth_[A-Za-z0-9_%-]+`), []byte("$1[redacted]")},
 		{regexp.MustCompile(`(confirm_auth(?:\\)?\?t=)[A-Za-z0-9_%-]+`), []byte("$1[redacted]")},
 		{regexp.MustCompile(`(secret=)[A-Za-z0-9_%-]+`), []byte("$1[redacted]")},

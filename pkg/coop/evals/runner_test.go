@@ -61,6 +61,14 @@ func TestStripeShimBlocksLoginAndBrowserOpen(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "whoami\n", string(realCalled))
 
+	rawCardCmd := exec.Command(stripePath, "payment_methods", "create", "--type", "card", "-d", "card[number]=4242424242424242")
+	rawCardOutput, err := rawCardCmd.CombinedOutput()
+	require.Error(t, err)
+	require.Contains(t, string(rawCardOutput), "Full card numbers are disabled inside co-op evals")
+	realCalled, err = os.ReadFile(realCalledPath)
+	require.NoError(t, err)
+	require.Equal(t, "whoami\n", string(realCalled))
+
 	openCmd := exec.Command(filepath.Join(dir, "open"), "https://dashboard.stripe.com")
 	openOutput, err := openCmd.CombinedOutput()
 	require.Error(t, err)
@@ -69,6 +77,7 @@ func TestStripeShimBlocksLoginAndBrowserOpen(t *testing.T) {
 	logData, err := os.ReadFile(logPath)
 	require.NoError(t, err)
 	require.Contains(t, string(logData), "blocked=login")
+	require.Contains(t, string(logData), "blocked=raw_card_number")
 	require.Contains(t, string(logData), "browser-blocked=open")
 }
 
@@ -76,6 +85,7 @@ func TestRedactSensitiveArtifactsRedactsAuthURLs(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "artifact.txt")
 	artifact := "ansi_key=\x1b[1msk_test_ansi123\x1b[0m\n" +
 		"webhook_secret=\x1b[1mwhsec_123abc\x1b[0m\n" +
+		"raw_card=card\\[number\\]=4242424242424242\n" +
 		`key=sk_test_123
 browser_url=https://dashboard.stripe.com/stripecli/confirm_auth?t=confirmSecret123
 escaped_url=https://dashboard.stripe.com/stripecli/confirm_auth\?t=escapedSecret123
@@ -91,6 +101,7 @@ next_step=stripe login --complete 'https://dashboard.stripe.com/stripecli/auth/c
 	require.NotContains(t, redacted, "sk_test_123")
 	require.NotContains(t, redacted, "sk_test_ansi123")
 	require.NotContains(t, redacted, "whsec_123abc")
+	require.NotContains(t, redacted, "4242424242424242")
 	require.NotContains(t, redacted, "confirmSecret123")
 	require.NotContains(t, redacted, "escapedSecret123")
 	require.NotContains(t, redacted, "cliauth_abc123")
@@ -98,6 +109,7 @@ next_step=stripe login --complete 'https://dashboard.stripe.com/stripecli/auth/c
 	require.Contains(t, redacted, "confirm_auth?t=[redacted]")
 	require.Contains(t, redacted, `confirm_auth\?t=[redacted]`)
 	require.Contains(t, redacted, "/stripecli/auth/[redacted]?secret=[redacted]")
+	require.Contains(t, redacted, "card[number]=[redacted-card-number]")
 }
 
 func TestRedactResultArtifactsSkipsWorkspace(t *testing.T) {
@@ -177,6 +189,59 @@ func TestScoreImplementationIntegrationFailsForCLIOnlyWork(t *testing.T) {
 	require.False(t, checkPassed(result.Checks, "app_source_changed"))
 	require.False(t, checkPassed(result.Checks, "implementation_reports_app_source"))
 	require.False(t, checkPassed(result.Checks, "app_flow_verified"))
+}
+
+func TestScoreEvalHygieneFlagsUnsafeStripeCommands(t *testing.T) {
+	stripeLog := filepath.Join(t.TempDir(), "stripe.log")
+	require.NoError(t, os.WriteFile(stripeLog, []byte("args=listen --forward-to localhost:4242/webhook\nblocked=raw_card_number\n"), 0644))
+	result := &CaseResult{Port: 53535}
+	session := &coop.Session{
+		Chapters: []coop.SessionChapter{{
+			Nodes: []coop.SessionNode{{
+				Type:   coop.NodeAsyncHandler,
+				Title:  "Handle invoice.created",
+				State:  coop.StepDone,
+				Events: []string{"invoice.created"},
+				Implementation: &coop.Implementation{
+					Note: "Handles invoice.created",
+				},
+			}},
+		}},
+	}
+
+	scoreEvalHygiene(result, session, stripeLog)
+
+	require.False(t, checkPassed(result.Checks, "stripe_commands_avoid_raw_card_numbers"))
+	require.False(t, checkPassed(result.Checks, "stripe_commands_use_eval_port"))
+	require.True(t, checkPassed(result.Checks, "async_events_reported"))
+}
+
+func TestScoreEvalHygieneRequiresAsyncEventEvidence(t *testing.T) {
+	stripeLog := filepath.Join(t.TempDir(), "stripe.log")
+	require.NoError(t, os.WriteFile(stripeLog, nil, 0644))
+	result := &CaseResult{Port: 53535}
+	session := &coop.Session{
+		Chapters: []coop.SessionChapter{{
+			Nodes: []coop.SessionNode{{
+				Type:   coop.NodeAsyncHandler,
+				Title:  "Handle webhooks",
+				State:  coop.StepDone,
+				Events: []string{"customer.subscription.created", "invoice.created"},
+				Implementation: &coop.Implementation{
+					Note: "Handles customer.subscription.created",
+				},
+				Verifications: []coop.Verification{{
+					Check:  "Triggered customer.subscription.created through the local webhook route",
+					Passed: true,
+				}},
+			}},
+		}},
+	}
+
+	scoreEvalHygiene(result, session, stripeLog)
+
+	require.False(t, checkPassed(result.Checks, "async_events_reported"))
+	require.True(t, checkPassed(result.Checks, "stripe_commands_avoid_raw_card_numbers"))
 }
 
 func TestScoreCaseSkipsImplementationIntegrationForDebugAgent(t *testing.T) {
