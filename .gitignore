@@ -1,6 +1,7 @@
 dist/
 bin/
 coverage.txt
+eval-results/
 /stripe
 /stripe-darwin
 /stripe-linux
