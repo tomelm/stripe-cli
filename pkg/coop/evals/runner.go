@@ -215,6 +215,7 @@ func (r *Runner) runCase(parent context.Context, c Case, realStripeBin string) C
 	if err := os.MkdirAll(resultDir, 0755); err != nil {
 		return failCase(result, start, err)
 	}
+	defer redactResultArtifacts(resultDir)
 	_ = writeJSON(filepath.Join(resultDir, "case.json"), c)
 
 	timeout := r.opts.Timeout
@@ -942,8 +943,24 @@ func redactSensitiveArtifacts(paths ...string) {
 }
 
 func redactSensitiveArtifactsInDir(dir string) {
+	redactSensitiveArtifactsInDirSkipping(dir, nil)
+}
+
+func redactResultArtifacts(resultDir string) {
+	redactSensitiveArtifactsInDirSkipping(resultDir, map[string]bool{
+		"workspace": true,
+	})
+}
+
+func redactSensitiveArtifactsInDirSkipping(dir string, skipDirs map[string]bool) {
 	_ = filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
-		if err != nil || entry.IsDir() {
+		if err != nil {
+			return nil
+		}
+		if entry.IsDir() && skipDirs[entry.Name()] {
+			return filepath.SkipDir
+		}
+		if entry.IsDir() {
 			return nil
 		}
 		redactSensitiveArtifacts(path)

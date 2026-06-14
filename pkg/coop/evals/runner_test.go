@@ -93,3 +93,23 @@ next_step=stripe login --complete 'https://dashboard.stripe.com/stripecli/auth/c
 	require.Contains(t, redacted, `confirm_auth\?t=[redacted]`)
 	require.Contains(t, redacted, "/stripecli/auth/[redacted]?secret=[redacted]")
 }
+
+func TestRedactResultArtifactsSkipsWorkspace(t *testing.T) {
+	resultDir := t.TempDir()
+	artifactPath := filepath.Join(resultDir, "agent.stderr.txt")
+	workspacePath := filepath.Join(resultDir, "workspace", "server.js")
+	require.NoError(t, os.WriteFile(artifactPath, []byte("https://dashboard.stripe.com/stripecli/confirm_auth?t=confirmSecret123\n"), 0644))
+	require.NoError(t, os.MkdirAll(filepath.Dir(workspacePath), 0755))
+	require.NoError(t, os.WriteFile(workspacePath, []byte("const key = 'sk_test_123'\n"), 0644))
+
+	redactResultArtifacts(resultDir)
+
+	artifactData, err := os.ReadFile(artifactPath)
+	require.NoError(t, err)
+	require.NotContains(t, string(artifactData), "confirmSecret123")
+	require.Contains(t, string(artifactData), "confirm_auth?t=[redacted]")
+
+	workspaceData, err := os.ReadFile(workspacePath)
+	require.NoError(t, err)
+	require.Contains(t, string(workspaceData), "sk_test_123")
+}
