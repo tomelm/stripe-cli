@@ -28,12 +28,45 @@ type CaseChecks struct {
 	ExpectedFiles     []string       `json:"expected_files,omitempty"`
 	ExpectedPatterns  []PatternCheck `json:"expected_patterns,omitempty"`
 	ForbiddenPatterns []PatternCheck `json:"forbidden_patterns,omitempty"`
+	CommandChecks     []CommandCheck `json:"command_checks,omitempty"`
 }
 
 type PatternCheck struct {
 	Path        string `json:"path"`
 	Pattern     string `json:"pattern"`
 	Description string `json:"description,omitempty"`
+}
+
+type CommandCheck struct {
+	Name           string            `json:"name"`
+	Command        string            `json:"command"`
+	Workdir        string            `json:"workdir,omitempty"`
+	Env            map[string]string `json:"env,omitempty"`
+	TimeoutSeconds int               `json:"timeout_seconds,omitempty"`
+}
+
+type ExternalFixture struct {
+	ID          string                `json:"id"`
+	Description string                `json:"description,omitempty"`
+	Source      ExternalFixtureSource `json:"source"`
+	CopyPath    string                `json:"copy_path,omitempty"`
+	Overlay     string                `json:"overlay,omitempty"`
+	Docker      ExternalFixtureDocker `json:"docker,omitempty"`
+	Notes       []string              `json:"notes,omitempty"`
+}
+
+type ExternalFixtureSource struct {
+	Type           string   `json:"type"`
+	URL            string   `json:"url"`
+	Ref            string   `json:"ref"`
+	SparseCheckout []string `json:"sparse_checkout,omitempty"`
+}
+
+type ExternalFixtureDocker struct {
+	ComposeFiles []string `json:"compose_files,omitempty"`
+	Services     []string `json:"services,omitempty"`
+	DefaultURL   string   `json:"default_url,omitempty"`
+	Notes        []string `json:"notes,omitempty"`
 }
 
 type SuiteResult struct {

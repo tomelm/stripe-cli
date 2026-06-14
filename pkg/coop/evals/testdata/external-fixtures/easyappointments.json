@@ -1,0 +1,23 @@
+{
+  "id": "easyappointments",
+  "description": "Self-hosted PHP appointment scheduling app with providers, customers, services, appointments, and Docker Compose.",
+  "source": {
+    "type": "git",
+    "url": "https://github.com/alextselegidis/easyappointments.git",
+    "ref": "e46b4c6befb88c8f00e0a1e0eecdaa0e9c6294fb"
+  },
+  "overlay": "overlays/easyappointments",
+  "docker": {
+    "compose_files": ["docker-compose.yml"],
+    "services": ["php-fpm", "nginx", "mysql"],
+    "default_url": "http://localhost",
+    "notes": [
+      "The upstream compose file defaults nginx to port 80 and MySQL to 3306.",
+      "The app requires dependency installation/build steps inside the app container before full browser-level use."
+    ]
+  },
+  "notes": [
+    "Best initial target for Connect platform flows where providers onboard and customers pay for bookings.",
+    "This fixture is heavier than Hive and Scrumboy; use after the first two external fixtures are stable."
+  ]
+}

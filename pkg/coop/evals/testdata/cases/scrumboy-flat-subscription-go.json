@@ -1,0 +1,80 @@
+{
+  "id": "scrumboy-flat-subscription-go",
+  "description": "Runs flat subscription with entitlements against the Dockerized Scrumboy project-management fixture and scores whether billing is wired into the existing project/user model.",
+  "blueprint": "flat-subscription-with-entitlements",
+  "language": "go",
+  "fixture": "scrumboy",
+  "agent": "command",
+  "skip_default": true,
+  "timeout_seconds": 3600,
+  "tags": ["real-agent", "external-fixture", "docker", "go", "subscription"],
+  "human_actions": [
+    {
+      "when": "first_review",
+      "action": "confirm"
+    },
+    {
+      "when": "completion",
+      "action": "select",
+      "select": "done"
+    }
+  ],
+  "checks": {
+    "expected_patterns": [
+      {
+        "path": "go.mod",
+        "pattern": "github\\.com/stripe/stripe-go",
+        "description": "Go Stripe SDK is declared as a dependency"
+      },
+      {
+        "path": "**/*.go",
+        "pattern": "stripe\\.CheckoutSessionParams|session\\.New|checkout/session",
+        "description": "app creates subscription Checkout Sessions"
+      },
+      {
+        "path": "**/*.go",
+        "pattern": "customer\\.subscription\\.created|customer\\.subscription\\.updated|customer\\.subscription\\.deleted",
+        "description": "webhook handler processes subscription lifecycle events"
+      },
+      {
+        "path": "**/*.go",
+        "pattern": "entitlements\\.active_entitlement_summary\\.updated|entitlement|feature",
+        "description": "app handles entitlement state"
+      },
+      {
+        "path": "**/*.go",
+        "pattern": "Project|project|User|user",
+        "description": "billing state is attached to existing app domain objects"
+      },
+      {
+        "path": "**/*.go",
+        "pattern": "STRIPE_SECRET_KEY",
+        "description": "secret key is read from environment"
+      },
+      {
+        "path": "**/*.go",
+        "pattern": "STRIPE_WEBHOOK_SECRET",
+        "description": "webhook secret is read from environment"
+      }
+    ],
+    "forbidden_patterns": [
+      {
+        "path": "**/*",
+        "pattern": "\\b(?:rkcs|rk|sk|pk)_(?:test|live)_[A-Za-z0-9_]+\\b",
+        "description": "workspace does not contain hardcoded Stripe API keys"
+      },
+      {
+        "path": "**/*.go",
+        "pattern": "4242424242424242|card\\[number\\]|card\\.number",
+        "description": "backend does not pass raw card numbers to Stripe"
+      }
+    ],
+    "command_checks": [
+      {
+        "name": "scrumboy subscription smoke",
+        "command": "bash coop-eval/verify-subscription-smoke.sh",
+        "timeout_seconds": 600
+      }
+    ]
+  }
+}

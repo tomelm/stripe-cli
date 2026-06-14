@@ -1,0 +1,95 @@
+{
+  "id": "hive-one-time-payment-python",
+  "description": "Runs one-time Checkout against the Dockerized Hive marketplace fixture and scores whether the agent integrates the existing buyer checkout/order flow.",
+  "blueprint": "one-time-payment",
+  "language": "python",
+  "fixture": "hive-marketplace",
+  "agent": "command",
+  "skip_default": true,
+  "timeout_seconds": 3600,
+  "tags": ["real-agent", "external-fixture", "docker", "python", "one-time-payment"],
+  "human_actions": [
+    {
+      "when": "first_review",
+      "action": "confirm"
+    },
+    {
+      "when": "completion",
+      "action": "select",
+      "select": "done"
+    }
+  ],
+  "checks": {
+    "expected_files": [
+      "backend/requirements.txt",
+      "backend/app/routers/orders.py",
+      "backend/app/services/payment_service.py"
+    ],
+    "expected_patterns": [
+      {
+        "path": "backend/requirements.txt",
+        "pattern": "(^|\\n)stripe([=<>~!]|$)",
+        "description": "Python Stripe SDK is declared in backend requirements"
+      },
+      {
+        "path": "backend/**/*.py",
+        "pattern": "import stripe|from stripe",
+        "description": "backend imports the Stripe SDK"
+      },
+      {
+        "path": "backend/**/*.py",
+        "pattern": "checkout\\.Session\\.create|checkout\\.sessions\\.create",
+        "description": "backend creates Checkout Sessions"
+      },
+      {
+        "path": "backend/**/*.py",
+        "pattern": "checkout\\.session\\.completed",
+        "description": "backend handles Checkout completion webhook events"
+      },
+      {
+        "path": "backend/**/*.py",
+        "pattern": "Webhook\\.construct_event|construct_event",
+        "description": "webhook endpoint verifies Stripe signatures"
+      },
+      {
+        "path": "backend/**/*.py",
+        "pattern": "STRIPE_SECRET_KEY",
+        "description": "secret key is read from environment"
+      },
+      {
+        "path": "backend/**/*.py",
+        "pattern": "STRIPE_WEBHOOK_SECRET",
+        "description": "webhook secret is read from environment"
+      },
+      {
+        "path": "backend/**/*.py",
+        "pattern": "Order|order",
+        "description": "integration stays connected to the existing order model"
+      }
+    ],
+    "forbidden_patterns": [
+      {
+        "path": "**/*",
+        "pattern": "\\b(?:rkcs|rk|sk|pk)_(?:test|live)_[A-Za-z0-9_]+\\b",
+        "description": "workspace does not contain hardcoded Stripe API keys"
+      },
+      {
+        "path": "**/*",
+        "pattern": "\\bwhsec_[A-Za-z0-9_]+\\b",
+        "description": "workspace does not contain hardcoded webhook secrets"
+      },
+      {
+        "path": "backend/**/*.py",
+        "pattern": "4242424242424242|card\\[number\\]|card\\.number",
+        "description": "backend does not pass raw card numbers to Stripe"
+      }
+    ],
+    "command_checks": [
+      {
+        "name": "hive one-time payment smoke",
+        "command": "bash coop-eval/verify-one-time-payment.sh",
+        "timeout_seconds": 600
+      }
+    ]
+  }
+}

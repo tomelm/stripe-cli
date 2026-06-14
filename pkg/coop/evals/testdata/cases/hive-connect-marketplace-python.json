@@ -1,0 +1,70 @@
+{
+  "id": "hive-connect-marketplace-python",
+  "description": "Runs the destination-charge blueprint against the Dockerized Hive marketplace fixture and scores whether sellers are integrated as Connect recipients.",
+  "blueprint": "destination-charge",
+  "language": "python",
+  "fixture": "hive-marketplace",
+  "agent": "command",
+  "skip_default": true,
+  "timeout_seconds": 3600,
+  "tags": ["real-agent", "external-fixture", "docker", "python", "connect", "marketplace"],
+  "human_actions": [
+    {
+      "when": "first_review",
+      "action": "confirm"
+    },
+    {
+      "when": "completion",
+      "action": "select",
+      "select": "done"
+    }
+  ],
+  "checks": {
+    "expected_patterns": [
+      {
+        "path": "backend/requirements.txt",
+        "pattern": "(^|\\n)stripe([=<>~!]|$)",
+        "description": "Python Stripe SDK is declared in backend requirements"
+      },
+      {
+        "path": "backend/**/*.py",
+        "pattern": "AccountLink|account_links|accounts\\.create|Account\\.create",
+        "description": "backend supports seller onboarding for Connect accounts"
+      },
+      {
+        "path": "backend/**/*.py",
+        "pattern": "transfer_data|application_fee_amount|application_fee_percent",
+        "description": "Checkout or payment flow uses a Connect destination/application fee"
+      },
+      {
+        "path": "backend/**/*.py",
+        "pattern": "seller|Seller|connected_account|stripe_account",
+        "description": "Connect state is tied to the existing seller model"
+      },
+      {
+        "path": "backend/**/*.py",
+        "pattern": "checkout\\.session\\.completed|payment_intent\\.succeeded|account\\.updated",
+        "description": "backend handles relevant Connect/payment webhook events"
+      }
+    ],
+    "forbidden_patterns": [
+      {
+        "path": "**/*",
+        "pattern": "\\b(?:rkcs|rk|sk|pk)_(?:test|live)_[A-Za-z0-9_]+\\b",
+        "description": "workspace does not contain hardcoded Stripe API keys"
+      },
+      {
+        "path": "backend/**/*.py",
+        "pattern": "4242424242424242|card\\[number\\]|card\\.number",
+        "description": "backend does not pass raw card numbers to Stripe"
+      }
+    ],
+    "command_checks": [
+      {
+        "name": "hive marketplace docker config",
+        "command": "docker compose config >/dev/null",
+        "timeout_seconds": 300
+      }
+    ]
+  }
+}

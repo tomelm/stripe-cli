@@ -30,6 +30,21 @@ scripts/coop-eval.sh --suite complex --agent command --agent-command 'codex exec
 are skipped by default. `--min-steps N` is available when you want to select
 cases mechanically by blueprint size.
 
+Run the external-app fixture suite:
+
+```sh
+scripts/coop-eval.sh \
+  --suite tag:external-fixture \
+  --timeout 60m \
+  --agent command \
+  --agent-command 'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_PROMPT_FILE")"'
+```
+
+External-app fixtures are pinned git sources plus small eval-owned overlays; the
+upstream app source is cloned into each result directory and is not committed to
+this repository. See [EXTERNAL_FIXTURES.md](EXTERNAL_FIXTURES.md) for the
+fixture manifest format, current app targets, and the verification roadmap.
+
 Pass `--timeout` to override a case's `timeout_seconds` value for longer
 real-agent trials.
 
@@ -74,7 +89,9 @@ eval-results/<run-id>/
     agent.stdout.txt
     agent.stderr.txt
     final-session.json
+    fixture.json
     session-history/
+    checks/
     workspace/
     workspace.diff
     workspace-status.txt
@@ -91,6 +108,8 @@ Scoring currently covers:
 - case-defined file and pattern checks
 - eval hygiene, including raw card-number avoidance, host-browser avoidance,
   provided-key usage, eval-port forwarding, and async-event evidence
+- external command checks for fixture-specific smoke, Docker, and functional
+  verification
 
 The deterministic `debug` agent is for harness validation and CI-safe protocol
 coverage. Real-agent evals should use `--agent command` with an explicit Codex or

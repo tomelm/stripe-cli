@@ -1,0 +1,23 @@
+{
+  "id": "scrumboy",
+  "description": "Lightweight self-hosted Go project management app with projects, users, roles, and Docker Compose.",
+  "source": {
+    "type": "git",
+    "url": "https://github.com/markrai/scrumboy.git",
+    "ref": "37ee4b6c589f463a8587069a883171dadcac88e7"
+  },
+  "overlay": "overlays/scrumboy",
+  "docker": {
+    "compose_files": ["docker-compose.yml"],
+    "services": ["scrumboy"],
+    "default_url": "http://localhost:8080",
+    "notes": [
+      "The upstream compose file publishes the app on 127.0.0.1:8080.",
+      "The app starts without .env files, which makes it a good first subscription fixture."
+    ]
+  },
+  "notes": [
+    "Best initial target for recurring subscription and plan-gating flows.",
+    "The existing project/team model should be reused for customer and subscription ownership."
+  ]
+}

@@ -1,11 +1,14 @@
 package evals
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,6 +55,7 @@ func TestLoadCasesMinStepsIncludesSkipDefaultCases(t *testing.T) {
 	require.Equal(t, []string{
 		"flat-subscription-with-entitlements-node",
 		"metered-subscription-node",
+		"scrumboy-flat-subscription-go",
 	}, ids)
 }
 
@@ -64,6 +68,69 @@ func TestLoadCasesRejectsUnknownSuite(t *testing.T) {
 
 	_, err := r.loadCases()
 	require.ErrorContains(t, err, "unknown eval suite")
+}
+
+func TestPrepareFixtureClonesExternalManifest(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required for external fixture resolution")
+	}
+
+	source := t.TempDir()
+	writeFile(t, filepath.Join(source, "app.txt"), "external app")
+	require.NoError(t, testGit(source, "init"))
+	require.NoError(t, testGit(source, "config", "user.email", "coop-eval@example.com"))
+	require.NoError(t, testGit(source, "config", "user.name", "Co-op Eval"))
+	require.NoError(t, testGit(source, "add", "."))
+	require.NoError(t, testGit(source, "commit", "-m", "fixture source"))
+	refData, err := exec.Command("git", "-C", source, "rev-parse", "HEAD").Output()
+	require.NoError(t, err)
+	ref := strings.TrimSpace(string(refData))
+
+	externalDir := t.TempDir()
+	overlay := filepath.Join(externalDir, "overlays", "external-test")
+	writeFile(t, filepath.Join(overlay, "COOP_EVAL_FIXTURE.md"), "overlay")
+	writeFile(t, filepath.Join(externalDir, "external-test.json"), `{
+  "id": "external-test",
+  "source": {
+    "type": "git",
+    "url": "`+filepath.ToSlash(source)+`",
+    "ref": "`+ref+`"
+  },
+  "overlay": "overlays/external-test"
+}`)
+
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	r := NewRunner(Options{
+		FixturesDir:         filepath.Join(t.TempDir(), "fixtures"),
+		ExternalFixturesDir: externalDir,
+	})
+	fixture, err := r.prepareFixture(context.Background(), Case{Fixture: "external-test"}, t.TempDir(), workspace)
+
+	require.NoError(t, err)
+	require.NotNil(t, fixture)
+	require.FileExists(t, filepath.Join(workspace, "app.txt"))
+	require.FileExists(t, filepath.Join(workspace, "COOP_EVAL_FIXTURE.md"))
+	require.NoDirExists(t, filepath.Join(workspace, ".git"))
+}
+
+func TestRunCommandChecksRecordsFunctionalChecks(t *testing.T) {
+	workspace := t.TempDir()
+	resultDir := t.TempDir()
+	result := CaseResult{Artifacts: map[string]string{}}
+
+	records, artifacts := runCommandChecks(context.Background(), []CommandCheck{{
+		Name:    "health check",
+		Command: "printf ok > command-output.txt",
+	}}, workspace, resultDir, os.Environ(), &result)
+
+	require.Len(t, records, 1)
+	require.Equal(t, 0, records[0].ExitCode)
+	require.Len(t, result.Checks, 1)
+	require.Equal(t, "functional_check", result.Checks[0].Name)
+	require.True(t, result.Checks[0].Passed)
+	require.FileExists(t, filepath.Join(workspace, "command-output.txt"))
+	require.FileExists(t, artifacts["check_health-check_stdout"])
+	require.FileExists(t, artifacts["check_health-check_stderr"])
 }
 
 func TestCommandAgentInvocationWrapsWithSandboxByDefault(t *testing.T) {
@@ -238,6 +305,22 @@ func TestStripeShimBlocksLoginAndBrowserOpen(t *testing.T) {
 	require.Contains(t, string(logData), "blocked=sandbox_create_with_provided_key")
 	require.Contains(t, string(logData), "browser-blocked=open")
 	require.Contains(t, string(logData), "browser-blocked=google-chrome")
+}
+
+func writeFile(t *testing.T, path, data string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+	require.NoError(t, os.WriteFile(path, []byte(data), 0644))
+}
+
+func testGit(dir string, args ...string) error {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	data, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, string(data))
+	}
+	return nil
 }
 
 func TestAgentPromptDisablesHostBrowserAutomation(t *testing.T) {

@@ -1,0 +1,70 @@
+{
+  "id": "easyappointments-connect-platform-php",
+  "description": "Runs the destination-charge blueprint against the Dockerized Easy!Appointments fixture and scores whether provider payments are tied to appointments.",
+  "blueprint": "destination-charge",
+  "language": "php",
+  "fixture": "easyappointments",
+  "agent": "command",
+  "skip_default": true,
+  "timeout_seconds": 3600,
+  "tags": ["real-agent", "external-fixture", "docker", "php", "connect", "platform"],
+  "human_actions": [
+    {
+      "when": "first_review",
+      "action": "confirm"
+    },
+    {
+      "when": "completion",
+      "action": "select",
+      "select": "done"
+    }
+  ],
+  "checks": {
+    "expected_patterns": [
+      {
+        "path": "composer.json",
+        "pattern": "stripe/stripe-php",
+        "description": "PHP Stripe SDK is declared as a dependency"
+      },
+      {
+        "path": "application/**/*.php",
+        "pattern": "AccountLink|Account::create|account_links",
+        "description": "app supports provider Connect onboarding"
+      },
+      {
+        "path": "application/**/*.php",
+        "pattern": "transfer_data|application_fee_amount|application_fee_percent",
+        "description": "payment flow uses a Connect destination/application fee"
+      },
+      {
+        "path": "application/**/*.php",
+        "pattern": "appointment|Appointment|provider|Provider",
+        "description": "payment state is tied to appointments/providers"
+      },
+      {
+        "path": "application/**/*.php",
+        "pattern": "checkout\\.session\\.completed|payment_intent\\.succeeded|account\\.updated",
+        "description": "webhook handler processes relevant Connect/payment events"
+      }
+    ],
+    "forbidden_patterns": [
+      {
+        "path": "**/*",
+        "pattern": "\\b(?:rkcs|rk|sk|pk)_(?:test|live)_[A-Za-z0-9_]+\\b",
+        "description": "workspace does not contain hardcoded Stripe API keys"
+      },
+      {
+        "path": "application/**/*.php",
+        "pattern": "4242424242424242|card\\[number\\]|card\\.number",
+        "description": "backend does not pass raw card numbers to Stripe"
+      }
+    ],
+    "command_checks": [
+      {
+        "name": "easyappointments connect smoke",
+        "command": "bash coop-eval/verify-connect-platform-smoke.sh",
+        "timeout_seconds": 600
+      }
+    ]
+  }
+}

@@ -32,6 +32,7 @@ type Options struct {
 	RepoRoot            string
 	CasesDir            string
 	FixturesDir         string
+	ExternalFixturesDir string
 	ResultsDir          string
 	StripeBin           string
 	Agent               string
@@ -70,6 +71,9 @@ func (r *Runner) Run(ctx context.Context) (*SuiteResult, error) {
 	}
 	if r.opts.FixturesDir == "" {
 		r.opts.FixturesDir = filepath.Join(r.opts.RepoRoot, "pkg", "coop", "evals", "testdata", "fixtures")
+	}
+	if r.opts.ExternalFixturesDir == "" {
+		r.opts.ExternalFixturesDir = filepath.Join(r.opts.RepoRoot, "pkg", "coop", "evals", "testdata", "external-fixtures")
 	}
 	if r.opts.ResultsDir == "" {
 		r.opts.ResultsDir = filepath.Join(r.opts.RepoRoot, "eval-results", time.Now().UTC().Format("20060102-150405"))
@@ -295,6 +299,14 @@ func validateCase(c Case, path string) error {
 			return fmt.Errorf("parsing %s: invalid pattern %q for %s: %w", path, check.Pattern, check.Path, err)
 		}
 	}
+	for _, check := range c.Checks.CommandChecks {
+		if strings.TrimSpace(check.Name) == "" {
+			return fmt.Errorf("parsing %s: command check name is required", path)
+		}
+		if strings.TrimSpace(check.Command) == "" {
+			return fmt.Errorf("parsing %s: command check %q command is required", path, check.Name)
+		}
+	}
 	return nil
 }
 
@@ -333,8 +345,14 @@ func (r *Runner) runCase(parent context.Context, c Case, realStripeBin string) C
 
 	workspace := filepath.Join(resultDir, "workspace")
 	result.Workspace = workspace
-	if err := copyDir(filepath.Join(r.opts.FixturesDir, c.Fixture), workspace); err != nil {
+	fixture, err := r.prepareFixture(ctx, c, resultDir, workspace)
+	if err != nil {
 		return failCase(result, start, err)
+	}
+	if fixture != nil {
+		fixtureArtifact := filepath.Join(resultDir, "fixture.json")
+		_ = writeJSON(fixtureArtifact, fixture)
+		result.Artifacts["fixture"] = fixtureArtifact
 	}
 	if !r.opts.KeepWork {
 		defer os.RemoveAll(workspace)
@@ -415,7 +433,6 @@ func (r *Runner) runCase(parent context.Context, c Case, realStripeBin string) C
 	result.AgentDurationMS = agentRecord.DurationMS
 	redactSensitiveArtifacts(startStdout, startStderr, agentRecord.Stdout, agentRecord.Stderr, stripeLog, filepath.Join(xdgHome, "stripe", "config.toml"))
 	redactSensitiveArtifactsInDir(historyDir)
-	writeCommandLog(resultDir, records)
 	result.HumanActions = actions
 
 	finalSession, readErr := store.Read(startResp.SessionID)
@@ -433,6 +450,13 @@ func (r *Runner) runCase(parent context.Context, c Case, realStripeBin string) C
 	redactSensitiveArtifacts(workspaceDiff)
 	result.Artifacts["workspace_diff"] = workspaceDiff
 	result.Artifacts["workspace_status"] = captureWorkspaceStatus(context.Background(), workspace, filepath.Join(resultDir, "workspace-status.txt"))
+
+	checkRecords, checkArtifacts := runCommandChecks(ctx, c.Checks.CommandChecks, workspace, resultDir, env, &result)
+	records = append(records, checkRecords...)
+	for name, path := range checkArtifacts {
+		result.Artifacts[name] = path
+	}
+	writeCommandLog(resultDir, records)
 
 	if agentErr != nil {
 		result.FailureReason = agentErr.Error()
@@ -838,8 +862,11 @@ func scoreCase(result *CaseResult, c Case, session *coop.Session, sessionErr err
 	if hasNamedChecks(result.Checks, "stripe_commands_avoid_raw_card_numbers", "host_browser_automation_avoided") {
 		result.Scores["eval_hygiene"] = namedScore(result.Checks, "stripe_commands_use_eval_port", "stripe_commands_avoid_raw_card_numbers", "host_browser_automation_avoided", "stripe_commands_use_provided_key")
 	}
-	if hasNamedChecks(result.Checks, "expected_file", "expected_pattern", "forbidden_pattern", "app_source_changed", "implementation_reports_app_source", "app_flow_verified") {
-		result.Scores["blueprint_correctness"] = namedScore(result.Checks, "expected_file", "expected_pattern", "forbidden_pattern", "app_source_changed", "implementation_reports_app_source", "app_flow_verified", "async_events_reported")
+	if hasNamedChecks(result.Checks, "expected_file", "expected_pattern", "forbidden_pattern", "app_source_changed", "implementation_reports_app_source", "app_flow_verified", "functional_check") {
+		result.Scores["blueprint_correctness"] = namedScore(result.Checks, "expected_file", "expected_pattern", "forbidden_pattern", "app_source_changed", "implementation_reports_app_source", "app_flow_verified", "async_events_reported", "functional_check")
+	}
+	if hasNamedChecks(result.Checks, "functional_check") {
+		result.Scores["functional"] = namedScore(result.Checks, "functional_check")
 	}
 }
 
@@ -1238,6 +1265,7 @@ func agentPrompt(c Case, startResp struct {
 	return fmt.Sprintf(`You are being evaluated on a Stripe co-op integration task.
 
 Work in the current directory. Use the "stripe" command from PATH; it is a local wrapper for the candidate CLI and records command usage.
+If COOP_EVAL_FIXTURE.md exists, read it before editing. It describes the existing app shape and the fixture-specific integration expectations.
 
 The blueprint is the desired Stripe workflow. The deliverable is the app in this workspace implementing that workflow. Direct Stripe CLI/API calls can support setup and verification, but they do not count as implementation for apiRequest, asyncHandler, or uiComponent steps.
 For apiRequest steps, add or update app code that calls Stripe through the project's SDK/client layer, then verify by exercising that app code.
@@ -1333,6 +1361,91 @@ func runLoggedCommand(ctx context.Context, name string, args []string, cwd strin
 	record.DurationMS = time.Since(started).Milliseconds()
 	record.ExitCode = exitCode(err)
 	return record
+}
+
+func runCommandChecks(ctx context.Context, checks []CommandCheck, workspace, resultDir string, env []string, result *CaseResult) ([]commandRecord, map[string]string) {
+	var records []commandRecord
+	artifacts := map[string]string{}
+	if len(checks) == 0 {
+		return records, artifacts
+	}
+	checkDir := filepath.Join(resultDir, "checks")
+	if err := os.MkdirAll(checkDir, 0755); err != nil {
+		result.Checks = append(result.Checks, CheckResult{
+			Name:    "functional_check",
+			Passed:  false,
+			Message: fmt.Sprintf("creating check artifact directory: %v", err),
+			Weight:  10,
+		})
+		return records, artifacts
+	}
+
+	for _, check := range checks {
+		slug := sanitizeFileName(strings.ToLower(strings.ReplaceAll(check.Name, " ", "-")))
+		if slug == "" {
+			slug = "check"
+		}
+		stdoutPath := filepath.Join(checkDir, slug+".stdout.txt")
+		stderrPath := filepath.Join(checkDir, slug+".stderr.txt")
+		artifacts["check_"+slug+"_stdout"] = stdoutPath
+		artifacts["check_"+slug+"_stderr"] = stderrPath
+
+		cwd := workspace
+		if check.Workdir != "" {
+			rel, err := safeRelativePath(check.Workdir)
+			if err != nil {
+				result.Checks = append(result.Checks, CheckResult{
+					Name:    "functional_check",
+					Passed:  false,
+					Message: fmt.Sprintf("%s: invalid workdir: %v", check.Name, err),
+					Weight:  10,
+				})
+				continue
+			}
+			cwd = filepath.Join(workspace, rel)
+		}
+
+		commandEnv := commandCheckEnv(env, check.Env)
+		checkCtx := ctx
+		cancel := func() {}
+		if check.TimeoutSeconds > 0 {
+			checkCtx, cancel = context.WithTimeout(ctx, time.Duration(check.TimeoutSeconds)*time.Second)
+		}
+		record := runLoggedCommand(checkCtx, "sh", []string{"-c", check.Command}, cwd, commandEnv, stdoutPath, stderrPath)
+		checkErr := checkCtx.Err()
+		cancel()
+		redactSensitiveArtifacts(stdoutPath, stderrPath)
+		records = append(records, record)
+
+		passed := record.ExitCode == 0
+		message := fmt.Sprintf("%s exit=%d", check.Name, record.ExitCode)
+		if checkErr != nil {
+			message = fmt.Sprintf("%s: %v", check.Name, checkErr)
+		}
+		result.Checks = append(result.Checks, CheckResult{
+			Name:    "functional_check",
+			Passed:  passed,
+			Message: message,
+			Weight:  10,
+		})
+	}
+	return records, artifacts
+}
+
+func commandCheckEnv(base []string, extra map[string]string) []string {
+	env := append([]string{}, base...)
+	if len(extra) == 0 {
+		return env
+	}
+	keys := make([]string, 0, len(extra))
+	for key := range extra {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		env = append(env, key+"="+extra[key])
+	}
+	return env
 }
 
 func captureSessionHistory(ctx context.Context, store *coop.Store, sessionID, dir string, done chan<- struct{}) {
@@ -1511,6 +1624,119 @@ func captureWorkspaceStatus(ctx context.Context, workspace, path string) string 
 	return path
 }
 
+func (r *Runner) prepareFixture(ctx context.Context, c Case, resultDir, workspace string) (*ExternalFixture, error) {
+	localFixture := filepath.Join(r.opts.FixturesDir, c.Fixture)
+	if info, err := os.Stat(localFixture); err == nil {
+		if !info.IsDir() {
+			return nil, fmt.Errorf("fixture %s is not a directory", localFixture)
+		}
+		return nil, copyDir(localFixture, workspace)
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+
+	fixture, err := r.loadExternalFixture(c.Fixture)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.materializeExternalFixture(ctx, fixture, resultDir, workspace); err != nil {
+		return nil, err
+	}
+	return &fixture, nil
+}
+
+func (r *Runner) loadExternalFixture(id string) (ExternalFixture, error) {
+	path := filepath.Join(r.opts.ExternalFixturesDir, id+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ExternalFixture{}, fmt.Errorf("fixture %q not found as local directory or external manifest", id)
+		}
+		return ExternalFixture{}, err
+	}
+	var fixture ExternalFixture
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		return ExternalFixture{}, fmt.Errorf("parsing %s: %w", path, err)
+	}
+	if fixture.ID == "" {
+		fixture.ID = id
+	}
+	if fixture.ID != id {
+		return ExternalFixture{}, fmt.Errorf("external fixture %s has mismatched id %q", path, fixture.ID)
+	}
+	if fixture.Source.Type == "" {
+		fixture.Source.Type = "git"
+	}
+	if fixture.Source.Type != "git" {
+		return ExternalFixture{}, fmt.Errorf("external fixture %q has unsupported source type %q", id, fixture.Source.Type)
+	}
+	if fixture.Source.URL == "" {
+		return ExternalFixture{}, fmt.Errorf("external fixture %q source.url is required", id)
+	}
+	if fixture.Source.Ref == "" {
+		return ExternalFixture{}, fmt.Errorf("external fixture %q source.ref is required", id)
+	}
+	return fixture, nil
+}
+
+func (r *Runner) materializeExternalFixture(ctx context.Context, fixture ExternalFixture, resultDir, workspace string) error {
+	sourceDir := filepath.Join(resultDir, "fixture-source")
+	cloneDir := filepath.Join(sourceDir, "repo")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		return err
+	}
+	if err := runGitCommand(ctx, sourceDir, "clone", "--no-checkout", fixture.Source.URL, cloneDir); err != nil {
+		return err
+	}
+	if len(fixture.Source.SparseCheckout) > 0 {
+		if err := runGitCommand(ctx, cloneDir, "sparse-checkout", "init", "--cone"); err != nil {
+			return err
+		}
+		args := append([]string{"sparse-checkout", "set"}, fixture.Source.SparseCheckout...)
+		if err := runGitCommand(ctx, cloneDir, args...); err != nil {
+			return err
+		}
+	}
+	if err := runGitCommand(ctx, cloneDir, "fetch", "--depth=1", "origin", fixture.Source.Ref); err != nil {
+		return err
+	}
+	if err := runGitCommand(ctx, cloneDir, "checkout", "--detach", "FETCH_HEAD"); err != nil {
+		return err
+	}
+
+	src := cloneDir
+	if fixture.CopyPath != "" && fixture.CopyPath != "." {
+		copyPath, err := safeRelativePath(fixture.CopyPath)
+		if err != nil {
+			return fmt.Errorf("external fixture %q copy_path: %w", fixture.ID, err)
+		}
+		src = filepath.Join(cloneDir, copyPath)
+	}
+	if err := copyDir(src, workspace); err != nil {
+		return err
+	}
+	if fixture.Overlay != "" {
+		overlay := fixture.Overlay
+		if !filepath.IsAbs(overlay) {
+			overlay = filepath.Join(r.opts.ExternalFixturesDir, filepath.FromSlash(overlay))
+		}
+		if err := copyDir(overlay, workspace); err != nil {
+			return fmt.Errorf("applying overlay for fixture %q: %w", fixture.ID, err)
+		}
+	}
+	return nil
+}
+
+func runGitCommand(ctx context.Context, dir string, args ...string) error {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	data, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, string(data))
+	}
+	return nil
+}
+
 func initFixtureGit(ctx context.Context, workspace string) error {
 	commands := [][]string{
 		{"git", "init"},
@@ -1545,6 +1771,9 @@ func copyDir(src, dst string) error {
 		if err != nil {
 			return err
 		}
+		if entry.IsDir() && entry.Name() == ".git" && rel != "." {
+			return filepath.SkipDir
+		}
 		target := filepath.Join(dst, rel)
 		if entry.IsDir() {
 			return os.MkdirAll(target, 0755)
@@ -1566,6 +1795,17 @@ func copyDir(src, dst string) error {
 		_, err = io.Copy(out, in)
 		return err
 	})
+}
+
+func safeRelativePath(path string) (string, error) {
+	path = filepath.Clean(filepath.FromSlash(strings.TrimSpace(path)))
+	if path == "." {
+		return "", nil
+	}
+	if filepath.IsAbs(path) || path == ".." || strings.HasPrefix(path, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("must stay within fixture root")
+	}
+	return path, nil
 }
 
 func writeJSON(path string, v interface{}) error {
@@ -1638,7 +1878,7 @@ func formatDurationMS(ms int64) string {
 }
 
 func orderedScores(scores map[string]float64) []string {
-	preferred := []string{"overall", "protocol", "evidence", "blueprint_correctness"}
+	preferred := []string{"overall", "protocol", "evidence", "blueprint_correctness", "functional"}
 	seen := map[string]bool{}
 	var ordered []string
 	for _, score := range preferred {

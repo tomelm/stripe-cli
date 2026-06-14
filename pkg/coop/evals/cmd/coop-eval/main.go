@@ -35,6 +35,7 @@ func main() {
 	flag.StringVar(&opts.RepoRoot, "repo-root", "", "repository root")
 	flag.StringVar(&opts.CasesDir, "cases-dir", "", "eval case directory")
 	flag.StringVar(&opts.FixturesDir, "fixtures-dir", "", "fixture project directory")
+	flag.StringVar(&opts.ExternalFixturesDir, "external-fixtures-dir", "", "external fixture manifest directory")
 	flag.StringVar(&opts.ResultsDir, "results-dir", "", "directory for eval artifacts")
 	flag.StringVar(&opts.StripeBin, "stripe-bin", "", "candidate stripe binary; builds one if omitted")
 	flag.StringVar(&opts.Agent, "agent", "", "agent adapter: debug or command")

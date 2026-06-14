@@ -1,0 +1,23 @@
+{
+  "id": "hive-marketplace",
+  "description": "Lightweight FastAPI + Next.js marketplace with buyer cart, seller products, mock checkout, and Docker Compose.",
+  "source": {
+    "type": "git",
+    "url": "https://github.com/codebasics/hive-marketplace.git",
+    "ref": "4a6c5e8d1cec41d5174b3bf570eaf4383c3de5ec"
+  },
+  "overlay": "overlays/hive-marketplace",
+  "docker": {
+    "compose_files": ["docker-compose.yml"],
+    "services": ["backend", "frontend", "nginx"],
+    "default_url": "http://localhost:3000",
+    "notes": [
+      "The upstream compose file publishes backend on 8000, frontend on 3000, and nginx on 80.",
+      "The eval overlay supplies development .env files so Docker Compose can start without manual setup."
+    ]
+  },
+  "notes": [
+    "Best initial target for one-time Checkout and Connect marketplace flows.",
+    "The existing app has mock payment/order code, so agents should replace or extend that path rather than building a separate toy server."
+  ]
+}
