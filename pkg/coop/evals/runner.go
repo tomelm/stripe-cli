@@ -71,6 +71,9 @@ func (r *Runner) Run(ctx context.Context) (*SuiteResult, error) {
 	if r.opts.ResultsDir == "" {
 		r.opts.ResultsDir = filepath.Join(r.opts.RepoRoot, "eval-results", time.Now().UTC().Format("20060102-150405"))
 	}
+	if !filepath.IsAbs(r.opts.ResultsDir) {
+		r.opts.ResultsDir = filepath.Join(r.opts.RepoRoot, r.opts.ResultsDir)
+	}
 	if r.opts.Timeout <= 0 {
 		r.opts.Timeout = defaultTimeout
 	}
