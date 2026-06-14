@@ -409,11 +409,15 @@ func (r *Runner) runAgentAndDrive(ctx context.Context, c Case, agent, workspace 
 	var actions []DriverAction
 	var waitErr error
 	var runErr error
+	driverCompleted := false
 	select {
 	case drive := <-driverDone:
 		actions = drive.actions
 		if drive.err != nil {
 			runErr = drive.err
+			cancel()
+		} else {
+			driverCompleted = true
 			cancel()
 		}
 		select {
@@ -425,7 +429,7 @@ func (r *Runner) runAgentAndDrive(ctx context.Context, c Case, agent, workspace 
 				runErr = ctx.Err()
 			}
 		}
-		if runErr == nil && waitErr != nil {
+		if runErr == nil && waitErr != nil && !driverCompleted {
 			runErr = waitErr
 		}
 	case waitErr = <-done:
