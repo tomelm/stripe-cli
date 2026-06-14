@@ -759,6 +759,7 @@ Follow the co-op JSON response exactly. Run the "next" command, continue followi
 The runner isolates HOME and XDG_CONFIG_HOME for this eval. Do not read ~/.config/stripe, ~/.stripe, or other host machine config. If a local SDK command needs a Stripe key, use the eval-scoped config under $XDG_CONFIG_HOME/stripe/config.toml.
 Avoid scanning generated dependency trees such as node_modules, vendor, dist, build, or coverage directories.
 Use the eval-provided PORT environment variable for any local server. Do not hardcode localhost:4242 unless PORT is 4242.
+Browser-based auth is disabled in this eval. Do not run stripe login or complete Dashboard auth URLs; if sandbox provisioning cannot complete without browser auth, continue with local implementation and checks that do not require credentials.
 
 Eval case: %s
 Blueprint: %s
@@ -783,6 +784,10 @@ func evalEnv(xdgHome, homeDir, shimDir, realStripeBin, stripeLog string, port in
 		"COOP_EVAL_STRIPE_LOG="+stripeLog,
 		fmt.Sprintf("COOP_EVAL_PORT=%d", port),
 		fmt.Sprintf("PORT=%d", port),
+		"SSH_TTY=coop-eval",
+		"SSH_CONNECTION=coop-eval",
+		"SSH_CLIENT=coop-eval",
+		"BROWSER=coop-eval-browser-disabled",
 		"PATH="+shimDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
 	if codexHome != "" {
@@ -864,12 +869,40 @@ set +e
   printf '%%q ' "$@"
   printf '\n'
 } >> %q
+if [[ "${1:-}" == "login" ]]; then
+  printf 'stripe login is disabled inside co-op evals; use local checks or eval-scoped config instead.\n' >&2
+  status=126
+  printf 'time=%%s exit=%%s blocked=login\n' "$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)" "$status" >> %q
+  exit "$status"
+fi
 %q "$@"
 status=$?
 printf 'time=%%s exit=%%s\n' "$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)" "$status" >> %q
 exit "$status"
-`, logPath, realStripeBin, logPath)
-	return os.WriteFile(filepath.Join(dir, "stripe"), []byte(script), 0755)
+`, logPath, logPath, realStripeBin, logPath)
+	if err := os.WriteFile(filepath.Join(dir, "stripe"), []byte(script), 0755); err != nil {
+		return err
+	}
+	return writeBrowserBlockers(dir, logPath)
+}
+
+func writeBrowserBlockers(dir, logPath string) error {
+	script := fmt.Sprintf(`#!/usr/bin/env bash
+name="$(basename "$0")"
+{
+  printf 'time=%%s browser-blocked=%%s args=' "$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)" "$name"
+  printf '%%q ' "$@"
+  printf '\n'
+} >> %q
+printf 'browser opening is disabled inside co-op evals: %%s\n' "$name" >&2
+exit 1
+`, logPath)
+	for _, name := range []string{"open", "xdg-open"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0755); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func writeCommandLog(resultDir string, records []commandRecord) {
