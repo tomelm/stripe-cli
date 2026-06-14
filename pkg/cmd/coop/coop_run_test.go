@@ -113,3 +113,16 @@ func TestCoopRunReturnsStructuredErrorForMalformedParam(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, ids)
 }
+
+func TestAgentInstructionsFrameBlueprintAsAppImplementation(t *testing.T) {
+	bp := &coop.Blueprint{Title: "Metered subscription"}
+	session := &coop.Session{ID: "coop_123"}
+
+	instructions := agentInstructions(bp, session)
+
+	assert.Contains(t, instructions, "The blueprint describes the Stripe flow the developer wants in their app")
+	assert.Contains(t, instructions, "Stripe CLI commands are useful for setup and verification, but they are not the implementation")
+	assert.Contains(t, instructions, `"apiRequest": Implement app code that calls this Stripe API`)
+	assert.Contains(t, instructions, "Verification exercises the app code, not only a direct Stripe CLI/API call")
+	assert.Contains(t, instructions, "report-work points to the app file/function/route you changed")
+}
