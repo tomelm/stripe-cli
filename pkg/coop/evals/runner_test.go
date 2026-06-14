@@ -256,6 +256,10 @@ func TestAgentPromptDisablesHostBrowserAutomation(t *testing.T) {
 	require.Contains(t, prompt, "Google Chrome")
 	require.Contains(t, prompt, "macOS Keychain")
 	require.Contains(t, prompt, "Do not automate entering card details in hosted Checkout during evals")
+	require.Contains(t, prompt, "When start-work returns agent_guidance")
+	require.Contains(t, prompt, "api_request.path")
+	require.Contains(t, prompt, "api_request.params")
+	require.Contains(t, prompt, "do not treat an empty SDK call as complete")
 }
 
 func TestRedactSensitiveArtifactsRedactsAuthURLs(t *testing.T) {

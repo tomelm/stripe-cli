@@ -1246,6 +1246,7 @@ For uiComponent steps, add or update the app's user-facing route/page/control an
 Use report-work with the app source file you changed. If you only created Stripe resources via CLI, the eval will treat the integration as incomplete.
 
 Follow the co-op JSON response exactly. Run the "next" command, continue following each JSON response's "next" field, and await human review when instructed. Do not bypass review gates.
+When start-work returns agent_guidance, use it as step-specific guidance. For apiRequest steps, treat api_request.path, api_request.method, and any api_request.params as the canonical API contract from the blueprint. If sdk_example is a warning that the blueprint is endpoint-only, do not treat an empty SDK call as complete; choose params from the step intent, prior blueprint outputs, and Stripe docs, then report the exact app code path and params used.
 The runner isolates HOME and XDG_CONFIG_HOME for this eval. Do not read ~/.config/stripe, ~/.stripe, or other host machine config. If STRIPE_SECRET_KEY or STRIPE_API_KEY is set, use that eval-provided key for local SDK calls and do not run stripe sandbox create. The runner may not create $XDG_CONFIG_HOME/stripe/config.toml; use eval-scoped config only as a fallback when env keys are absent.
 Avoid scanning generated dependency trees such as node_modules, vendor, dist, build, or coverage directories.
 Use the eval-provided PORT environment variable for any local server. Do not hardcode localhost:4242 unless PORT is 4242.
