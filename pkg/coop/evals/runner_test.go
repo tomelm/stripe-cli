@@ -69,3 +69,27 @@ func TestStripeShimBlocksLoginAndBrowserOpen(t *testing.T) {
 	require.Contains(t, string(logData), "blocked=login")
 	require.Contains(t, string(logData), "browser-blocked=open")
 }
+
+func TestRedactSensitiveArtifactsRedactsAuthURLs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "artifact.txt")
+	artifact := `key=sk_test_123
+browser_url=https://dashboard.stripe.com/stripecli/confirm_auth?t=confirmSecret123
+escaped_url=https://dashboard.stripe.com/stripecli/confirm_auth\?t=escapedSecret123
+next_step=stripe login --complete 'https://dashboard.stripe.com/stripecli/auth/cliauth_abc123?secret=pollSecret123'
+`
+	require.NoError(t, os.WriteFile(path, []byte(artifact), 0644))
+
+	redactSensitiveArtifacts(path)
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	redacted := string(data)
+	require.NotContains(t, redacted, "sk_test_123")
+	require.NotContains(t, redacted, "confirmSecret123")
+	require.NotContains(t, redacted, "escapedSecret123")
+	require.NotContains(t, redacted, "cliauth_abc123")
+	require.NotContains(t, redacted, "pollSecret123")
+	require.Contains(t, redacted, "confirm_auth?t=[redacted]")
+	require.Contains(t, redacted, `confirm_auth\?t=[redacted]`)
+	require.Contains(t, redacted, "/stripecli/auth/[redacted]?secret=[redacted]")
+}

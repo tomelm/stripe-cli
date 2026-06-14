@@ -299,15 +299,17 @@ func (r *Runner) runCase(parent context.Context, c Case, realStripeBin string) C
 		return failCase(result, start, err)
 	}
 
+	historyDir := filepath.Join(resultDir, "session-history")
 	historyCtx, stopHistory := context.WithCancel(ctx)
 	historyDone := make(chan struct{})
-	go captureSessionHistory(historyCtx, store, startResp.SessionID, filepath.Join(resultDir, "session-history"), historyDone)
+	go captureSessionHistory(historyCtx, store, startResp.SessionID, historyDir, historyDone)
 
 	agentRecord, actions, agentErr := r.runAgentAndDrive(ctx, c, agent, workspace, env, resultDir, shimStripe, store, startResp)
 	stopHistory()
 	<-historyDone
 	records = append(records, agentRecord)
 	redactSensitiveArtifacts(startStdout, startStderr, agentRecord.Stdout, agentRecord.Stderr, stripeLog, filepath.Join(xdgHome, "stripe", "config.toml"))
+	redactSensitiveArtifactsInDir(historyDir)
 	writeCommandLog(resultDir, records)
 	result.HumanActions = actions
 
@@ -315,6 +317,7 @@ func (r *Runner) runCase(parent context.Context, c Case, realStripeBin string) C
 	if readErr == nil {
 		finalPath := filepath.Join(resultDir, "final-session.json")
 		_ = writeJSON(finalPath, finalSession)
+		redactSensitiveArtifacts(finalPath)
 		result.Artifacts["final_session"] = finalPath
 	}
 	result.Artifacts["agent_stdout"] = agentRecord.Stdout
@@ -910,9 +913,15 @@ func writeCommandLog(resultDir string, records []commandRecord) {
 }
 
 func redactSensitiveArtifacts(paths ...string) {
-	patterns := []*regexp.Regexp{
-		regexp.MustCompile(`\b(?:rkcs|rk|sk|pk)_(?:test|live)_[A-Za-z0-9_]+\b`),
-		regexp.MustCompile(`\bwhsec_[A-Za-z0-9_]+\b`),
+	patterns := []struct {
+		pattern     *regexp.Regexp
+		replacement []byte
+	}{
+		{regexp.MustCompile(`\b(?:rkcs|rk|sk|pk)_(?:test|live)_[A-Za-z0-9_]+\b`), []byte("[redacted]")},
+		{regexp.MustCompile(`\bwhsec_[A-Za-z0-9_]+\b`), []byte("[redacted]")},
+		{regexp.MustCompile(`(/stripecli/auth/)cliauth_[A-Za-z0-9_%-]+`), []byte("$1[redacted]")},
+		{regexp.MustCompile(`(confirm_auth(?:\\)?\?t=)[A-Za-z0-9_%-]+`), []byte("$1[redacted]")},
+		{regexp.MustCompile(`(secret=)[A-Za-z0-9_%-]+`), []byte("$1[redacted]")},
 	}
 	for _, path := range paths {
 		if path == "" {
@@ -924,12 +933,22 @@ func redactSensitiveArtifacts(paths ...string) {
 		}
 		redacted := data
 		for _, pattern := range patterns {
-			redacted = pattern.ReplaceAll(redacted, []byte("[redacted]"))
+			redacted = pattern.pattern.ReplaceAll(redacted, pattern.replacement)
 		}
 		if !bytes.Equal(data, redacted) {
 			_ = os.WriteFile(path, redacted, 0600)
 		}
 	}
+}
+
+func redactSensitiveArtifactsInDir(dir string) {
+	_ = filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return nil
+		}
+		redactSensitiveArtifacts(path)
+		return nil
+	})
 }
 
 func captureWorkspaceDiff(ctx context.Context, workspace, path string) string {
