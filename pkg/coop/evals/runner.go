@@ -260,7 +260,7 @@ func (r *Runner) runCase(parent context.Context, c Case, realStripeBin string) C
 	}
 	result.Port = port
 
-	env := evalEnv(xdgHome, homeDir, shimDir, realStripeBin, stripeLog, port)
+	env := evalEnv(xdgHome, homeDir, shimDir, r.opts.RepoRoot, realStripeBin, stripeLog, port)
 	records := []commandRecord{}
 	startStdout := filepath.Join(resultDir, "coop-run.stdout.json")
 	startStderr := filepath.Join(resultDir, "coop-run.stderr.txt")
@@ -715,8 +715,8 @@ func scoreCase(result *CaseResult, c Case, session *coop.Session, sessionErr err
 	if hasNamedChecks(result.Checks, "app_source_changed", "implementation_reports_app_source", "app_flow_verified", "async_events_reported") {
 		result.Scores["implementation"] = namedScore(result.Checks, "app_source_changed", "implementation_reports_app_source", "app_flow_verified", "async_events_reported")
 	}
-	if hasNamedChecks(result.Checks, "stripe_commands_use_eval_port", "stripe_commands_avoid_raw_card_numbers") {
-		result.Scores["eval_hygiene"] = namedScore(result.Checks, "stripe_commands_use_eval_port", "stripe_commands_avoid_raw_card_numbers")
+	if hasNamedChecks(result.Checks, "stripe_commands_avoid_raw_card_numbers", "host_browser_automation_avoided") {
+		result.Scores["eval_hygiene"] = namedScore(result.Checks, "stripe_commands_use_eval_port", "stripe_commands_avoid_raw_card_numbers", "host_browser_automation_avoided", "stripe_commands_use_provided_key")
 	}
 	if hasNamedChecks(result.Checks, "expected_file", "expected_pattern", "forbidden_pattern", "app_source_changed", "implementation_reports_app_source", "app_flow_verified") {
 		result.Scores["blueprint_correctness"] = namedScore(result.Checks, "expected_file", "expected_pattern", "forbidden_pattern", "app_source_changed", "implementation_reports_app_source", "app_flow_verified", "async_events_reported")
@@ -791,6 +791,8 @@ func scoreImplementationIntegration(result *CaseResult, session *coop.Session) {
 
 func scoreEvalHygiene(result *CaseResult, session *coop.Session, stripeLog string) {
 	scoreRawCardCommands(result, stripeLog)
+	scoreHostBrowserAutomation(result, stripeLog)
+	scoreProvidedKeyUsage(result, stripeLog)
 	scoreStripeCommandPort(result, session, stripeLog)
 	scoreAsyncEventEvidence(result, session)
 }
@@ -822,6 +824,37 @@ func stripeLogContainsRawCardAttempt(log string) bool {
 		}
 	}
 	return false
+}
+
+func scoreHostBrowserAutomation(result *CaseResult, stripeLog string) {
+	data, err := os.ReadFile(stripeLog)
+	if err != nil {
+		return
+	}
+	log := string(data)
+	result.Checks = append(result.Checks, CheckResult{
+		Name:    "host_browser_automation_avoided",
+		Passed:  !strings.Contains(log, "browser-blocked="),
+		Message: "Agents must not launch host browsers during evals because they can trigger desktop browser profiles or Keychain prompts",
+		Weight:  4,
+	})
+}
+
+func scoreProvidedKeyUsage(result *CaseResult, stripeLog string) {
+	if os.Getenv("STRIPE_SECRET_KEY") == "" && os.Getenv("STRIPE_API_KEY") == "" {
+		return
+	}
+	data, err := os.ReadFile(stripeLog)
+	if err != nil {
+		return
+	}
+	log := string(data)
+	result.Checks = append(result.Checks, CheckResult{
+		Name:    "stripe_commands_use_provided_key",
+		Passed:  !strings.Contains(log, "sandbox create") && !strings.Contains(log, "blocked=sandbox_create_with_provided_key"),
+		Message: "When an eval Stripe key is provided, agents should use it instead of provisioning a claimable sandbox",
+		Weight:  4,
+	})
 }
 
 func scoreStripeCommandPort(result *CaseResult, session *coop.Session, stripeLog string) {
@@ -1093,11 +1126,12 @@ For uiComponent steps, add or update the app's user-facing route/page/control an
 Use report-work with the app source file you changed. If you only created Stripe resources via CLI, the eval will treat the integration as incomplete.
 
 Follow the co-op JSON response exactly. Run the "next" command, continue following each JSON response's "next" field, and await human review when instructed. Do not bypass review gates.
-The runner isolates HOME and XDG_CONFIG_HOME for this eval. Do not read ~/.config/stripe, ~/.stripe, or other host machine config. If a local SDK command needs a Stripe key, use the eval-scoped config under $XDG_CONFIG_HOME/stripe/config.toml.
+The runner isolates HOME and XDG_CONFIG_HOME for this eval. Do not read ~/.config/stripe, ~/.stripe, or other host machine config. If STRIPE_SECRET_KEY or STRIPE_API_KEY is set, use that eval-provided key for local SDK calls and do not run stripe sandbox create. The runner may not create $XDG_CONFIG_HOME/stripe/config.toml; use eval-scoped config only as a fallback when env keys are absent.
 Avoid scanning generated dependency trees such as node_modules, vendor, dist, build, or coverage directories.
 Use the eval-provided PORT environment variable for any local server. Do not hardcode localhost:4242 unless PORT is 4242.
 Never pass full card numbers to Stripe's API. Do not run commands like "stripe payment_methods create -d card[number]=..."; use hosted Checkout or client-side Stripe integrations for card collection, and use test PaymentMethod IDs such as pm_card_visa only when an API explicitly requires an existing payment method.
 Browser-based auth is disabled in this eval. Do not run stripe login or complete Dashboard auth URLs; if sandbox provisioning cannot complete without browser auth, continue with local implementation and checks that do not require credentials.
+Host browser automation is disabled in this eval because it can trigger the developer's desktop browser, profile, autofill, or macOS Keychain. Do not launch Google Chrome, Safari, Firefox, Playwright, Puppeteer, Selenium, open, xdg-open, or any browser executable, including absolute paths such as /Applications/Google Chrome.app. For Checkout and UI steps, verify the local app with HTTP-level checks, app routes, rendered HTML assertions, and Stripe CLI/API test helpers. It is enough to prove that the app creates the correct hosted Checkout URL, redirects to that URL, configures success/cancel URLs, and handles signed webhook events. Do not automate entering card details in hosted Checkout during evals.
 
 Eval case: %s
 Blueprint: %s
@@ -1107,7 +1141,7 @@ Initial co-op response:
 `, c.ID, c.Blueprint, string(data))
 }
 
-func evalEnv(xdgHome, homeDir, shimDir, realStripeBin, stripeLog string, port int) []string {
+func evalEnv(xdgHome, homeDir, shimDir, repoRoot, realStripeBin, stripeLog string, port int) []string {
 	env := append([]string{}, os.Environ()...)
 	hostHome := os.Getenv("HOME")
 	codexHome := os.Getenv("CODEX_HOME")
@@ -1118,6 +1152,7 @@ func evalEnv(xdgHome, homeDir, shimDir, realStripeBin, stripeLog string, port in
 		"XDG_CONFIG_HOME="+xdgHome,
 		"HOME="+homeDir,
 		"COOP_EVAL_HOST_HOME="+hostHome,
+		"COOP_EVAL_REPO_ROOT="+repoRoot,
 		"COOP_EVAL_REAL_STRIPE="+realStripeBin,
 		"COOP_EVAL_STRIPE_LOG="+stripeLog,
 		fmt.Sprintf("COOP_EVAL_PORT=%d", port),
@@ -1126,6 +1161,12 @@ func evalEnv(xdgHome, homeDir, shimDir, realStripeBin, stripeLog string, port in
 		"SSH_CONNECTION=coop-eval",
 		"SSH_CLIENT=coop-eval",
 		"BROWSER=coop-eval-browser-disabled",
+		"COOP_EVAL_BROWSER_AUTOMATION=disabled",
+		"CHROME_BIN="+filepath.Join(shimDir, "coop-eval-browser-disabled"),
+		"CHROME_PATH="+filepath.Join(shimDir, "coop-eval-browser-disabled"),
+		"GOOGLE_CHROME_BIN="+filepath.Join(shimDir, "coop-eval-browser-disabled"),
+		"PUPPETEER_EXECUTABLE_PATH="+filepath.Join(shimDir, "coop-eval-browser-disabled"),
+		"PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="+filepath.Join(shimDir, "coop-eval-browser-disabled"),
 		"PATH="+shimDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
 	if codexHome != "" {
@@ -1223,11 +1264,17 @@ if [[ "${1:-}" == "login" ]]; then
   printf 'time=%%s exit=%%s blocked=login\n' "$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)" "$status" >> %q
   exit "$status"
 fi
+if [[ "${1:-}" == "sandbox" && "${2:-}" == "create" && -n "${STRIPE_SECRET_KEY:-}${STRIPE_API_KEY:-}" ]]; then
+  printf 'stripe sandbox create is disabled inside co-op evals when STRIPE_SECRET_KEY or STRIPE_API_KEY is already provided; use the eval-provided key.\n' >&2
+  status=126
+  printf 'time=%%s exit=%%s blocked=sandbox_create_with_provided_key\n' "$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)" "$status" >> %q
+  exit "$status"
+fi
 %q "$@"
 status=$?
 printf 'time=%%s exit=%%s\n' "$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)" "$status" >> %q
 exit "$status"
-`, logPath, logPath, logPath, realStripeBin, logPath)
+`, logPath, logPath, logPath, logPath, realStripeBin, logPath)
 	if err := os.WriteFile(filepath.Join(dir, "stripe"), []byte(script), 0755); err != nil {
 		return err
 	}
@@ -1242,10 +1289,27 @@ name="$(basename "$0")"
   printf '%%q ' "$@"
   printf '\n'
 } >> %q
-printf 'browser opening is disabled inside co-op evals: %%s\n' "$name" >&2
+printf 'host browser automation is disabled inside co-op evals: %%s\n' "$name" >&2
 exit 1
 `, logPath)
-	for _, name := range []string{"open", "xdg-open"} {
+	for _, name := range []string{
+		"open",
+		"xdg-open",
+		"coop-eval-browser-disabled",
+		"google-chrome",
+		"google-chrome-stable",
+		"google-chrome-beta",
+		"google-chrome-canary",
+		"Google Chrome",
+		"chrome",
+		"chromium",
+		"chromium-browser",
+		"firefox",
+		"safari",
+		"playwright",
+		"puppeteer",
+		"selenium",
+	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0755); err != nil {
 			return err
 		}

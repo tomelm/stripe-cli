@@ -31,12 +31,18 @@ func TestWorkspacePathContainsPatternSkipsGeneratedDependencyTrees(t *testing.T)
 }
 
 func TestEvalEnvDisablesBrowserAuth(t *testing.T) {
-	env := evalEnv("/tmp/xdg", "/tmp/home", "/tmp/shim", "/tmp/stripe", "/tmp/stripe.log", 4242)
+	env := evalEnv("/tmp/xdg", "/tmp/home", "/tmp/shim", "/tmp/repo", "/tmp/stripe", "/tmp/stripe.log", 4242)
 
 	require.Contains(t, env, "SSH_TTY=coop-eval")
 	require.Contains(t, env, "SSH_CONNECTION=coop-eval")
 	require.Contains(t, env, "SSH_CLIENT=coop-eval")
+	require.Contains(t, env, "COOP_EVAL_REPO_ROOT=/tmp/repo")
 	require.Contains(t, env, "BROWSER=coop-eval-browser-disabled")
+	require.Contains(t, env, "COOP_EVAL_BROWSER_AUTOMATION=disabled")
+	require.Contains(t, env, "CHROME_BIN=/tmp/shim/coop-eval-browser-disabled")
+	require.Contains(t, env, "GOOGLE_CHROME_BIN=/tmp/shim/coop-eval-browser-disabled")
+	require.Contains(t, env, "PUPPETEER_EXECUTABLE_PATH=/tmp/shim/coop-eval-browser-disabled")
+	require.Contains(t, env, "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/tmp/shim/coop-eval-browser-disabled")
 }
 
 func TestStripeShimBlocksLoginAndBrowserOpen(t *testing.T) {
@@ -69,16 +75,50 @@ func TestStripeShimBlocksLoginAndBrowserOpen(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "whoami\n", string(realCalled))
 
+	sandboxCmd := exec.Command(stripePath, "sandbox", "create", "--from-git")
+	sandboxCmd.Env = append(os.Environ(), "STRIPE_SECRET_KEY=sk_test_eval")
+	sandboxOutput, err := sandboxCmd.CombinedOutput()
+	require.Error(t, err)
+	require.Contains(t, string(sandboxOutput), "stripe sandbox create is disabled inside co-op evals")
+	realCalled, err = os.ReadFile(realCalledPath)
+	require.NoError(t, err)
+	require.Equal(t, "whoami\n", string(realCalled))
+
 	openCmd := exec.Command(filepath.Join(dir, "open"), "https://dashboard.stripe.com")
 	openOutput, err := openCmd.CombinedOutput()
 	require.Error(t, err)
-	require.Contains(t, string(openOutput), "browser opening is disabled inside co-op evals")
+	require.Contains(t, string(openOutput), "host browser automation is disabled inside co-op evals")
+
+	chromeCmd := exec.Command(filepath.Join(dir, "google-chrome"), "https://checkout.stripe.com")
+	chromeOutput, err := chromeCmd.CombinedOutput()
+	require.Error(t, err)
+	require.Contains(t, string(chromeOutput), "host browser automation is disabled inside co-op evals")
 
 	logData, err := os.ReadFile(logPath)
 	require.NoError(t, err)
 	require.Contains(t, string(logData), "blocked=login")
 	require.Contains(t, string(logData), "blocked=raw_card_number")
+	require.Contains(t, string(logData), "blocked=sandbox_create_with_provided_key")
 	require.Contains(t, string(logData), "browser-blocked=open")
+	require.Contains(t, string(logData), "browser-blocked=google-chrome")
+}
+
+func TestAgentPromptDisablesHostBrowserAutomation(t *testing.T) {
+	prompt := agentPrompt(Case{ID: "one-time-payment-node", Blueprint: "one-time-payment"}, struct {
+		SessionID         string `json:"session_id"`
+		AgentInstructions string `json:"agent_instructions"`
+		Next              string `json:"next"`
+	}{
+		SessionID:         "coop_test",
+		AgentInstructions: "follow the steps",
+		Next:              "stripe coop agent start-work --session=coop_test --step=1",
+	})
+
+	require.Contains(t, prompt, "Host browser automation is disabled")
+	require.Contains(t, prompt, "do not run stripe sandbox create")
+	require.Contains(t, prompt, "Google Chrome")
+	require.Contains(t, prompt, "macOS Keychain")
+	require.Contains(t, prompt, "Do not automate entering card details in hosted Checkout during evals")
 }
 
 func TestRedactSensitiveArtifactsRedactsAuthURLs(t *testing.T) {
@@ -214,6 +254,18 @@ func TestScoreEvalHygieneFlagsUnsafeStripeCommands(t *testing.T) {
 	require.False(t, checkPassed(result.Checks, "stripe_commands_avoid_raw_card_numbers"))
 	require.False(t, checkPassed(result.Checks, "stripe_commands_use_eval_port"))
 	require.True(t, checkPassed(result.Checks, "async_events_reported"))
+}
+
+func TestScoreEvalHygieneFlagsSandboxCreateWhenKeyProvided(t *testing.T) {
+	t.Setenv("STRIPE_SECRET_KEY", "sk_test_eval")
+	stripeLog := filepath.Join(t.TempDir(), "stripe.log")
+	require.NoError(t, os.WriteFile(stripeLog, []byte("args=sandbox create --from-git\n"), 0644))
+	result := &CaseResult{Port: 53535}
+	session := &coop.Session{}
+
+	scoreEvalHygiene(result, session, stripeLog)
+
+	require.False(t, checkPassed(result.Checks, "stripe_commands_use_provided_key"))
 }
 
 func TestScoreEvalHygieneRequiresAsyncEventEvidence(t *testing.T) {

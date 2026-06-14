@@ -32,7 +32,7 @@ scripts/coop-eval.sh \
   --case one-time-payment-node \
   --timeout 30m \
   --agent command \
-  --agent-command 'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_PROMPT_FILE")"'
+  --agent-command '"$COOP_EVAL_REPO_ROOT/scripts/coop-eval-agent-sandbox.sh" codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_PROMPT_FILE")"'
 ```
 
 The external command runs inside the fixture workspace. The runner puts a
@@ -41,6 +41,9 @@ records invocations in the eval artifacts. The runner also sets isolated
 `HOME` and `XDG_CONFIG_HOME` directories for the agent shell. Codex auth is
 preserved with `CODEX_HOME` when available, but Stripe config and co-op state
 should stay inside the eval result directory.
+On macOS, wrap real-agent commands with `scripts/coop-eval-agent-sandbox.sh`.
+It prevents host browser executables such as Google Chrome from launching during
+evals, avoiding desktop profile, autofill, and Keychain prompts.
 Agent stdout/stderr and workspace diffs redact Stripe API-key-shaped values before
 they are written into the final artifact set.
 
