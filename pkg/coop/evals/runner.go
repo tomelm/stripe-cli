@@ -914,8 +914,10 @@ func captureWorkspaceStatus(ctx context.Context, workspace, path string) string 
 func initFixtureGit(ctx context.Context, workspace string) error {
 	commands := [][]string{
 		{"git", "init"},
+		{"git", "config", "user.email", "coop-eval@example.com"},
+		{"git", "config", "user.name", "Co-op Eval"},
 		{"git", "add", "."},
-		{"git", "-c", "user.email=coop-eval@example.com", "-c", "user.name=Co-op Eval", "commit", "-m", "fixture baseline"},
+		{"git", "commit", "-m", "fixture baseline"},
 	}
 	for _, args := range commands {
 		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
