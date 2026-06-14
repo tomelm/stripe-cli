@@ -20,6 +20,16 @@ Run a specific case:
 scripts/coop-eval.sh --case one-time-payment-debug
 ```
 
+Run the complex real-agent suite:
+
+```sh
+scripts/coop-eval.sh --suite complex --agent command --agent-command 'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_PROMPT_FILE")"'
+```
+
+`--suite complex` selects cases tagged `complex-blueprint`, including cases that
+are skipped by default. `--min-steps N` is available when you want to select
+cases mechanically by blueprint size.
+
 Pass `--timeout` to override a case's `timeout_seconds` value for longer
 real-agent trials.
 
@@ -32,7 +42,7 @@ scripts/coop-eval.sh \
   --case one-time-payment-node \
   --timeout 30m \
   --agent command \
-  --agent-command '"$COOP_EVAL_REPO_ROOT/scripts/coop-eval-agent-sandbox.sh" codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_PROMPT_FILE")"'
+  --agent-command 'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_PROMPT_FILE")"'
 ```
 
 The external command runs inside the fixture workspace. The runner puts a
@@ -41,9 +51,11 @@ records invocations in the eval artifacts. The runner also sets isolated
 `HOME` and `XDG_CONFIG_HOME` directories for the agent shell. Codex auth is
 preserved with `CODEX_HOME` when available, but Stripe config and co-op state
 should stay inside the eval result directory.
-On macOS, wrap real-agent commands with `scripts/coop-eval-agent-sandbox.sh`.
-It prevents host browser executables such as Google Chrome from launching during
-evals, avoiding desktop profile, autofill, and Keychain prompts.
+Command agents are wrapped with `scripts/coop-eval-agent-sandbox.sh` by default
+when that script is available. On macOS it prevents host browser executables
+such as Google Chrome from launching during evals, avoiding desktop profile,
+autofill, and Keychain prompts. Use `--disable-agent-sandbox` only when the
+case deliberately tests browser-launch behavior.
 Agent stdout/stderr and workspace diffs redact Stripe API-key-shaped values before
 they are written into the final artifact set.
 
@@ -77,6 +89,8 @@ Scoring currently covers:
 - review-await protocol
 - request-changes recovery
 - case-defined file and pattern checks
+- eval hygiene, including raw card-number avoidance, host-browser avoidance,
+  provided-key usage, eval-port forwarding, and async-event evidence
 
 The deterministic `debug` agent is for harness validation and CI-safe protocol
 coverage. Real-agent evals should use `--agent command` with an explicit Codex or

@@ -4,13 +4,150 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
 )
+
+func TestLoadCasesSuiteComplexSelectsComplexCases(t *testing.T) {
+	r := NewRunner(Options{
+		RepoRoot: repoRootForTest(),
+		CasesDir: filepath.Join(repoRootForTest(), "pkg", "coop", "evals", "testdata", "cases"),
+		Suite:    "complex",
+	})
+
+	cases, err := r.loadCases()
+	require.NoError(t, err)
+
+	var ids []string
+	for _, c := range cases {
+		ids = append(ids, c.ID)
+	}
+	require.Equal(t, []string{
+		"flat-subscription-with-entitlements-node",
+		"invoice-payments-node",
+		"metered-subscription-node",
+	}, ids)
+}
+
+func TestLoadCasesMinStepsIncludesSkipDefaultCases(t *testing.T) {
+	r := NewRunner(Options{
+		RepoRoot: repoRootForTest(),
+		CasesDir: filepath.Join(repoRootForTest(), "pkg", "coop", "evals", "testdata", "cases"),
+		MinSteps: 10,
+	})
+
+	cases, err := r.loadCases()
+	require.NoError(t, err)
+
+	var ids []string
+	for _, c := range cases {
+		ids = append(ids, c.ID)
+	}
+	require.Equal(t, []string{
+		"flat-subscription-with-entitlements-node",
+		"metered-subscription-node",
+	}, ids)
+}
+
+func TestLoadCasesRejectsUnknownSuite(t *testing.T) {
+	r := NewRunner(Options{
+		RepoRoot: repoRootForTest(),
+		CasesDir: filepath.Join(repoRootForTest(), "pkg", "coop", "evals", "testdata", "cases"),
+		Suite:    "slow",
+	})
+
+	_, err := r.loadCases()
+	require.ErrorContains(t, err, "unknown eval suite")
+}
+
+func TestCommandAgentInvocationWrapsWithSandboxByDefault(t *testing.T) {
+	repoRoot := t.TempDir()
+	wrapper := filepath.Join(repoRoot, "scripts", "coop-eval-agent-sandbox.sh")
+	require.NoError(t, os.MkdirAll(filepath.Dir(wrapper), 0755))
+	require.NoError(t, os.WriteFile(wrapper, []byte("#!/usr/bin/env bash\nexec \"$@\"\n"), 0755))
+
+	r := NewRunner(Options{
+		RepoRoot:     repoRoot,
+		AgentCommand: "codex exec \"$(cat \"$COOP_EVAL_PROMPT_FILE\")\"",
+	})
+
+	name, args := r.commandAgentInvocation()
+
+	require.Equal(t, wrapper, name)
+	require.Equal(t, []string{"sh", "-c", `codex exec "$(cat "$COOP_EVAL_PROMPT_FILE")"`}, args)
+}
+
+func TestCommandAgentInvocationAllowsSandboxOptOut(t *testing.T) {
+	r := NewRunner(Options{
+		RepoRoot:            t.TempDir(),
+		AgentCommand:        "codex exec prompt",
+		DisableAgentSandbox: true,
+	})
+
+	name, args := r.commandAgentInvocation()
+
+	require.Equal(t, "sh", name)
+	require.Equal(t, []string{"-c", "codex exec prompt"}, args)
+}
+
+func TestMarkdownSummaryIncludesTimingAndInterruption(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "summary.md")
+	suite := &SuiteResult{
+		StartedAt:          time.Now().UTC(),
+		FinishedAt:         time.Now().UTC().Add(3 * time.Second),
+		DurationMS:         3000,
+		AgentDurationMS:    2000,
+		Passed:             false,
+		Interrupted:        true,
+		InterruptionReason: "context canceled",
+		Selection:          "suite=complex",
+		Cases: []CaseResult{{
+			ID:              "metered-subscription-node",
+			Agent:           "command",
+			Passed:          true,
+			DurationMS:      1500,
+			AgentDurationMS: 1200,
+			Scores:          map[string]float64{"overall": 1},
+			Checks:          []CheckResult{{Name: "session_completed", Passed: true}},
+		}},
+	}
+
+	require.NoError(t, writeMarkdownSummary(path, suite))
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	summary := string(data)
+	require.Contains(t, summary, "- selection: `suite=complex`")
+	require.Contains(t, summary, "- wall duration: 3s")
+	require.Contains(t, summary, "- agent runtime: 2s")
+	require.Contains(t, summary, "- interrupted: context canceled")
+	require.Contains(t, summary, "## PASS metered-subscription-node")
+}
+
+func TestTerminateProcessGroupStopsChildProcess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process groups are only used on POSIX platforms")
+	}
+	cmd := exec.Command("sh", "-c", "sleep 60 & wait")
+	prepareProcessGroup(cmd)
+	require.NoError(t, cmd.Start())
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	terminateProcessGroup(cmd.Process.Pid)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("process group did not terminate")
+	}
+}
 
 func TestWorkspacePathContainsPatternMatchesRootAndNestedGlobs(t *testing.T) {
 	workspace := t.TempDir()
@@ -341,6 +478,10 @@ func gitFixtureWorkspace(t *testing.T) string {
 	runGit(t, workspace, "add", ".")
 	runGit(t, workspace, "-c", "user.email=coop@example.com", "-c", "user.name=Coop Eval", "commit", "-m", "fixture")
 	return workspace
+}
+
+func repoRootForTest() string {
+	return filepath.Clean(filepath.Join("..", "..", ".."))
 }
 
 func runGit(t *testing.T, dir string, args ...string) {

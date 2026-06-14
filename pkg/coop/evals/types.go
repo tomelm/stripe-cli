@@ -37,27 +37,33 @@ type PatternCheck struct {
 }
 
 type SuiteResult struct {
-	StartedAt  time.Time    `json:"started_at"`
-	FinishedAt time.Time    `json:"finished_at"`
-	Passed     bool         `json:"passed"`
-	ResultsDir string       `json:"results_dir"`
-	Cases      []CaseResult `json:"cases"`
+	StartedAt          time.Time    `json:"started_at"`
+	FinishedAt         time.Time    `json:"finished_at"`
+	DurationMS         int64        `json:"duration_ms,omitempty"`
+	AgentDurationMS    int64        `json:"agent_duration_ms,omitempty"`
+	Passed             bool         `json:"passed"`
+	Interrupted        bool         `json:"interrupted,omitempty"`
+	InterruptionReason string       `json:"interruption_reason,omitempty"`
+	Selection          string       `json:"selection,omitempty"`
+	ResultsDir         string       `json:"results_dir"`
+	Cases              []CaseResult `json:"cases"`
 }
 
 type CaseResult struct {
-	ID            string             `json:"id"`
-	Agent         string             `json:"agent"`
-	Passed        bool               `json:"passed"`
-	DurationMS    int64              `json:"duration_ms"`
-	SessionID     string             `json:"session_id,omitempty"`
-	Port          int                `json:"port,omitempty"`
-	Workspace     string             `json:"workspace"`
-	ResultDir     string             `json:"result_dir"`
-	Scores        map[string]float64 `json:"scores"`
-	Checks        []CheckResult      `json:"checks"`
-	HumanActions  []DriverAction     `json:"human_actions,omitempty"`
-	Artifacts     map[string]string  `json:"artifacts"`
-	FailureReason string             `json:"failure_reason,omitempty"`
+	ID              string             `json:"id"`
+	Agent           string             `json:"agent"`
+	Passed          bool               `json:"passed"`
+	DurationMS      int64              `json:"duration_ms"`
+	AgentDurationMS int64              `json:"agent_duration_ms,omitempty"`
+	SessionID       string             `json:"session_id,omitempty"`
+	Port            int                `json:"port,omitempty"`
+	Workspace       string             `json:"workspace"`
+	ResultDir       string             `json:"result_dir"`
+	Scores          map[string]float64 `json:"scores"`
+	Checks          []CheckResult      `json:"checks"`
+	HumanActions    []DriverAction     `json:"human_actions,omitempty"`
+	Artifacts       map[string]string  `json:"artifacts"`
+	FailureReason   string             `json:"failure_reason,omitempty"`
 }
 
 type CheckResult struct {

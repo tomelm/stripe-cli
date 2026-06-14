@@ -29,17 +29,20 @@ const (
 )
 
 type Options struct {
-	RepoRoot     string
-	CasesDir     string
-	FixturesDir  string
-	ResultsDir   string
-	StripeBin    string
-	Agent        string
-	AgentCommand string
-	CaseIDs      []string
-	KeepWork     bool
-	Timeout      time.Duration
-	TimeoutSet   bool
+	RepoRoot            string
+	CasesDir            string
+	FixturesDir         string
+	ResultsDir          string
+	StripeBin           string
+	Agent               string
+	AgentCommand        string
+	CaseIDs             []string
+	Suite               string
+	MinSteps            int
+	DisableAgentSandbox bool
+	KeepWork            bool
+	Timeout             time.Duration
+	TimeoutSet          bool
 }
 
 type Runner struct {
@@ -93,9 +96,16 @@ func (r *Runner) Run(ctx context.Context) (*SuiteResult, error) {
 	suite := &SuiteResult{
 		StartedAt:  time.Now().UTC(),
 		Passed:     true,
+		Selection:  r.selectionSummary(),
 		ResultsDir: r.opts.ResultsDir,
 	}
 	for _, c := range cases {
+		if err := ctx.Err(); err != nil {
+			suite.Passed = false
+			suite.Interrupted = true
+			suite.InterruptionReason = err.Error()
+			break
+		}
 		result := r.runCase(ctx, c, stripeBin)
 		if !result.Passed {
 			suite.Passed = false
@@ -103,6 +113,10 @@ func (r *Runner) Run(ctx context.Context) (*SuiteResult, error) {
 		suite.Cases = append(suite.Cases, result)
 	}
 	suite.FinishedAt = time.Now().UTC()
+	suite.DurationMS = suite.FinishedAt.Sub(suite.StartedAt).Milliseconds()
+	for _, c := range suite.Cases {
+		suite.AgentDurationMS += c.AgentDurationMS
+	}
 	if err := writeJSON(filepath.Join(r.opts.ResultsDir, "summary.json"), suite); err != nil {
 		return suite, err
 	}
@@ -110,6 +124,25 @@ func (r *Runner) Run(ctx context.Context) (*SuiteResult, error) {
 		return suite, err
 	}
 	return suite, nil
+}
+
+func (r *Runner) selectionSummary() string {
+	var parts []string
+	if len(r.opts.CaseIDs) > 0 {
+		ids := append([]string(nil), r.opts.CaseIDs...)
+		sort.Strings(ids)
+		parts = append(parts, "cases="+strings.Join(ids, ","))
+	}
+	if r.opts.Suite != "" {
+		parts = append(parts, "suite="+r.opts.Suite)
+	}
+	if r.opts.MinSteps > 0 {
+		parts = append(parts, fmt.Sprintf("min_steps=%d", r.opts.MinSteps))
+	}
+	if len(parts) == 0 {
+		return "default"
+	}
+	return strings.Join(parts, " ")
 }
 
 func (r *Runner) stripeBin(ctx context.Context) (string, error) {
@@ -159,11 +192,19 @@ func (r *Runner) loadCases() ([]Case, error) {
 		if len(wanted) > 0 && !wanted[c.ID] {
 			continue
 		}
-		if len(wanted) == 0 && c.SkipDefault {
+		selectionFilterSet := r.opts.Suite != "" || r.opts.MinSteps > 0
+		if len(wanted) == 0 && !selectionFilterSet && c.SkipDefault {
 			continue
 		}
 		if err := validateCase(c, path); err != nil {
 			return nil, err
+		}
+		matches, err := r.caseMatchesSelection(c)
+		if err != nil {
+			return nil, err
+		}
+		if !matches {
+			continue
 		}
 		cases = append(cases, c)
 	}
@@ -172,6 +213,68 @@ func (r *Runner) loadCases() ([]Case, error) {
 		return nil, fmt.Errorf("no eval cases selected")
 	}
 	return cases, nil
+}
+
+func (r *Runner) caseMatchesSelection(c Case) (bool, error) {
+	if r.opts.Suite != "" {
+		matches, err := caseMatchesSuite(c, r.opts.Suite)
+		if err != nil || !matches {
+			return matches, err
+		}
+	}
+	if r.opts.MinSteps > 0 {
+		steps, err := blueprintStepCount(c.Blueprint)
+		if err != nil {
+			return false, err
+		}
+		if steps < r.opts.MinSteps {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func caseMatchesSuite(c Case, suite string) (bool, error) {
+	suite = strings.TrimSpace(strings.ToLower(suite))
+	switch suite {
+	case "", "all":
+		return true, nil
+	case "default":
+		return !c.SkipDefault, nil
+	case "complex":
+		return hasCaseTag(c, "complex-blueprint"), nil
+	default:
+		if strings.HasPrefix(suite, "tag:") {
+			tag := strings.TrimSpace(strings.TrimPrefix(suite, "tag:"))
+			if tag == "" {
+				return false, fmt.Errorf("--suite tag: requires a tag name")
+			}
+			return hasCaseTag(c, tag), nil
+		}
+		return false, fmt.Errorf("unknown eval suite %q; use default, all, complex, or tag:<tag>", suite)
+	}
+}
+
+func hasCaseTag(c Case, tag string) bool {
+	tag = strings.ToLower(strings.TrimSpace(tag))
+	for _, candidate := range c.Tags {
+		if strings.ToLower(strings.TrimSpace(candidate)) == tag {
+			return true
+		}
+	}
+	return false
+}
+
+func blueprintStepCount(id string) (int, error) {
+	bp, err := coop.LoadBlueprint(id)
+	if err != nil {
+		return 0, err
+	}
+	steps := 0
+	for _, chapter := range bp.Chapters {
+		steps += len(chapter.Nodes)
+	}
+	return steps, nil
 }
 
 func validateCase(c Case, path string) error {
@@ -309,6 +412,7 @@ func (r *Runner) runCase(parent context.Context, c Case, realStripeBin string) C
 	stopHistory()
 	<-historyDone
 	records = append(records, agentRecord)
+	result.AgentDurationMS = agentRecord.DurationMS
 	redactSensitiveArtifacts(startStdout, startStderr, agentRecord.Stdout, agentRecord.Stderr, stripeLog, filepath.Join(xdgHome, "stripe", "config.toml"))
 	redactSensitiveArtifactsInDir(historyDir)
 	writeCommandLog(resultDir, records)
@@ -369,8 +473,7 @@ func (r *Runner) runAgentAndDrive(ctx context.Context, c Case, agent, workspace 
 		if err := os.WriteFile(promptPath, []byte(agentPrompt(c, startResp)), 0600); err != nil {
 			return commandRecord{Name: agent, ExitCode: -1, Stdout: agentStdout, Stderr: agentStderr}, nil, err
 		}
-		name = "sh"
-		args = []string{"-c", r.opts.AgentCommand}
+		name, args = r.commandAgentInvocation()
 		cmd = exec.CommandContext(runCtx, name, args...)
 		env = append(env,
 			"COOP_EVAL_PROMPT_FILE="+promptPath,
@@ -380,6 +483,7 @@ func (r *Runner) runAgentAndDrive(ctx context.Context, c Case, agent, workspace 
 	}
 	cmd.Dir = workspace
 	cmd.Env = env
+	prepareProcessGroup(cmd)
 	stdout, err := os.Create(agentStdout)
 	if err != nil {
 		return commandRecord{Name: name, Args: args, ExitCode: -1}, nil, err
@@ -396,6 +500,7 @@ func (r *Runner) runAgentAndDrive(ctx context.Context, c Case, agent, workspace 
 	if err := cmd.Start(); err != nil {
 		return commandRecord{Name: name, Args: args, Cwd: workspace, StartedAt: started, ExitCode: -1, Stdout: agentStdout, Stderr: agentStderr}, nil, err
 	}
+	defer terminateProcessGroup(cmd.Process.Pid)
 
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -482,6 +587,21 @@ func (r *Runner) runAgentAndDrive(ctx context.Context, c Case, agent, workspace 
 		Stderr:     agentStderr,
 	}
 	return record, actions, runErr
+}
+
+func (r *Runner) commandAgentInvocation() (string, []string) {
+	if r.opts.DisableAgentSandbox || commandAlreadyUsesAgentSandbox(r.opts.AgentCommand) {
+		return "sh", []string{"-c", r.opts.AgentCommand}
+	}
+	wrapper := filepath.Join(r.opts.RepoRoot, "scripts", "coop-eval-agent-sandbox.sh")
+	if _, err := os.Stat(wrapper); err != nil {
+		return "sh", []string{"-c", r.opts.AgentCommand}
+	}
+	return wrapper, []string{"sh", "-c", r.opts.AgentCommand}
+}
+
+func commandAlreadyUsesAgentSandbox(command string) bool {
+	return strings.Contains(command, "coop-eval-agent-sandbox.sh")
 }
 
 func driveHuman(ctx context.Context, store *coop.Store, sessionID string, plan []HumanAction) ([]DriverAction, error) {
@@ -1463,6 +1583,17 @@ func writeMarkdownSummary(path string, suite *SuiteResult) error {
 		status = "FAIL"
 	}
 	fmt.Fprintf(&b, "# Co-op Eval Summary\n\n%s\n\n", status)
+	if suite.Selection != "" {
+		fmt.Fprintf(&b, "- selection: `%s`\n", suite.Selection)
+	}
+	fmt.Fprintf(&b, "- wall duration: %s\n", formatDurationMS(suite.DurationMS))
+	if suite.AgentDurationMS > 0 {
+		fmt.Fprintf(&b, "- agent runtime: %s\n", formatDurationMS(suite.AgentDurationMS))
+	}
+	if suite.Interrupted {
+		fmt.Fprintf(&b, "- interrupted: %s\n", suite.InterruptionReason)
+	}
+	b.WriteString("\n")
 	for _, c := range suite.Cases {
 		caseStatus := "PASS"
 		if !c.Passed {
@@ -1470,7 +1601,10 @@ func writeMarkdownSummary(path string, suite *SuiteResult) error {
 		}
 		fmt.Fprintf(&b, "## %s %s\n\n", caseStatus, c.ID)
 		fmt.Fprintf(&b, "- agent: `%s`\n", c.Agent)
-		fmt.Fprintf(&b, "- duration: %dms\n", c.DurationMS)
+		fmt.Fprintf(&b, "- duration: %s\n", formatDurationMS(c.DurationMS))
+		if c.AgentDurationMS > 0 {
+			fmt.Fprintf(&b, "- agent runtime: %s\n", formatDurationMS(c.AgentDurationMS))
+		}
 		for _, score := range orderedScores(c.Scores) {
 			fmt.Fprintf(&b, "- %s: %.2f\n", score, c.Scores[score])
 		}
@@ -1492,6 +1626,14 @@ func writeMarkdownSummary(path string, suite *SuiteResult) error {
 		b.WriteString("\n")
 	}
 	return os.WriteFile(path, []byte(b.String()), 0644)
+}
+
+func formatDurationMS(ms int64) string {
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
+	d := time.Duration(ms) * time.Millisecond
+	return d.Truncate(time.Second).String()
 }
 
 func orderedScores(scores map[string]float64) []string {
