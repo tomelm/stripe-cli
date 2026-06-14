@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/stripe/stripe-cli/pkg/coop"
 )
 
 func TestWorkspacePathContainsPatternMatchesRootAndNestedGlobs(t *testing.T) {
@@ -112,4 +114,92 @@ func TestRedactResultArtifactsSkipsWorkspace(t *testing.T) {
 	workspaceData, err := os.ReadFile(workspacePath)
 	require.NoError(t, err)
 	require.Contains(t, string(workspaceData), "sk_test_123")
+}
+
+func TestScoreImplementationIntegrationPassesForChangedAppSource(t *testing.T) {
+	workspace := gitFixtureWorkspace(t)
+	require.NoError(t, os.WriteFile(filepath.Join(workspace, "server.js"), []byte("stripe.checkout.sessions.create({ mode: 'payment' })\n"), 0644))
+
+	result := &CaseResult{Workspace: workspace}
+	session := &coop.Session{
+		Chapters: []coop.SessionChapter{{
+			Nodes: []coop.SessionNode{{
+				Type:  coop.NodeAPIRequest,
+				Title: "Create a Checkout Session",
+				State: coop.StepDone,
+				Implementation: &coop.Implementation{
+					File: "server.js",
+					Note: "Added checkout route",
+				},
+				Verifications: []coop.Verification{{
+					Check:  "curl http://localhost:4242/checkout returned a Stripe Checkout redirect",
+					Passed: true,
+				}},
+			}},
+		}},
+	}
+
+	scoreImplementationIntegration(result, session)
+
+	require.True(t, checkPassed(result.Checks, "app_source_changed"))
+	require.True(t, checkPassed(result.Checks, "implementation_reports_app_source"))
+	require.True(t, checkPassed(result.Checks, "app_flow_verified"))
+}
+
+func TestScoreImplementationIntegrationFailsForCLIOnlyWork(t *testing.T) {
+	workspace := gitFixtureWorkspace(t)
+
+	result := &CaseResult{Workspace: workspace}
+	session := &coop.Session{
+		Chapters: []coop.SessionChapter{{
+			Nodes: []coop.SessionNode{{
+				Type:  coop.NodeAPIRequest,
+				Title: "Create a billing meter",
+				State: coop.StepDone,
+				Implementation: &coop.Implementation{
+					File: "README.md",
+					Note: "Created meter with stripe billing meters create",
+				},
+				Verifications: []coop.Verification{{
+					Check:  "stripe billing meters create returned an active meter",
+					Passed: true,
+				}},
+			}},
+		}},
+	}
+
+	scoreImplementationIntegration(result, session)
+
+	require.False(t, checkPassed(result.Checks, "app_source_changed"))
+	require.False(t, checkPassed(result.Checks, "implementation_reports_app_source"))
+	require.False(t, checkPassed(result.Checks, "app_flow_verified"))
+}
+
+func gitFixtureWorkspace(t *testing.T) string {
+	t.Helper()
+	workspace := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(workspace, "README.md"), []byte("# Fixture\n"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(workspace, "package.json"), []byte(`{"dependencies":{}}`), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(workspace, "server.js"), []byte("console.log('fixture')\n"), 0644))
+	runGit(t, workspace, "init")
+	runGit(t, workspace, "add", ".")
+	runGit(t, workspace, "-c", "user.email=coop@example.com", "-c", "user.name=Coop Eval", "commit", "-m", "fixture")
+	return workspace
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(output))
+}
+
+func checkPassed(checks []CheckResult, name string) bool {
+	for _, check := range checks {
+		if check.Name == name {
+			return check.Passed
+		}
+	}
+	return false
 }

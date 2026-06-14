@@ -705,11 +705,15 @@ func scoreCase(result *CaseResult, c Case, session *coop.Session, sessionErr err
 	}
 
 	scoreWorkspaceChecks(result, c)
+	scoreImplementationIntegration(result, session)
 	result.Scores["overall"] = weightedScore(result.Checks)
 	result.Scores["protocol"] = namedScore(result.Checks, "session_completed", "all_steps_terminal", "reviews_awaited", "request_changes_recovered")
 	result.Scores["evidence"] = namedScore(result.Checks, "review_evidence_present")
-	if hasNamedChecks(result.Checks, "expected_file", "expected_pattern", "forbidden_pattern") {
-		result.Scores["blueprint_correctness"] = namedScore(result.Checks, "expected_file", "expected_pattern", "forbidden_pattern")
+	if hasNamedChecks(result.Checks, "app_source_changed", "implementation_reports_app_source", "app_flow_verified") {
+		result.Scores["implementation"] = namedScore(result.Checks, "app_source_changed", "implementation_reports_app_source", "app_flow_verified")
+	}
+	if hasNamedChecks(result.Checks, "expected_file", "expected_pattern", "forbidden_pattern", "app_source_changed", "implementation_reports_app_source", "app_flow_verified") {
+		result.Scores["blueprint_correctness"] = namedScore(result.Checks, "expected_file", "expected_pattern", "forbidden_pattern", "app_source_changed", "implementation_reports_app_source", "app_flow_verified")
 	}
 }
 
@@ -749,6 +753,187 @@ func scoreWorkspaceChecks(result *CaseResult, c Case) {
 	}
 }
 
+func scoreImplementationIntegration(result *CaseResult, session *coop.Session) {
+	if !sessionRequiresAppImplementation(session) {
+		return
+	}
+	changedFiles := changedAppSourceFiles(result.Workspace)
+	changed := map[string]bool{}
+	for _, path := range changedFiles {
+		changed[path] = true
+	}
+
+	result.Checks = append(result.Checks, CheckResult{
+		Name:    "app_source_changed",
+		Passed:  len(changedFiles) > 0,
+		Message: "app integration should change source files, not only create Stripe resources",
+		Weight:  8,
+	})
+	result.Checks = append(result.Checks, CheckResult{
+		Name:    "implementation_reports_app_source",
+		Passed:  sessionReportsChangedAppSource(session, result.Workspace, changed),
+		Message: "report-work for app integration should point at changed app source",
+		Weight:  6,
+	})
+	result.Checks = append(result.Checks, CheckResult{
+		Name:    "app_flow_verified",
+		Passed:  sessionHasAppFlowVerification(session),
+		Message: "verification should exercise the app, not only direct Stripe CLI/API calls",
+		Weight:  6,
+	})
+}
+
+func sessionRequiresAppImplementation(session *coop.Session) bool {
+	for _, ch := range session.Chapters {
+		for _, node := range ch.Nodes {
+			if isAppImplementationNode(node) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isAppImplementationNode(node coop.SessionNode) bool {
+	if node.State == coop.StepSkipped {
+		return false
+	}
+	switch node.Type {
+	case coop.NodeAPIRequest, coop.NodeAsyncHandler, coop.NodeUIComponent:
+		return true
+	default:
+		return false
+	}
+}
+
+func changedAppSourceFiles(workspace string) []string {
+	data, err := exec.Command("git", "-C", workspace, "status", "--porcelain").Output()
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	for _, line := range strings.Split(string(data), "\n") {
+		if len(line) < 4 {
+			continue
+		}
+		path := strings.TrimSpace(line[3:])
+		if strings.Contains(path, " -> ") {
+			parts := strings.Split(path, " -> ")
+			path = strings.TrimSpace(parts[len(parts)-1])
+		}
+		path = filepath.ToSlash(path)
+		if isAppSourcePath(path) {
+			seen[path] = true
+		}
+	}
+	var paths []string
+	for path := range seen {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func isAppSourcePath(path string) bool {
+	path = filepath.ToSlash(strings.TrimSpace(path))
+	if path == "" || strings.HasSuffix(path, "/") {
+		return false
+	}
+	for _, part := range strings.Split(path, "/") {
+		if shouldSkipEvalScanDir(part) {
+			return false
+		}
+	}
+	base := strings.ToLower(filepath.Base(path))
+	switch base {
+	case "readme", "readme.md", "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "go.mod", "go.sum", "gemfile", "gemfile.lock":
+		return false
+	}
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".go", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".py", ".rb", ".php", ".java", ".kt", ".kts", ".cs", ".rs", ".swift":
+		return true
+	default:
+		return false
+	}
+}
+
+func sessionReportsChangedAppSource(session *coop.Session, workspace string, changed map[string]bool) bool {
+	if len(changed) == 0 {
+		return false
+	}
+	for _, ch := range session.Chapters {
+		for _, node := range ch.Nodes {
+			if !isAppImplementationNode(node) || node.Implementation == nil {
+				continue
+			}
+			path := workspaceRelativePath(workspace, node.Implementation.File)
+			if changed[path] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func workspaceRelativePath(workspace, path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if filepath.IsAbs(path) {
+		if rel, err := filepath.Rel(workspace, path); err == nil {
+			path = rel
+		}
+	}
+	return filepath.ToSlash(filepath.Clean(path))
+}
+
+func sessionHasAppFlowVerification(session *coop.Session) bool {
+	for _, ch := range session.Chapters {
+		for _, node := range ch.Nodes {
+			if !isAppImplementationNode(node) {
+				continue
+			}
+			for _, verification := range node.Verifications {
+				if verification.Passed && looksLikeAppFlowVerification(verification.Check) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func looksLikeAppFlowVerification(check string) bool {
+	check = strings.ToLower(check)
+	hints := []string{
+		"localhost",
+		"127.0.0.1",
+		"curl ",
+		"npm test",
+		"node ",
+		"go test",
+		"pytest",
+		"server",
+		"route",
+		"endpoint",
+		"browser",
+		"visit http",
+		"open http",
+		"/api/",
+		"/webhook",
+		"/checkout",
+		"/success",
+		"/cancel",
+	}
+	for _, hint := range hints {
+		if strings.Contains(check, hint) {
+			return true
+		}
+	}
+	return false
+}
+
 func agentPrompt(c Case, startResp struct {
 	SessionID         string `json:"session_id"`
 	AgentInstructions string `json:"agent_instructions"`
@@ -758,6 +943,12 @@ func agentPrompt(c Case, startResp struct {
 	return fmt.Sprintf(`You are being evaluated on a Stripe co-op integration task.
 
 Work in the current directory. Use the "stripe" command from PATH; it is a local wrapper for the candidate CLI and records command usage.
+
+The blueprint is the desired Stripe workflow. The deliverable is the app in this workspace implementing that workflow. Direct Stripe CLI/API calls can support setup and verification, but they do not count as implementation for apiRequest, asyncHandler, or uiComponent steps.
+For apiRequest steps, add or update app code that calls Stripe through the project's SDK/client layer, then verify by exercising that app code.
+For asyncHandler steps, add or update the app's webhook/event handler and verify with signed events through the local app.
+For uiComponent steps, add or update the app's user-facing route/page/control and verify through the app.
+Use report-work with the app source file you changed. If you only created Stripe resources via CLI, the eval will treat the integration as incomplete.
 
 Follow the co-op JSON response exactly. Run the "next" command, continue following each JSON response's "next" field, and await human review when instructed. Do not bypass review gates.
 The runner isolates HOME and XDG_CONFIG_HOME for this eval. Do not read ~/.config/stripe, ~/.stripe, or other host machine config. If a local SDK command needs a Stripe key, use the eval-scoped config under $XDG_CONFIG_HOME/stripe/config.toml.
