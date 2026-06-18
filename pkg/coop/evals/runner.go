@@ -138,6 +138,13 @@ func (r *Runner) Run(ctx context.Context) (*SuiteResult, error) {
 	if err := writeMarkdownSummary(filepath.Join(r.opts.ResultsDir, "summary.md"), suite); err != nil {
 		return suite, err
 	}
+	if err := WriteHTMLReport(ReportOptions{
+		ResultsDirs: []string{r.opts.ResultsDir},
+		OutputPath:  filepath.Join(r.opts.ResultsDir, "summary.html"),
+		Title:       "Co-op Eval Summary",
+	}); err != nil {
+		return suite, err
+	}
 	return suite, nil
 }
 

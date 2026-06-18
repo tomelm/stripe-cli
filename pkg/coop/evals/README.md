@@ -137,6 +137,7 @@ Each run writes:
 eval-results/<run-id>/
   summary.json
   summary.md
+  summary.html
   <case-id>/
     case.json
     result.json
@@ -156,6 +157,46 @@ eval-results/<run-id>/
     workspace/
     workspace.diff
     workspace-status.txt
+```
+
+`summary.html` is a self-contained, minimally interactive report. It includes
+run scorecards, failed checks, judge findings, recorded command outcomes, and the
+agent's final co-op step evidence from `final-session.json`.
+
+To regenerate a report for one run:
+
+```sh
+go run ./pkg/coop/evals/cmd/coop-eval-report \
+  --results-dir eval-results/<run-id> \
+  --output eval-results/<run-id>/summary.html
+```
+
+To compare multiple runs and annotate fixes between them:
+
+```sh
+go run ./pkg/coop/evals/cmd/coop-eval-report \
+  --results-dir eval-results/<before-run> \
+  --results-dir eval-results/<after-run> \
+  --fixes coop-eval-fixes.json \
+  --output coop-eval-report.html
+```
+
+The optional fixes file can be either an array or an object with a `fixes`
+array:
+
+```json
+{
+  "fixes": [
+    {
+      "title": "Tighten app integration guidance",
+      "before_run": "20260614-234701",
+      "after_run": "20260615-022036",
+      "cases": ["hive-one-time-payment-python"],
+      "summary": "The rerun used the existing app checkout flow instead of a standalone Stripe demo.",
+      "changes": ["Use app-owned order data", "Fulfill through signed webhook events"]
+    }
+  ]
+}
 ```
 
 Scoring currently covers:
