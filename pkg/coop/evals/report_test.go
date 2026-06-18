@@ -33,6 +33,7 @@ func TestWriteHTMLReportDiscoversPartialRunAndFixTimeline(t *testing.T) {
 		ResultsDirs: []string{beforeDir, afterDir},
 		OutputPath:  outputPath,
 		FixesPath:   fixesPath,
+		Portable:    true,
 	}))
 
 	html, err := os.ReadFile(outputPath)
@@ -49,6 +50,8 @@ func TestWriteHTMLReportDiscoversPartialRunAndFixTimeline(t *testing.T) {
 	require.Contains(t, string(html), "&#43;0.52")
 	require.Contains(t, string(html), "Understand the project")
 	require.Contains(t, string(html), "Use app-owned order data")
+	require.NotContains(t, string(html), "file://")
+	require.Contains(t, string(html), `href="before-run/one-time-payment-node/final-session.json"`)
 }
 
 func writeReportCaseFixture(t *testing.T, runDir, caseID string, passed bool, overall, judgeScore float64) {

@@ -1,7 +1,8 @@
 dist/
 bin/
 coverage.txt
-eval-results/
+/eval-results/*
+!/eval-results/go.mod
 /stripe
 /stripe-darwin
 /stripe-linux

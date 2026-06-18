@@ -112,6 +112,10 @@ autofill, and Keychain prompts. Use `--disable-agent-sandbox` only when the
 case deliberately tests browser-launch behavior.
 Agent stdout/stderr and workspace diffs redact Stripe API-key-shaped values before
 they are written into the final artifact set.
+Result artifacts, including retained workspaces, are sanitized before the run
+finishes so shared reports do not leak eval keys or auth URLs. The agent
+process receives an explicit eval environment instead of inheriting the full
+host shell environment.
 
 Run with an optional LLM judge:
 
@@ -168,7 +172,8 @@ To regenerate a report for one run:
 ```sh
 go run ./pkg/coop/evals/cmd/coop-eval-report \
   --results-dir eval-results/<run-id> \
-  --output eval-results/<run-id>/summary.html
+  --output eval-results/<run-id>/summary.html \
+  --portable
 ```
 
 To compare multiple runs and annotate fixes between them:
@@ -178,8 +183,12 @@ go run ./pkg/coop/evals/cmd/coop-eval-report \
   --results-dir eval-results/<before-run> \
   --results-dir eval-results/<after-run> \
   --fixes coop-eval-fixes.json \
-  --output coop-eval-report.html
+  --output coop-eval-report.html \
+  --portable
 ```
+
+`--portable` writes relative artifact links instead of absolute `file://` links.
+The runner uses portable links for each run's `summary.html` automatically.
 
 The optional fixes file can be either an array or an object with a `fixes`
 array:

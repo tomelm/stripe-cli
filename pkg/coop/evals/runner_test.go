@@ -299,11 +299,17 @@ func TestTerminateProcessGroupStopsChildProcess(t *testing.T) {
 func TestWorkspacePathContainsPatternMatchesRootAndNestedGlobs(t *testing.T) {
 	workspace := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(workspace, "server.js"), []byte("stripe.checkout.sessions.create({ mode: 'payment' })"), 0644))
+	require.NoError(t, os.MkdirAll(filepath.Join(workspace, "backend"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(workspace, "backend", "app.py"), []byte("stripe.checkout.Session.create()"), 0644))
 	require.NoError(t, os.MkdirAll(filepath.Join(workspace, "lib"), 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(workspace, "lib", "webhooks.js"), []byte("stripe.webhooks.constructEvent(body, sig, secret)"), 0644))
+	require.NoError(t, os.MkdirAll(filepath.Join(workspace, "backend", "api"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(workspace, "backend", "api", "webhooks.py"), []byte("stripe.Webhook.construct_event(body, sig, secret)"), 0644))
 
 	require.True(t, workspacePathContainsPattern(workspace, "**/*.js", `checkout\.sessions\.create`))
 	require.True(t, workspacePathContainsPattern(workspace, "**/*.js", `webhooks\.constructEvent`))
+	require.True(t, workspacePathContainsPattern(workspace, "backend/**/*.py", `checkout\.Session\.create`))
+	require.True(t, workspacePathContainsPattern(workspace, "backend/**/*.py", `Webhook\.construct_event`))
 }
 
 func TestWorkspacePathContainsPatternSkipsGeneratedDependencyTrees(t *testing.T) {
@@ -315,6 +321,9 @@ func TestWorkspacePathContainsPatternSkipsGeneratedDependencyTrees(t *testing.T)
 }
 
 func TestEvalEnvDisablesBrowserAuth(t *testing.T) {
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "must-not-leak")
+	t.Setenv("STRIPE_SECRET_KEY", "sk_test_eval")
+	t.Setenv("DOCKER_HOST", "unix:///tmp/docker.sock")
 	env := evalEnv("/tmp/xdg", "/tmp/home", "/tmp/shim", "/tmp/repo", "/tmp/stripe", "/tmp/stripe.log", 4242)
 
 	require.Contains(t, env, "SSH_TTY=coop-eval")
@@ -327,6 +336,10 @@ func TestEvalEnvDisablesBrowserAuth(t *testing.T) {
 	require.Contains(t, env, "GOOGLE_CHROME_BIN=/tmp/shim/coop-eval-browser-disabled")
 	require.Contains(t, env, "PUPPETEER_EXECUTABLE_PATH=/tmp/shim/coop-eval-browser-disabled")
 	require.Contains(t, env, "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/tmp/shim/coop-eval-browser-disabled")
+	require.Contains(t, env, "STRIPE_SECRET_KEY=sk_test_eval")
+	require.Contains(t, env, "DOCKER_HOST=unix:///tmp/docker.sock")
+	require.NotContains(t, env, "AWS_SECRET_ACCESS_KEY=must-not-leak")
+	require.NotContains(t, env, "COOP_EVAL_HOST_HOME="+os.Getenv("HOME"))
 }
 
 func TestStripeShimBlocksLoginAndBrowserOpen(t *testing.T) {
@@ -456,7 +469,7 @@ next_step=stripe login --complete 'https://dashboard.stripe.com/stripecli/auth/c
 	require.Contains(t, redacted, "card[number]=[redacted-card-number]")
 }
 
-func TestRedactResultArtifactsSkipsWorkspace(t *testing.T) {
+func TestRedactResultArtifactsSanitizesWorkspace(t *testing.T) {
 	resultDir := t.TempDir()
 	artifactPath := filepath.Join(resultDir, "agent.stderr.txt")
 	workspacePath := filepath.Join(resultDir, "workspace", "server.js")
@@ -473,7 +486,8 @@ func TestRedactResultArtifactsSkipsWorkspace(t *testing.T) {
 
 	workspaceData, err := os.ReadFile(workspacePath)
 	require.NoError(t, err)
-	require.Contains(t, string(workspaceData), "sk_test_123")
+	require.NotContains(t, string(workspaceData), "sk_test_123")
+	require.Contains(t, string(workspaceData), "[redacted]")
 }
 
 func TestScoreImplementationIntegrationPassesForChangedAppSource(t *testing.T) {
@@ -547,8 +561,12 @@ func TestScoreEvalHygieneFlagsUnsafeStripeCommands(t *testing.T) {
 				State:  coop.StepDone,
 				Events: []string{"invoice.created"},
 				Implementation: &coop.Implementation{
-					Note: "Handles invoice.created",
+					Note: "Handles signed invoice.created webhooks with Stripe-Signature verification",
 				},
+				Verifications: []coop.Verification{{
+					Check:  "stripe trigger invoice.created reached the signed local webhook endpoint",
+					Passed: true,
+				}},
 			}},
 		}},
 	}

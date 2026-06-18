@@ -30,11 +30,13 @@ func main() {
 	var outputPath string
 	var title string
 	var fixesPath string
+	var portable bool
 
 	flag.Var(&resultsDirs, "results-dir", "eval results directory; may be repeated or comma-separated")
 	flag.StringVar(&outputPath, "output", "", "output HTML path")
 	flag.StringVar(&title, "title", "Co-op Eval Report", "report title")
 	flag.StringVar(&fixesPath, "fixes", "", "optional JSON file describing fixes between runs")
+	flag.BoolVar(&portable, "portable", false, "write relative artifact links instead of absolute file:// links")
 	flag.Parse()
 
 	resultsDirs = append(resultsDirs, flag.Args()...)
@@ -48,6 +50,7 @@ func main() {
 		OutputPath:  outputPath,
 		Title:       title,
 		FixesPath:   fixesPath,
+		Portable:    portable,
 	}); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
