@@ -35,6 +35,11 @@ func writeMarkdownSummary(path string, suite *SuiteResult) error {
 	if suite.AgentDurationMS > 0 {
 		fmt.Fprintf(&b, "- agent runtime: %s\n", formatDurationMS(suite.AgentDurationMS))
 	}
+	if !suite.ImplementationTokenUsage.IsZero() {
+		fmt.Fprintf(&b, "- implementation tokens: %s\n", formatTokenUsage(suite.ImplementationTokenUsage))
+	} else if suite.ImplementationTokenUsageNote != "" {
+		fmt.Fprintf(&b, "- implementation tokens: %s\n", suite.ImplementationTokenUsageNote)
+	}
 	if suite.Interrupted {
 		fmt.Fprintf(&b, "- interrupted: %s\n", suite.InterruptionReason)
 	}
@@ -49,6 +54,11 @@ func writeMarkdownSummary(path string, suite *SuiteResult) error {
 		fmt.Fprintf(&b, "- duration: %s\n", formatDurationMS(c.DurationMS))
 		if c.AgentDurationMS > 0 {
 			fmt.Fprintf(&b, "- agent runtime: %s\n", formatDurationMS(c.AgentDurationMS))
+		}
+		if !c.ImplementationTokenUsage.IsZero() {
+			fmt.Fprintf(&b, "- implementation tokens: %s\n", formatTokenUsage(c.ImplementationTokenUsage))
+		} else if c.ImplementationTokenUsageNote != "" {
+			fmt.Fprintf(&b, "- implementation tokens: %s\n", c.ImplementationTokenUsageNote)
 		}
 		for _, score := range orderedScores(c.Scores) {
 			fmt.Fprintf(&b, "- %s: %.2f\n", score, c.Scores[score])
@@ -96,6 +106,21 @@ func formatDurationMS(ms int64) string {
 	}
 	d := time.Duration(ms) * time.Millisecond
 	return d.Truncate(time.Second).String()
+}
+
+func formatTokenUsage(usage TokenUsage) string {
+	parts := []string{
+		fmt.Sprintf("%d input", usage.InputTokens),
+		fmt.Sprintf("%d output", usage.OutputTokens),
+		fmt.Sprintf("%d total", usage.TotalTokens),
+	}
+	if usage.CachedInputTokens > 0 {
+		parts = append(parts, fmt.Sprintf("%d cached input", usage.CachedInputTokens))
+	}
+	if usage.ReasoningOutputTokens > 0 {
+		parts = append(parts, fmt.Sprintf("%d reasoning output", usage.ReasoningOutputTokens))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func orderedScores(scores map[string]float64) []string {

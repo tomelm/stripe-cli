@@ -127,6 +127,10 @@ func (r *Runner) Run(ctx context.Context) (*SuiteResult, error) {
 	suite.DurationMS = suite.FinishedAt.Sub(suite.StartedAt).Milliseconds()
 	for _, c := range suite.Cases {
 		suite.AgentDurationMS += c.AgentDurationMS
+		suite.ImplementationTokenUsage.Add(c.ImplementationTokenUsage)
+		if c.ImplementationTokenUsageNote != "" {
+			suite.ImplementationTokenUsageNote = c.ImplementationTokenUsageNote
+		}
 	}
 	if err := writeJSON(filepath.Join(r.opts.ResultsDir, "summary.json"), suite); err != nil {
 		return suite, err
@@ -447,6 +451,7 @@ func (r *Runner) runCase(parent context.Context, c Case, realStripeBin string) C
 	records = append(records, agentRecord)
 	result.AgentDurationMS = agentRecord.DurationMS
 	redactSensitiveArtifacts(startStdout, startStderr, agentRecord.Stdout, agentRecord.Stderr, stripeLog, filepath.Join(xdgHome, "stripe", "config.toml"))
+	result.ImplementationTokenUsage, result.ImplementationTokenUsageNote = implementationTokenUsage(agentRecord.Stdout, agentRecord.Stderr)
 	redactSensitiveArtifactsInDir(historyDir)
 	result.HumanActions = actions
 

@@ -8,6 +8,7 @@ import (
 
 var htmlReportTemplate = template.Must(template.New("coop-eval-report").Funcs(template.FuncMap{
 	"duration":         formatDurationMS,
+	"tokens":           formatTokenUsage,
 	"score":            formatScore,
 	"delta":            formatDelta,
 	"statusClass":      statusClass,
@@ -249,6 +250,7 @@ th { color: var(--muted); font-size: 12px; font-weight: 650; }
     <div class="metric"><div class="value">{{.Summary.BlockingFindings}}</div><div class="label">blocking findings</div></div>
     <div class="metric"><div class="value">{{.Summary.MajorFindings}}</div><div class="label">major findings</div></div>
     <div class="metric"><div class="value">{{.Summary.RunCount}}</div><div class="label">runs included</div></div>
+    {{if .Summary.ImplementationTokenUsage.TotalTokens}}<div class="metric"><div class="value">{{.Summary.ImplementationTokenUsage.TotalTokens}}</div><div class="label">implementation tokens</div></div>{{end}}
   </section>
 
   <section class="section grid intro-grid">
@@ -392,6 +394,7 @@ th { color: var(--muted); font-size: 12px; font-weight: 650; }
           <span class="pill">{{.PassedCases}}/{{.TotalCases}} cases passed</span>
           <span class="pill">overall {{score .AvgOverall}}</span>
           {{if .HasJudge}}<span class="pill">judge {{score .AvgJudge}}</span>{{end}}
+          {{if .ImplementationTokenUsage.TotalTokens}}<span class="pill">impl tokens {{tokens .ImplementationTokenUsage}}</span>{{end}}
           {{if .DurationMS}}<span class="pill">{{duration .DurationMS}}</span>{{end}}
           {{if .Interrupted}}<span class="pill fail">interrupted</span>{{end}}
         </div>
@@ -411,6 +414,7 @@ th { color: var(--muted); font-size: 12px; font-weight: 650; }
               {{if .Judge}}{{if .Judge.Summary}}<p class="case-summary"><strong>Judge summary:</strong> {{.Judge.Summary}}</p>{{end}}{{end}}
               <div class="score-row">
                 {{range .Scores}}<span class="pill score" title="{{.Name}}">{{.Label}} {{score .Value}}</span>{{end}}
+                {{if .ImplementationTokenUsage.TotalTokens}}<span class="pill score" title="Implementation agent token usage, excluding judge and smoke tests">Implementation tokens {{tokens .ImplementationTokenUsage}}</span>{{end}}
               </div>
               {{if .Artifacts}}
               <div class="artifact-links" aria-label="Evidence links">

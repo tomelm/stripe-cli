@@ -23,7 +23,7 @@ scripts/coop-eval.sh --case one-time-payment-debug
 Run the complex real-agent suite:
 
 ```sh
-scripts/coop-eval.sh --suite complex --agent command --agent-command 'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_PROMPT_FILE")"'
+scripts/coop-eval.sh --suite complex --agent command --agent-command 'codex exec --json --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_PROMPT_FILE")"'
 ```
 
 `--suite complex` selects cases tagged `complex-blueprint`, including cases that
@@ -37,7 +37,7 @@ scripts/coop-eval.sh \
   --suite tag:external-fixture \
   --timeout 60m \
   --agent command \
-  --agent-command 'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_PROMPT_FILE")"'
+  --agent-command 'codex exec --json --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_PROMPT_FILE")"'
 ```
 
 External-app fixtures are pinned git sources plus small eval-owned overlays; the
@@ -63,7 +63,7 @@ scripts/coop-eval.sh \
   --case hive-one-time-payment-python \
   --timeout 60m \
   --agent command \
-  --agent-command 'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_PROMPT_FILE")"' \
+  --agent-command 'codex exec --json --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_PROMPT_FILE")"' \
   --judge command \
   --judge-command 'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_JUDGE_PROMPT_FILE")" > "$COOP_EVAL_JUDGE_OUTPUT_FILE"'
 ```
@@ -75,7 +75,7 @@ scripts/coop-eval.sh \
   --suite tag:external-fixture \
   --timeout 60m \
   --agent command \
-  --agent-command 'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_PROMPT_FILE")"' \
+  --agent-command 'codex exec --json --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_PROMPT_FILE")"' \
   --judge command \
   --judge-command 'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_JUDGE_PROMPT_FILE")" > "$COOP_EVAL_JUDGE_OUTPUT_FILE"'
 ```
@@ -96,15 +96,20 @@ scripts/coop-eval.sh \
   --case one-time-payment-node \
   --timeout 30m \
   --agent command \
-  --agent-command 'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_PROMPT_FILE")"'
+  --agent-command 'codex exec --json --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_PROMPT_FILE")"'
 ```
 
 The external command runs inside the fixture workspace. The runner puts a
 `stripe` shim at the front of `PATH`; the shim calls the candidate binary and
-records invocations in the eval artifacts. The runner also sets isolated
-`HOME` and `XDG_CONFIG_HOME` directories for the agent shell. Codex auth is
-preserved with `CODEX_HOME` when available, but Stripe config and co-op state
-should stay inside the eval result directory.
+records invocations in the eval artifacts. For Codex implementation agents,
+include `--json` in `--agent-command` so the runner can read token-count events
+from `agent.stdout.txt`. The recorded `implementation_token_usage` includes the
+entire implementation agent run, including project/context scanning and every
+co-op step. It intentionally excludes the LLM judge, smoke-test commands, and
+deterministic harness work. The runner also sets isolated `HOME` and
+`XDG_CONFIG_HOME` directories for the agent shell. Codex auth is preserved with
+`CODEX_HOME` when available, but Stripe config and co-op state should stay
+inside the eval result directory.
 Command agents are wrapped with `scripts/coop-eval-agent-sandbox.sh` by default
 when that script is available. On macOS it prevents host browser executables
 such as Google Chrome from launching during evals, avoiding desktop profile,
@@ -123,7 +128,7 @@ Run with an optional LLM judge:
 scripts/coop-eval.sh \
   --case hive-one-time-payment-python \
   --agent command \
-  --agent-command 'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_PROMPT_FILE")"' \
+  --agent-command 'codex exec --json --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_PROMPT_FILE")"' \
   --judge command \
   --judge-command 'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_JUDGE_PROMPT_FILE")" > "$COOP_EVAL_JUDGE_OUTPUT_FILE"'
 ```
@@ -162,6 +167,11 @@ eval-results/<run-id>/
     workspace.diff
     workspace-status.txt
 ```
+
+`summary.json`, each case's `result.json`, and `summary.md` include
+`implementation_token_usage` when the implementation agent emitted
+machine-readable token usage. If the field is unavailable, rerun with Codex
+`--json` on the implementation `--agent-command`.
 
 `summary.html` is a self-contained, minimally interactive report. It includes
 run scorecards, failed checks, judge findings, recorded command outcomes, and the

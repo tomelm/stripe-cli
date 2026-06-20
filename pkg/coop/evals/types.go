@@ -70,34 +70,65 @@ type ExternalFixtureDocker struct {
 }
 
 type SuiteResult struct {
-	StartedAt          time.Time    `json:"started_at"`
-	FinishedAt         time.Time    `json:"finished_at"`
-	DurationMS         int64        `json:"duration_ms,omitempty"`
-	AgentDurationMS    int64        `json:"agent_duration_ms,omitempty"`
-	Passed             bool         `json:"passed"`
-	Interrupted        bool         `json:"interrupted,omitempty"`
-	InterruptionReason string       `json:"interruption_reason,omitempty"`
-	Selection          string       `json:"selection,omitempty"`
-	ResultsDir         string       `json:"results_dir"`
-	Cases              []CaseResult `json:"cases"`
+	StartedAt                    time.Time    `json:"started_at"`
+	FinishedAt                   time.Time    `json:"finished_at"`
+	DurationMS                   int64        `json:"duration_ms,omitempty"`
+	AgentDurationMS              int64        `json:"agent_duration_ms,omitempty"`
+	ImplementationTokenUsage     TokenUsage   `json:"implementation_token_usage,omitempty"`
+	ImplementationTokenUsageNote string       `json:"implementation_token_usage_note,omitempty"`
+	Passed                       bool         `json:"passed"`
+	Interrupted                  bool         `json:"interrupted,omitempty"`
+	InterruptionReason           string       `json:"interruption_reason,omitempty"`
+	Selection                    string       `json:"selection,omitempty"`
+	ResultsDir                   string       `json:"results_dir"`
+	Cases                        []CaseResult `json:"cases"`
 }
 
 type CaseResult struct {
-	ID              string             `json:"id"`
-	Agent           string             `json:"agent"`
-	Passed          bool               `json:"passed"`
-	DurationMS      int64              `json:"duration_ms"`
-	AgentDurationMS int64              `json:"agent_duration_ms,omitempty"`
-	SessionID       string             `json:"session_id,omitempty"`
-	Port            int                `json:"port,omitempty"`
-	Workspace       string             `json:"workspace"`
-	ResultDir       string             `json:"result_dir"`
-	Scores          map[string]float64 `json:"scores"`
-	Checks          []CheckResult      `json:"checks"`
-	HumanActions    []DriverAction     `json:"human_actions,omitempty"`
-	Judge           *JudgeResult       `json:"judge,omitempty"`
-	Artifacts       map[string]string  `json:"artifacts"`
-	FailureReason   string             `json:"failure_reason,omitempty"`
+	ID                           string             `json:"id"`
+	Agent                        string             `json:"agent"`
+	Passed                       bool               `json:"passed"`
+	DurationMS                   int64              `json:"duration_ms"`
+	AgentDurationMS              int64              `json:"agent_duration_ms,omitempty"`
+	ImplementationTokenUsage     TokenUsage         `json:"implementation_token_usage,omitempty"`
+	ImplementationTokenUsageNote string             `json:"implementation_token_usage_note,omitempty"`
+	SessionID                    string             `json:"session_id,omitempty"`
+	Port                         int                `json:"port,omitempty"`
+	Workspace                    string             `json:"workspace"`
+	ResultDir                    string             `json:"result_dir"`
+	Scores                       map[string]float64 `json:"scores"`
+	Checks                       []CheckResult      `json:"checks"`
+	HumanActions                 []DriverAction     `json:"human_actions,omitempty"`
+	Judge                        *JudgeResult       `json:"judge,omitempty"`
+	Artifacts                    map[string]string  `json:"artifacts"`
+	FailureReason                string             `json:"failure_reason,omitempty"`
+}
+
+// TokenUsage captures implementation-agent LLM token usage for a case or suite.
+// It intentionally excludes judge, fixture smoke-test, and deterministic harness
+// commands so the number answers "what did it cost to build this integration?"
+type TokenUsage struct {
+	InputTokens           int64 `json:"input_tokens,omitempty"`
+	CachedInputTokens     int64 `json:"cached_input_tokens,omitempty"`
+	OutputTokens          int64 `json:"output_tokens,omitempty"`
+	ReasoningOutputTokens int64 `json:"reasoning_output_tokens,omitempty"`
+	TotalTokens           int64 `json:"total_tokens,omitempty"`
+}
+
+func (u TokenUsage) IsZero() bool {
+	return u.InputTokens == 0 &&
+		u.CachedInputTokens == 0 &&
+		u.OutputTokens == 0 &&
+		u.ReasoningOutputTokens == 0 &&
+		u.TotalTokens == 0
+}
+
+func (u *TokenUsage) Add(other TokenUsage) {
+	u.InputTokens += other.InputTokens
+	u.CachedInputTokens += other.CachedInputTokens
+	u.OutputTokens += other.OutputTokens
+	u.ReasoningOutputTokens += other.ReasoningOutputTokens
+	u.TotalTokens += other.TotalTokens
 }
 
 type CheckResult struct {

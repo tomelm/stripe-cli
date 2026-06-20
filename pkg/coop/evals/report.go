@@ -107,66 +107,69 @@ type reportEvalCase struct {
 }
 
 type reportSummary struct {
-	RunCount         int
-	CaseCount        int
-	PassedCases      int
-	FailedCases      int
-	JudgedCases      int
-	BlockingFindings int
-	MajorFindings    int
+	RunCount                 int
+	CaseCount                int
+	PassedCases              int
+	FailedCases              int
+	JudgedCases              int
+	BlockingFindings         int
+	MajorFindings            int
+	ImplementationTokenUsage TokenUsage
 }
 
 type reportRun struct {
-	ID              string
-	Path            string
-	StartedAt       time.Time
-	FinishedAt      time.Time
-	DurationMS      int64
-	AgentDurationMS int64
-	Selection       string
-	Passed          bool
-	Interrupted     bool
-	Cases           []reportCase
-	TotalCases      int
-	PassedCases     int
-	FailedCases     int
-	AvgOverall      float64
-	AvgJudge        float64
-	HasJudge        bool
+	ID                       string
+	Path                     string
+	StartedAt                time.Time
+	FinishedAt               time.Time
+	DurationMS               int64
+	AgentDurationMS          int64
+	ImplementationTokenUsage TokenUsage
+	Selection                string
+	Passed                   bool
+	Interrupted              bool
+	Cases                    []reportCase
+	TotalCases               int
+	PassedCases              int
+	FailedCases              int
+	AvgOverall               float64
+	AvgJudge                 float64
+	HasJudge                 bool
 }
 
 type reportCase struct {
-	ID                 string
-	Blueprint          string
-	Fixture            string
-	FixtureDescription string
-	Language           string
-	Description        string
-	Tags               []string
-	UpstreamLabel      string
-	UpstreamURL        template.URL
-	UpstreamRef        string
-	UpstreamRefURL     template.URL
-	Agent              string
-	Passed             bool
-	Status             string
-	DurationMS         int64
-	AgentDurationMS    int64
-	ResultDir          string
-	ResultDirRel       string
-	WorkspaceRel       string
-	Artifacts          []reportArtifact
-	Scores             []scorePair
-	OverallScore       float64
-	JudgeScore         float64
-	HasJudge           bool
-	FailureReason      string
-	FailedChecks       []CheckResult
-	Checks             []CheckResult
-	Judge              *JudgeResult
-	Session            *reportSession
-	Commands           []reportCommand
-	SearchText         string
+	ID                       string
+	Blueprint                string
+	Fixture                  string
+	FixtureDescription       string
+	Language                 string
+	Description              string
+	Tags                     []string
+	UpstreamLabel            string
+	UpstreamURL              template.URL
+	UpstreamRef              string
+	UpstreamRefURL           template.URL
+	Agent                    string
+	Passed                   bool
+	Status                   string
+	DurationMS               int64
+	AgentDurationMS          int64
+	ImplementationTokenUsage TokenUsage
+	ResultDir                string
+	ResultDirRel             string
+	WorkspaceRel             string
+	Artifacts                []reportArtifact
+	Scores                   []scorePair
+	OverallScore             float64
+	JudgeScore               float64
+	HasJudge                 bool
+	FailureReason            string
+	FailedChecks             []CheckResult
+	Checks                   []CheckResult
+	Judge                    *JudgeResult
+	Session                  *reportSession
+	Commands                 []reportCommand
+	SearchText               string
 }
 
 type scorePair struct {
@@ -414,34 +417,35 @@ func buildReportCase(runDir, caseDir string, result CaseResult, linkBaseDir stri
 		workspace = filepath.Join(caseDir, "workspace")
 	}
 	caseReport := reportCase{
-		ID:                 result.ID,
-		Blueprint:          c.Blueprint,
-		Fixture:            c.Fixture,
-		FixtureDescription: fixture.Description,
-		Language:           c.Language,
-		Description:        c.Description,
-		Tags:               c.Tags,
-		UpstreamLabel:      githubRepoLabel(fixture.Source.URL),
-		UpstreamURL:        template.URL(githubRepoURL(fixture.Source.URL)),
-		UpstreamRef:        shortRef(fixture.Source.Ref),
-		UpstreamRefURL:     template.URL(githubRefURL(fixture.Source.URL, fixture.Source.Ref)),
-		Agent:              result.Agent,
-		Passed:             result.Passed,
-		Status:             caseStatus(result),
-		DurationMS:         result.DurationMS,
-		AgentDurationMS:    result.AgentDurationMS,
-		ResultDir:          caseDir,
-		ResultDirRel:       displayPath(caseDir),
-		WorkspaceRel:       displayPath(workspace),
-		Artifacts:          reportArtifacts(caseDir, workspace, linkBaseDir),
-		Scores:             reportScores(result.Scores),
-		OverallScore:       result.Scores["overall"],
-		FailureReason:      result.FailureReason,
-		FailedChecks:       failedChecks(result.Checks),
-		Checks:             result.Checks,
-		Judge:              result.Judge,
-		Session:            sessionPtr,
-		Commands:           commands,
+		ID:                       result.ID,
+		Blueprint:                c.Blueprint,
+		Fixture:                  c.Fixture,
+		FixtureDescription:       fixture.Description,
+		Language:                 c.Language,
+		Description:              c.Description,
+		Tags:                     c.Tags,
+		UpstreamLabel:            githubRepoLabel(fixture.Source.URL),
+		UpstreamURL:              template.URL(githubRepoURL(fixture.Source.URL)),
+		UpstreamRef:              shortRef(fixture.Source.Ref),
+		UpstreamRefURL:           template.URL(githubRefURL(fixture.Source.URL, fixture.Source.Ref)),
+		Agent:                    result.Agent,
+		Passed:                   result.Passed,
+		Status:                   caseStatus(result),
+		DurationMS:               result.DurationMS,
+		AgentDurationMS:          result.AgentDurationMS,
+		ImplementationTokenUsage: result.ImplementationTokenUsage,
+		ResultDir:                caseDir,
+		ResultDirRel:             displayPath(caseDir),
+		WorkspaceRel:             displayPath(workspace),
+		Artifacts:                reportArtifacts(caseDir, workspace, linkBaseDir),
+		Scores:                   reportScores(result.Scores),
+		OverallScore:             result.Scores["overall"],
+		FailureReason:            result.FailureReason,
+		FailedChecks:             failedChecks(result.Checks),
+		Checks:                   result.Checks,
+		Judge:                    result.Judge,
+		Session:                  sessionPtr,
+		Commands:                 commands,
 	}
 	if caseReport.ID == "" {
 		caseReport.ID = c.ID
@@ -514,6 +518,7 @@ func finalizeRunStats(run *reportRun) {
 			run.FailedCases++
 		}
 		overallSum += c.OverallScore
+		run.ImplementationTokenUsage.Add(c.ImplementationTokenUsage)
 		if c.HasJudge {
 			run.HasJudge = true
 			judgeSum += c.JudgeScore
@@ -558,6 +563,7 @@ func summarizeReportRuns(runs []reportRun) reportSummary {
 					}
 				}
 			}
+			summary.ImplementationTokenUsage.Add(c.ImplementationTokenUsage)
 		}
 	}
 	summary.FailedCases = summary.CaseCount - summary.PassedCases
