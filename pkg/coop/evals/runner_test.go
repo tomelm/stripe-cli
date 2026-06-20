@@ -235,6 +235,44 @@ func TestRunJudgeRequiredAddsGateCheck(t *testing.T) {
 	require.False(t, checkPassed(result.Checks, "llm_judge_required"))
 }
 
+func TestFinalizeCaseOutcomeExplainsDeterministicFailureWithPassingJudge(t *testing.T) {
+	result := &CaseResult{
+		ID:     "deterministic-failed",
+		Scores: map[string]float64{"overall": 0.8, "llm_judge": 0.9},
+		Checks: []CheckResult{
+			{Name: "session_completed", Passed: true},
+			{Name: "app_flow_verified", Passed: false, Message: "no app route verification"},
+		},
+		Judge: &JudgeResult{Passed: true, Score: 0.9},
+	}
+
+	finalizeCaseOutcome(result, true, 0.75)
+
+	require.False(t, result.Passed)
+	require.Contains(t, result.FailureReason, "deterministic gate failed")
+	require.Contains(t, result.FailureReason, "app_flow_verified")
+	require.True(t, gatePassed(result.Gates, "judge"))
+	require.False(t, gatePassed(result.Gates, "deterministic"))
+}
+
+func TestFinalizeCaseOutcomeKeepsOptionalJudgeAdvisorySeparate(t *testing.T) {
+	result := &CaseResult{
+		ID:     "judge-advisory",
+		Scores: map[string]float64{"overall": 1, "llm_judge": 0.4},
+		Checks: []CheckResult{
+			{Name: "session_completed", Passed: true},
+		},
+		Judge: &JudgeResult{Passed: false, Score: 0.4, BlockingIssues: []string{"side demo"}},
+	}
+
+	finalizeCaseOutcome(result, false, 0.75)
+
+	require.True(t, result.Passed)
+	require.Empty(t, result.FailureReason)
+	require.False(t, gatePassed(result.Gates, "judge"))
+	require.False(t, gateRequired(result.Gates, "judge"))
+}
+
 func TestMarkdownSummaryIncludesTimingAndInterruption(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "summary.md")
 	suite := &SuiteResult{
@@ -277,6 +315,24 @@ func TestMarkdownSummaryIncludesTimingAndInterruption(t *testing.T) {
 	require.Contains(t, summary, "- judge blocking issue: webhook not idempotent")
 }
 
+func gatePassed(gates []OutcomeGate, name string) bool {
+	for _, gate := range gates {
+		if gate.Name == name {
+			return gate.Passed
+		}
+	}
+	return false
+}
+
+func gateRequired(gates []OutcomeGate, name string) bool {
+	for _, gate := range gates {
+		if gate.Name == name {
+			return gate.Required
+		}
+	}
+	return false
+}
+
 func TestTerminateProcessGroupStopsChildProcess(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("process groups are only used on POSIX platforms")
@@ -294,6 +350,21 @@ func TestTerminateProcessGroupStopsChildProcess(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("process group did not terminate")
 	}
+}
+
+func TestTerminateAndWaitKillsProcessGroupAfterGrace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process groups are only used on POSIX platforms")
+	}
+	cmd := exec.Command("sh", "-c", "trap '' TERM; sleep 60 & wait")
+	prepareProcessGroup(cmd)
+	require.NoError(t, cmd.Start())
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	err := terminateAndWait(cmd.Process.Pid, done, 100*time.Millisecond)
+	require.Error(t, err)
 }
 
 func TestWorkspacePathContainsPatternMatchesRootAndNestedGlobs(t *testing.T) {

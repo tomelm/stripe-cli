@@ -7,3 +7,5 @@ import "os/exec"
 func prepareProcessGroup(cmd *exec.Cmd) {}
 
 func terminateProcessGroup(pid int) {}
+
+func killProcessGroup(pid int) {}

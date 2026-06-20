@@ -17,3 +17,10 @@ func terminateProcessGroup(pid int) {
 	}
 	_ = syscall.Kill(-pid, syscall.SIGTERM)
 }
+
+func killProcessGroup(pid int) {
+	if pid <= 0 {
+		return
+	}
+	_ = syscall.Kill(-pid, syscall.SIGKILL)
+}

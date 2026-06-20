@@ -26,6 +26,21 @@ func TestTokenUsageFromCodexJSONLUsesLatestCumulativeUsage(t *testing.T) {
 	}, usage)
 }
 
+func TestTokenUsageFromNestedCodexJSONL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.stdout.txt")
+	require.NoError(t, os.WriteFile(path, []byte(`{"outer":{"type":"token_count","info":{"total_token_usage":{"input_tokens":55,"output_tokens":21,"total_tokens":76}}}}
+`), 0644))
+
+	usage, note := implementationTokenUsage(path)
+
+	require.Empty(t, note)
+	require.Equal(t, TokenUsage{
+		InputTokens:  55,
+		OutputTokens: 21,
+		TotalTokens:  76,
+	}, usage)
+}
+
 func TestTokenUsageFromOpenAIUsageObjects(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "agent.stdout.txt")
 	require.NoError(t, os.WriteFile(path, []byte(`{"response":{"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"prompt_tokens_details":{"cached_tokens":2},"completion_tokens_details":{"reasoning_tokens":1}}}}
@@ -51,5 +66,6 @@ func TestTokenUsageUnavailableWithoutMachineReadableUsage(t *testing.T) {
 	usage, note := implementationTokenUsage(path)
 
 	require.True(t, usage.IsZero())
-	require.Equal(t, implementationTokenUsageUnavailable, note)
+	require.Contains(t, note, implementationTokenUsageUnavailable)
+	require.Contains(t, note, "did not contain machine-readable JSON events")
 }

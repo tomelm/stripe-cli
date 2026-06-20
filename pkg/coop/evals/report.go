@@ -152,9 +152,11 @@ type reportCase struct {
 	Agent                    string
 	Passed                   bool
 	Status                   string
+	Gates                    []OutcomeGate
 	DurationMS               int64
 	AgentDurationMS          int64
 	ImplementationTokenUsage TokenUsage
+	ImplementationTokenNote  string
 	ResultDir                string
 	ResultDirRel             string
 	WorkspaceRel             string
@@ -167,6 +169,7 @@ type reportCase struct {
 	FailedChecks             []CheckResult
 	Checks                   []CheckResult
 	Judge                    *JudgeResult
+	ProductSummary           *ProductSummary
 	Session                  *reportSession
 	Commands                 []reportCommand
 	SearchText               string
@@ -409,6 +412,9 @@ func buildReportCase(runDir, caseDir string, result CaseResult, linkBaseDir stri
 			result.Judge = &judge
 		}
 	}
+	if result.ProductSummary == nil {
+		result.ProductSummary = buildProductSummary(&result, nil)
+	}
 	workspace := result.Workspace
 	if workspace != "" && !filepath.IsAbs(workspace) {
 		workspace = filepath.Join(caseDir, workspace)
@@ -431,9 +437,11 @@ func buildReportCase(runDir, caseDir string, result CaseResult, linkBaseDir stri
 		Agent:                    result.Agent,
 		Passed:                   result.Passed,
 		Status:                   caseStatus(result),
+		Gates:                    result.Gates,
 		DurationMS:               result.DurationMS,
 		AgentDurationMS:          result.AgentDurationMS,
 		ImplementationTokenUsage: result.ImplementationTokenUsage,
+		ImplementationTokenNote:  result.ImplementationTokenUsageNote,
 		ResultDir:                caseDir,
 		ResultDirRel:             displayPath(caseDir),
 		WorkspaceRel:             displayPath(workspace),
@@ -444,6 +452,7 @@ func buildReportCase(runDir, caseDir string, result CaseResult, linkBaseDir stri
 		FailedChecks:             failedChecks(result.Checks),
 		Checks:                   result.Checks,
 		Judge:                    result.Judge,
+		ProductSummary:           result.ProductSummary,
 		Session:                  sessionPtr,
 		Commands:                 commands,
 	}
@@ -466,6 +475,7 @@ func buildReportCase(runDir, caseDir string, result CaseResult, linkBaseDir stri
 		strings.Join(caseReport.Tags, " "),
 		judgeSummary(result.Judge),
 		checkMessages(caseReport.FailedChecks),
+		productSummaryText(result.ProductSummary),
 	}, " "))
 	if caseReport.WorkspaceRel == "" || strings.HasPrefix(caseReport.WorkspaceRel, "..") {
 		caseReport.WorkspaceRel = result.Workspace
@@ -745,15 +755,34 @@ func failedChecks(checks []CheckResult) []CheckResult {
 
 func caseStatus(result CaseResult) string {
 	if result.Passed {
+		if result.Judge != nil && !result.Judge.Passed && result.Judge.Error == "" {
+			return "pass with judge concerns"
+		}
 		return "pass"
 	}
-	if result.Judge != nil && !result.Judge.Passed && result.Judge.Error == "" {
-		return "judge failed"
+	for _, gate := range result.Gates {
+		if gate.Required && !gate.Skipped && !gate.Passed {
+			return gate.Name + " failed"
+		}
 	}
 	if result.FailureReason != "" {
-		return "runner failed"
+		return "failed"
 	}
 	return "failed"
+}
+
+func productSummaryText(summary *ProductSummary) string {
+	if summary == nil {
+		return ""
+	}
+	return strings.Join([]string{
+		summary.AppIntegration,
+		summary.AppMap,
+		summary.StripePersistence,
+		summary.WebhookProof,
+		summary.AppStateProof,
+		strings.Join(summary.RemainingConcerns, " "),
+	}, " ")
 }
 
 func displayPath(path string) string {
@@ -875,9 +904,13 @@ func judgeSummary(judge *JudgeResult) string {
 func checkMessages(checks []CheckResult) string {
 	var messages []string
 	for _, check := range checks {
-		messages = append(messages, check.Name, check.Message)
+		if check.Message != "" {
+			messages = append(messages, check.Name+": "+check.Message)
+		} else {
+			messages = append(messages, check.Name)
+		}
 	}
-	return strings.Join(messages, " ")
+	return strings.Join(messages, "; ")
 }
 
 func loadReportFixes(path string) ([]ReportFix, error) {

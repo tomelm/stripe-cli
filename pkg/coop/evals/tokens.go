@@ -4,30 +4,60 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
+	"strings"
 )
 
-const implementationTokenUsageUnavailable = "implementation token usage unavailable; run the implementation agent with Codex --json so token_count events are captured"
+const implementationTokenUsageUnavailable = "implementation token usage unavailable"
 
 func implementationTokenUsage(paths ...string) (TokenUsage, string) {
 	var total TokenUsage
+	var stats tokenUsageStats
 	for _, path := range paths {
-		usage := tokenUsageFromFile(path)
-		total.Add(usage)
+		result := tokenUsageFromFile(path)
+		stats.Add(result.stats)
+		total.Add(result.usage)
 	}
 	if total.IsZero() {
-		return total, implementationTokenUsageUnavailable
+		return total, implementationTokenUsageNote(stats)
 	}
 	return total, ""
 }
 
-func tokenUsageFromFile(path string) TokenUsage {
+type tokenUsageResult struct {
+	usage TokenUsage
+	stats tokenUsageStats
+}
+
+type tokenUsageStats struct {
+	Paths       int
+	Readable    int
+	NonEmpty    int
+	JSONEvents  int
+	UsageEvents int
+}
+
+func (s *tokenUsageStats) Add(other tokenUsageStats) {
+	s.Paths += other.Paths
+	s.Readable += other.Readable
+	s.NonEmpty += other.NonEmpty
+	s.JSONEvents += other.JSONEvents
+	s.UsageEvents += other.UsageEvents
+}
+
+func tokenUsageFromFile(path string) tokenUsageResult {
+	result := tokenUsageResult{stats: tokenUsageStats{Paths: 1}}
 	if path == "" {
-		return TokenUsage{}
+		return result
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return TokenUsage{}
+		return result
+	}
+	result.stats.Readable++
+	if len(bytes.TrimSpace(data)) > 0 {
+		result.stats.NonEmpty++
 	}
 
 	var usage TokenUsage
@@ -44,37 +74,74 @@ func tokenUsageFromFile(path string) TokenUsage {
 		if err := json.Unmarshal(line, &event); err != nil {
 			continue
 		}
-		if latest, ok := cumulativeTokenUsage(event); ok {
-			cumulative = latest
+		result.stats.JSONEvents++
+		if latest := cumulativeTokenUsages(event); len(latest) > 0 {
+			cumulative = latest[len(latest)-1]
 			foundCumulative = true
+			result.stats.UsageEvents += len(latest)
 			continue
 		}
-		for _, found := range usageObjects(event) {
+		found := usageObjects(event)
+		result.stats.UsageEvents += len(found)
+		for _, found := range found {
 			usage.Add(found)
 		}
 	}
 	if foundCumulative {
-		return cumulative
+		result.usage = cumulative
+		return result
 	}
 
 	trimmed := bytes.TrimSpace(data)
 	if usage.IsZero() && len(trimmed) > 0 && trimmed[0] == '{' {
 		var event interface{}
 		if err := json.Unmarshal(trimmed, &event); err == nil {
-			if latest, ok := cumulativeTokenUsage(event); ok {
-				return latest
+			result.stats.JSONEvents++
+			if latest := cumulativeTokenUsages(event); len(latest) > 0 {
+				result.stats.UsageEvents += len(latest)
+				result.usage = latest[len(latest)-1]
+				return result
 			}
-			for _, found := range usageObjects(event) {
+			found := usageObjects(event)
+			result.stats.UsageEvents += len(found)
+			for _, found := range found {
 				usage.Add(found)
 			}
 		}
 	}
-	return usage
+	result.usage = usage
+	return result
 }
 
-func cumulativeTokenUsage(value interface{}) (TokenUsage, bool) {
-	obj, ok := value.(map[string]interface{})
-	if !ok {
+func cumulativeTokenUsages(value interface{}) []TokenUsage {
+	switch v := value.(type) {
+	case map[string]interface{}:
+		var usages []TokenUsage
+		if usage, ok := cumulativeTokenUsage(v); ok {
+			usages = append(usages, usage)
+		}
+		for _, child := range v {
+			usages = append(usages, cumulativeTokenUsages(child)...)
+		}
+		return usages
+	case []interface{}:
+		var usages []TokenUsage
+		for _, child := range v {
+			usages = append(usages, cumulativeTokenUsages(child)...)
+		}
+		return usages
+	default:
+		return nil
+	}
+}
+
+func cumulativeTokenUsage(obj map[string]interface{}) (TokenUsage, bool) {
+	if eventType, _ := obj["type"].(string); eventType != "" && eventType != "token_count" {
+		// Only treat total_token_usage as cumulative when it comes from a
+		// token_count event or when no event type is present.
+		return TokenUsage{}, false
+	}
+	if eventType, _ := obj["event"].(string); eventType != "" && eventType != "token_count" {
 		return TokenUsage{}, false
 	}
 	if usage, ok := tokenUsageAt(obj, "info", "total_token_usage"); ok {
@@ -89,12 +156,31 @@ func cumulativeTokenUsage(value interface{}) (TokenUsage, bool) {
 	return TokenUsage{}, false
 }
 
+func implementationTokenUsageNote(stats tokenUsageStats) string {
+	var reason string
+	switch {
+	case stats.Paths == 0:
+		reason = "no agent transcript paths were recorded"
+	case stats.Readable == 0:
+		reason = "no readable agent transcript artifacts were available"
+	case stats.NonEmpty == 0:
+		reason = "agent transcript artifacts were empty"
+	case stats.JSONEvents == 0:
+		reason = "agent transcripts did not contain machine-readable JSON events"
+	case stats.UsageEvents == 0:
+		reason = "agent JSON events did not include token_count, total_token_usage, or usage objects"
+	default:
+		reason = "no nonzero usage was found"
+	}
+	return fmt.Sprintf("%s: %s; run the implementation agent with Codex --json or another agent mode that emits machine-readable token usage", implementationTokenUsageUnavailable, reason)
+}
+
 func usageObjects(value interface{}) []TokenUsage {
 	switch v := value.(type) {
 	case map[string]interface{}:
 		var usages []TokenUsage
 		for key, child := range v {
-			if key == "usage" || key == "token_usage" || key == "tokenUsage" {
+			if isUsageKey(key) {
 				if usage, ok := parseTokenUsage(child); ok {
 					usages = append(usages, usage)
 					continue
@@ -111,6 +197,16 @@ func usageObjects(value interface{}) []TokenUsage {
 		return usages
 	default:
 		return nil
+	}
+}
+
+func isUsageKey(key string) bool {
+	key = strings.TrimSpace(key)
+	switch key {
+	case "usage", "token_usage", "tokenUsage":
+		return true
+	default:
+		return false
 	}
 }
 

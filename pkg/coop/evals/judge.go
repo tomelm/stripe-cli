@@ -305,6 +305,8 @@ func judgeResultInput(result *CaseResult) map[string]interface{} {
 		"session_id":    result.SessionID,
 		"scores":        result.Scores,
 		"checks":        result.Checks,
+		"gates":         result.Gates,
+		"product":       result.ProductSummary,
 		"human_actions": result.HumanActions,
 		"failure":       result.FailureReason,
 	}

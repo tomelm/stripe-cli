@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+const processExitGrace = 2 * time.Second
+
 func runLoggedCommand(ctx context.Context, name string, args []string, cwd string, env []string, stdoutPath, stderrPath string) commandRecord {
 	started := time.Now()
 	record := commandRecord{Name: name, Args: args, Cwd: cwd, StartedAt: started.UTC(), Stdout: stdoutPath, Stderr: stderrPath}
@@ -43,8 +45,7 @@ func runLoggedCommand(ctx context.Context, name string, args []string, cwd strin
 	select {
 	case waitErr = <-done:
 	case <-ctx.Done():
-		terminateProcessGroup(cmd.Process.Pid)
-		waitErr = <-done
+		waitErr = terminateAndWait(cmd.Process.Pid, done, processExitGrace)
 		if waitErr == nil {
 			waitErr = ctx.Err()
 		}
@@ -52,6 +53,19 @@ func runLoggedCommand(ctx context.Context, name string, args []string, cwd strin
 	record.DurationMS = time.Since(started).Milliseconds()
 	record.ExitCode = exitCode(waitErr)
 	return record
+}
+
+func terminateAndWait(pid int, done <-chan error, grace time.Duration) error {
+	terminateProcessGroup(pid)
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		killProcessGroup(pid)
+		return <-done
+	}
 }
 
 func runCommandChecks(ctx context.Context, checks []CommandCheck, workspace, resultDir string, env []string, result *CaseResult) ([]commandRecord, map[string]string) {

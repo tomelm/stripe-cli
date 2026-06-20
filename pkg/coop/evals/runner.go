@@ -481,6 +481,7 @@ func (r *Runner) runCase(parent context.Context, c Case, realStripeBin string) C
 		result.FailureReason = agentErr.Error()
 	}
 	scoreCase(&result, c, finalSession, readErr, actions, stripeLog)
+	result.ProductSummary = buildProductSummary(&result, finalSession)
 	writeCommandLog(resultDir, records)
 	judgeRecords, judgeArtifacts := r.runJudge(ctx, c, &result, workspace, resultDir, env)
 	records = append(records, judgeRecords...)
@@ -489,10 +490,8 @@ func (r *Runner) runCase(parent context.Context, c Case, realStripeBin string) C
 	}
 	writeCommandLog(resultDir, records)
 	result.DurationMS = time.Since(start).Milliseconds()
-	result.Passed = checksPassed(result.Checks)
-	if result.FailureReason != "" {
-		result.Passed = false
-	}
+	result.ProductSummary = buildProductSummary(&result, finalSession)
+	finalizeCaseOutcome(&result, r.opts.JudgeRequired, r.opts.JudgeMinScore)
 	_ = writeJSON(filepath.Join(resultDir, "result.json"), result)
 	return result
 }

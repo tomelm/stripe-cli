@@ -83,6 +83,26 @@ func writeMarkdownSummary(path string, suite *SuiteResult) error {
 		if c.FailureReason != "" {
 			fmt.Fprintf(&b, "- failure: %s\n", c.FailureReason)
 		}
+		for _, gate := range c.Gates {
+			status := "PASS"
+			if gate.Skipped {
+				status = "SKIP"
+			} else if !gate.Passed {
+				status = "FAIL"
+			}
+			required := "optional"
+			if gate.Required {
+				required = "required"
+			}
+			fmt.Fprintf(&b, "- gate `%s`: %s (%s)", gate.Name, status, required)
+			if gate.Message != "" {
+				fmt.Fprintf(&b, " - %s", gate.Message)
+			}
+			b.WriteString("\n")
+		}
+		if c.ProductSummary != nil {
+			writeProductSummaryMarkdown(&b, c.ProductSummary)
+		}
 		b.WriteString("\n")
 		for _, check := range c.Checks {
 			checkStatus := "PASS"
@@ -98,6 +118,27 @@ func writeMarkdownSummary(path string, suite *SuiteResult) error {
 		b.WriteString("\n")
 	}
 	return os.WriteFile(path, []byte(b.String()), 0644)
+}
+
+func writeProductSummaryMarkdown(b *strings.Builder, summary *ProductSummary) {
+	if summary.AppIntegration != "" {
+		fmt.Fprintf(b, "- app integration: %s\n", summary.AppIntegration)
+	}
+	if summary.AppMap != "" {
+		fmt.Fprintf(b, "- app map: %s\n", summary.AppMap)
+	}
+	if summary.StripePersistence != "" {
+		fmt.Fprintf(b, "- Stripe persistence: %s\n", summary.StripePersistence)
+	}
+	if summary.WebhookProof != "" {
+		fmt.Fprintf(b, "- webhook proof: %s\n", summary.WebhookProof)
+	}
+	if summary.AppStateProof != "" {
+		fmt.Fprintf(b, "- app state proof: %s\n", summary.AppStateProof)
+	}
+	for _, concern := range summary.RemainingConcerns {
+		fmt.Fprintf(b, "- remaining concern: %s\n", concern)
+	}
 }
 
 func formatDurationMS(ms int64) string {
@@ -148,6 +189,10 @@ func failCase(result CaseResult, start time.Time, err error) CaseResult {
 	result.Passed = false
 	result.FailureReason = err.Error()
 	result.Checks = append(result.Checks, CheckResult{Name: "runner", Passed: false, Message: err.Error(), Weight: 10})
+	result.Gates = []OutcomeGate{
+		{Name: "infra", Passed: false, Required: true, Message: err.Error()},
+	}
+	result.ProductSummary = buildProductSummary(&result, nil)
 	_ = writeJSON(filepath.Join(result.ResultDir, "result.json"), result)
 	return result
 }

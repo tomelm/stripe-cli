@@ -88,6 +88,7 @@ type CaseResult struct {
 	ID                           string             `json:"id"`
 	Agent                        string             `json:"agent"`
 	Passed                       bool               `json:"passed"`
+	Gates                        []OutcomeGate      `json:"gates,omitempty"`
 	DurationMS                   int64              `json:"duration_ms"`
 	AgentDurationMS              int64              `json:"agent_duration_ms,omitempty"`
 	ImplementationTokenUsage     TokenUsage         `json:"implementation_token_usage,omitempty"`
@@ -100,8 +101,26 @@ type CaseResult struct {
 	Checks                       []CheckResult      `json:"checks"`
 	HumanActions                 []DriverAction     `json:"human_actions,omitempty"`
 	Judge                        *JudgeResult       `json:"judge,omitempty"`
+	ProductSummary               *ProductSummary    `json:"product_summary,omitempty"`
 	Artifacts                    map[string]string  `json:"artifacts"`
 	FailureReason                string             `json:"failure_reason,omitempty"`
+}
+
+type OutcomeGate struct {
+	Name     string `json:"name"`
+	Passed   bool   `json:"passed,omitempty"`
+	Required bool   `json:"required,omitempty"`
+	Skipped  bool   `json:"skipped,omitempty"`
+	Message  string `json:"message,omitempty"`
+}
+
+type ProductSummary struct {
+	AppIntegration    string   `json:"app_integration,omitempty"`
+	AppMap            string   `json:"app_map,omitempty"`
+	StripePersistence string   `json:"stripe_persistence,omitempty"`
+	WebhookProof      string   `json:"webhook_proof,omitempty"`
+	AppStateProof     string   `json:"app_state_proof,omitempty"`
+	RemainingConcerns []string `json:"remaining_concerns,omitempty"`
 }
 
 // TokenUsage captures implementation-agent LLM token usage for a case or suite.

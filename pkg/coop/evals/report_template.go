@@ -173,6 +173,7 @@ summary { cursor: pointer; color: var(--info); font-weight: 600; }
 }
 .check.fail { border-color: #efb3ad; background: #fff6f5; }
 .check.pass { border-color: #acd9c1; background: #f1fbf5; }
+.check.warn { border-color: #e7c36f; background: #fff9e8; }
 .finding.blocking { border-color: #efb3ad; background: #fff6f5; }
 .finding.major { border-color: #e7c36f; background: #fff9e8; }
 .step.done { border-color: #acd9c1; }
@@ -416,6 +417,7 @@ th { color: var(--muted); font-size: 12px; font-weight: 650; }
                 {{range .Scores}}<span class="pill score" title="{{.Name}}">{{.Label}} {{score .Value}}</span>{{end}}
                 {{if .ImplementationTokenUsage.TotalTokens}}<span class="pill score" title="Implementation agent token usage, excluding judge and smoke tests">Implementation tokens {{tokens .ImplementationTokenUsage}}</span>{{end}}
               </div>
+              {{if and (not .ImplementationTokenUsage.TotalTokens) .ImplementationTokenNote}}<p class="muted">Implementation tokens: {{.ImplementationTokenNote}}</p>{{end}}
               {{if .Artifacts}}
               <div class="artifact-links" aria-label="Evidence links">
                 {{range .Artifacts}}
@@ -436,6 +438,32 @@ th { color: var(--muted); font-size: 12px; font-weight: 650; }
               <div class="subpanel">
                 <h3>Outcome Findings</h3>
                 {{if .FailureReason}}<p class="pill fail">{{.FailureReason}}</p>{{end}}
+                {{if .Gates}}
+                <ul class="checks">
+                  {{range .Gates}}
+                  <li class="check {{if .Skipped}}warn{{else}}{{checkStatus .Passed}}{{end}}">
+                    <strong>{{.Name}} gate</strong>: {{if .Skipped}}SKIP{{else}}{{verificationText .Passed}}{{end}}
+                    {{if .Required}} <span class="muted">(required)</span>{{else}} <span class="muted">(optional)</span>{{end}}
+                    {{if .Message}}<div class="muted">{{.Message}}</div>{{end}}
+                  </li>
+                  {{end}}
+                </ul>
+                {{end}}
+                {{if .ProductSummary}}
+                <div class="case-summary">
+                  <strong>Product summary</strong>
+                  {{if .ProductSummary.AppIntegration}}<p><strong>App integration:</strong> {{.ProductSummary.AppIntegration}}</p>{{end}}
+                  {{if .ProductSummary.AppMap}}<p><strong>App map:</strong> {{.ProductSummary.AppMap}}</p>{{end}}
+                  {{if .ProductSummary.StripePersistence}}<p><strong>Stripe persistence:</strong> {{.ProductSummary.StripePersistence}}</p>{{end}}
+                  {{if .ProductSummary.WebhookProof}}<p><strong>Webhook proof:</strong> {{.ProductSummary.WebhookProof}}</p>{{end}}
+                  {{if .ProductSummary.AppStateProof}}<p><strong>App state proof:</strong> {{.ProductSummary.AppStateProof}}</p>{{end}}
+                  {{if .ProductSummary.RemainingConcerns}}
+                  <ul class="checks">
+                    {{range .ProductSummary.RemainingConcerns}}<li class="check fail">{{.}}</li>{{end}}
+                  </ul>
+                  {{end}}
+                </div>
+                {{end}}
                 {{if .FailedChecks}}
                 <ul class="checks">
                   {{range .FailedChecks}}

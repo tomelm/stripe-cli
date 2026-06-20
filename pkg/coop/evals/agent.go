@@ -71,14 +71,10 @@ func (r *Runner) runAgentAndDrive(ctx context.Context, c Case, agent, workspace 
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 
-	type driveResult struct {
-		actions []DriverAction
-		err     error
-	}
-	driverDone := make(chan driveResult, 1)
+	driverDone := make(chan evalDriverResult, 1)
 	go func() {
 		actions, err := driveHuman(runCtx, store, startResp.SessionID, c.HumanActions)
-		driverDone <- driveResult{actions: actions, err: err}
+		driverDone <- evalDriverResult{actions: actions, err: err}
 	}()
 
 	var actions []DriverAction
@@ -99,10 +95,12 @@ func (r *Runner) runAgentAndDrive(ctx context.Context, c Case, agent, workspace 
 		case waitErr = <-done:
 		case <-ctx.Done():
 			cancel()
-			waitErr = <-done
+			waitErr = terminateAndWait(cmd.Process.Pid, done, processExitGrace)
 			if runErr == nil {
 				runErr = ctx.Err()
 			}
+		case <-time.After(processExitGrace):
+			waitErr = terminateAndWait(cmd.Process.Pid, done, processExitGrace)
 		}
 		if runErr == nil && waitErr != nil && !driverCompleted {
 			runErr = waitErr
@@ -116,8 +114,14 @@ func (r *Runner) runAgentAndDrive(ctx context.Context, c Case, agent, workspace 
 		case <-grace.C:
 			runErr = fmt.Errorf("agent exited before eval driver completed")
 			cancel()
-			drive := <-driverDone
-			actions = drive.actions
+			if drive, ok := waitDriverResult(driverDone, processExitGrace); ok {
+				actions = drive.actions
+				if drive.err != nil {
+					runErr = fmt.Errorf("%w; driver error: %v", runErr, drive.err)
+				}
+			} else {
+				runErr = fmt.Errorf("%w; driver did not stop after cancellation", runErr)
+			}
 		}
 		if !grace.Stop() {
 			select {
@@ -131,9 +135,12 @@ func (r *Runner) runAgentAndDrive(ctx context.Context, c Case, agent, workspace 
 	case <-ctx.Done():
 		cancel()
 		runErr = ctx.Err()
-		waitErr = <-done
-		drive := <-driverDone
-		actions = drive.actions
+		waitErr = terminateAndWait(cmd.Process.Pid, done, processExitGrace)
+		if drive, ok := waitDriverResult(driverDone, processExitGrace); ok {
+			actions = drive.actions
+		} else {
+			runErr = fmt.Errorf("%w; driver did not stop after cancellation", runErr)
+		}
 	}
 	exit := 0
 	if waitErr != nil {
@@ -153,6 +160,22 @@ func (r *Runner) runAgentAndDrive(ctx context.Context, c Case, agent, workspace 
 		Stderr:     agentStderr,
 	}
 	return record, actions, runErr
+}
+
+type evalDriverResult struct {
+	actions []DriverAction
+	err     error
+}
+
+func waitDriverResult(done <-chan evalDriverResult, timeout time.Duration) (evalDriverResult, bool) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case result := <-done:
+		return result, true
+	case <-timer.C:
+		return evalDriverResult{}, false
+	}
 }
 
 func (r *Runner) commandAgentInvocation() (string, []string) {
