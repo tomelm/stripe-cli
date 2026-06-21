@@ -251,7 +251,7 @@ th { color: var(--muted); font-size: 12px; font-weight: 650; }
     <div class="metric"><div class="value">{{.Summary.BlockingFindings}}</div><div class="label">blocking findings</div></div>
     <div class="metric"><div class="value">{{.Summary.MajorFindings}}</div><div class="label">major findings</div></div>
     <div class="metric"><div class="value">{{.Summary.RunCount}}</div><div class="label">runs included</div></div>
-    {{if .Summary.ImplementationTokenUsage.TotalTokens}}<div class="metric"><div class="value">{{.Summary.ImplementationTokenUsage.TotalTokens}}</div><div class="label">implementation tokens</div></div>{{end}}
+    {{if .Summary.ImplementationTokenUsage.TotalTokens}}<div class="metric"><div class="value">{{.Summary.ImplementationTokenUsage.TotalTokens}}</div><div class="label">implementation tokens</div></div>{{else if .Summary.ImplementationTokenNote}}<div class="metric"><div class="value">unavailable</div><div class="label">implementation tokens</div></div>{{end}}
   </section>
 
   <section class="section grid intro-grid">
@@ -396,6 +396,7 @@ th { color: var(--muted); font-size: 12px; font-weight: 650; }
           <span class="pill">overall {{score .AvgOverall}}</span>
           {{if .HasJudge}}<span class="pill">judge {{score .AvgJudge}}</span>{{end}}
           {{if .ImplementationTokenUsage.TotalTokens}}<span class="pill">impl tokens {{tokens .ImplementationTokenUsage}}</span>{{end}}
+          {{if and (not .ImplementationTokenUsage.TotalTokens) .ImplementationTokenNote}}<span class="pill" title="{{.ImplementationTokenNote}}">impl tokens unavailable</span>{{end}}
           {{if .DurationMS}}<span class="pill">{{duration .DurationMS}}</span>{{end}}
           {{if .Interrupted}}<span class="pill fail">interrupted</span>{{end}}
         </div>

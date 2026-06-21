@@ -394,7 +394,9 @@ func TestWorkspacePathContainsPatternSkipsGeneratedDependencyTrees(t *testing.T)
 func TestEvalEnvDisablesBrowserAuth(t *testing.T) {
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "must-not-leak")
 	t.Setenv("STRIPE_SECRET_KEY", "sk_test_eval")
+	t.Setenv("STRIPE_API_KEY", "")
 	t.Setenv("DOCKER_HOST", "unix:///tmp/docker.sock")
+	t.Setenv("COOP_EVAL_RUN_DOCKER", "1")
 	env := evalEnv("/tmp/xdg", "/tmp/home", "/tmp/shim", "/tmp/repo", "/tmp/stripe", "/tmp/stripe.log", 4242)
 
 	require.Contains(t, env, "SSH_TTY=coop-eval")
@@ -408,6 +410,8 @@ func TestEvalEnvDisablesBrowserAuth(t *testing.T) {
 	require.Contains(t, env, "PUPPETEER_EXECUTABLE_PATH=/tmp/shim/coop-eval-browser-disabled")
 	require.Contains(t, env, "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/tmp/shim/coop-eval-browser-disabled")
 	require.Contains(t, env, "STRIPE_SECRET_KEY=sk_test_eval")
+	require.Contains(t, env, "STRIPE_API_KEY=sk_test_eval")
+	require.Contains(t, env, "COOP_EVAL_RUN_DOCKER=1")
 	require.Contains(t, env, "DOCKER_HOST=unix:///tmp/docker.sock")
 	require.NotContains(t, env, "AWS_SECRET_ACCESS_KEY=must-not-leak")
 	require.NotContains(t, env, "COOP_EVAL_HOST_HOME="+os.Getenv("HOME"))

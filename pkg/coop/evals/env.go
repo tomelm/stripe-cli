@@ -11,6 +11,9 @@ import (
 
 func evalEnv(xdgHome, homeDir, shimDir, repoRoot, realStripeBin, stripeLog string, port int) []string {
 	hostEnv := envMap(os.Environ())
+	if hostEnv["STRIPE_API_KEY"] == "" && hostEnv["STRIPE_SECRET_KEY"] != "" {
+		hostEnv["STRIPE_API_KEY"] = hostEnv["STRIPE_SECRET_KEY"]
+	}
 	env := cleanEvalEnv(hostEnv)
 	hostHome := os.Getenv("HOME")
 	codexHome := os.Getenv("CODEX_HOME")
@@ -58,6 +61,7 @@ func cleanEvalEnv(hostEnv map[string]string) []string {
 	allowed := []string{
 		"CI",
 		"COLORTERM",
+		"COOP_EVAL_RUN_DOCKER",
 		"DOCKER_CONTEXT",
 		"DOCKER_HOST",
 		"LANG",

@@ -50,6 +50,7 @@ func TestWriteHTMLReportDiscoversPartialRunAndFixTimeline(t *testing.T) {
 	require.Contains(t, string(html), "&#43;0.52")
 	require.Contains(t, string(html), "Understand the project")
 	require.Contains(t, string(html), "Use app-owned order data")
+	require.Contains(t, string(html), "impl tokens unavailable")
 	require.NotContains(t, string(html), "file://")
 	require.Contains(t, string(html), `href="before-run/one-time-payment-node/final-session.json"`)
 }
@@ -59,12 +60,13 @@ func writeReportCaseFixture(t *testing.T, runDir, caseID string, passed bool, ov
 	caseDir := filepath.Join(runDir, caseID)
 	require.NoError(t, os.MkdirAll(caseDir, 0755))
 	result := CaseResult{
-		ID:         caseID,
-		Agent:      "command",
-		Passed:     passed,
-		DurationMS: int64(time.Minute / time.Millisecond),
-		Workspace:  filepath.Join(caseDir, "workspace"),
-		ResultDir:  caseDir,
+		ID:                           caseID,
+		Agent:                        "command",
+		Passed:                       passed,
+		DurationMS:                   int64(time.Minute / time.Millisecond),
+		Workspace:                    filepath.Join(caseDir, "workspace"),
+		ResultDir:                    caseDir,
+		ImplementationTokenUsageNote: implementationTokenUsageUnavailable + ": test fixture omitted usage events",
 		Scores: map[string]float64{
 			"overall":   overall,
 			"llm_judge": judgeScore,

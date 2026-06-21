@@ -48,6 +48,7 @@ func (r *Runner) runAgentAndDrive(ctx context.Context, c Case, agent, workspace 
 		)
 	}
 	cmd.Dir = workspace
+	env = append(env, "COMPOSE_PROJECT_NAME="+composeProjectName(c.ID))
 	cmd.Env = env
 	prepareProcessGroup(cmd)
 	stdout, err := os.Create(agentStdout)

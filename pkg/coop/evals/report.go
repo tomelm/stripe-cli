@@ -115,6 +115,7 @@ type reportSummary struct {
 	BlockingFindings         int
 	MajorFindings            int
 	ImplementationTokenUsage TokenUsage
+	ImplementationTokenNote  string
 }
 
 type reportRun struct {
@@ -125,6 +126,7 @@ type reportRun struct {
 	DurationMS               int64
 	AgentDurationMS          int64
 	ImplementationTokenUsage TokenUsage
+	ImplementationTokenNote  string
 	Selection                string
 	Passed                   bool
 	Interrupted              bool
@@ -311,6 +313,7 @@ func loadReportRun(dir, linkBaseDir string) (reportRun, error) {
 		run.FinishedAt = suite.FinishedAt
 		run.DurationMS = suite.DurationMS
 		run.AgentDurationMS = suite.AgentDurationMS
+		run.ImplementationTokenNote = suite.ImplementationTokenUsageNote
 		run.Selection = suite.Selection
 		run.Passed = suite.Passed
 		run.Interrupted = suite.Interrupted
@@ -529,6 +532,9 @@ func finalizeRunStats(run *reportRun) {
 		}
 		overallSum += c.OverallScore
 		run.ImplementationTokenUsage.Add(c.ImplementationTokenUsage)
+		if run.ImplementationTokenNote == "" && c.ImplementationTokenNote != "" {
+			run.ImplementationTokenNote = c.ImplementationTokenNote
+		}
 		if c.HasJudge {
 			run.HasJudge = true
 			judgeSum += c.JudgeScore
@@ -574,6 +580,9 @@ func summarizeReportRuns(runs []reportRun) reportSummary {
 				}
 			}
 			summary.ImplementationTokenUsage.Add(c.ImplementationTokenUsage)
+			if summary.ImplementationTokenNote == "" && c.ImplementationTokenNote != "" {
+				summary.ImplementationTokenNote = c.ImplementationTokenNote
+			}
 		}
 	}
 	summary.FailedCases = summary.CaseCount - summary.PassedCases
