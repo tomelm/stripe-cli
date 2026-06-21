@@ -311,12 +311,54 @@ func TestNewSessionFromBlueprintPreservesEvents(t *testing.T) {
 	for _, ch := range session.Steps {
 		for _, n := range ch.Nodes {
 			if n.Type == NodeAsyncHandler {
-				assert.Contains(t, n.Events, "checkout.session.completed")
+				assert.Contains(t, n.EventTypes(), "checkout.session.completed")
 				return
 			}
 		}
 	}
 	t.Fatal("expected to find asyncHandler node")
+}
+
+func TestBlueprintStructuredAsyncEventsFlowToSession(t *testing.T) {
+	raw := []byte(`{
+  "id": "structured-events",
+  "title": "Structured events",
+  "type": "test",
+  "settings": [],
+  "steps": [
+    {
+      "key": "webhooks",
+      "title": "Webhooks",
+      "nodes": [
+        {
+          "type": "asyncHandler",
+          "key": "handle-event",
+          "title": "Handle event",
+          "events": [
+            {
+              "eventType": "v2.core.account[configuration.recipient].capability_status_updated",
+              "eventPayloadType": "thin"
+            }
+          ],
+          "expectedNumberOfEvents": 1,
+          "link": "${node.webhooks.handle-event.0:id}"
+        }
+      ]
+    }
+  ]
+}`)
+	var bp Blueprint
+	require.NoError(t, json.Unmarshal(raw, &bp))
+	require.NoError(t, validateBlueprintReferences(&bp))
+
+	session := NewSessionFromBlueprint(&bp, "test_events", nil, nil)
+	node := session.Steps[1].Nodes[0]
+
+	assert.Equal(t, []string{"v2.core.account[configuration.recipient].capability_status_updated"}, node.EventTypes())
+	require.Len(t, node.Events, 1)
+	assert.Equal(t, "thin", node.Events[0].EventPayloadType)
+	assert.Equal(t, 1, node.ExpectedNumberOfEvents)
+	assert.Equal(t, "${node.webhooks.handle-event.0:id}", node.Link)
 }
 
 func TestEmbeddedBlueprintsUseCanonicalJSON(t *testing.T) {
@@ -611,7 +653,7 @@ func TestNewSessionFromBlueprintAddsInferredAppMapToContextStep(t *testing.T) {
 						Key:    "handle-checkout",
 						Type:   NodeAsyncHandler,
 						Title:  "Handle Checkout",
-						Events: []string{"checkout.session.completed"},
+						Events: []EventDefinition{{EventType: "checkout.session.completed"}},
 					},
 				},
 			},

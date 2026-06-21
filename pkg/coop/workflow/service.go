@@ -122,8 +122,8 @@ func (s *Service) StartWork(sessionID string, nodeNumber int, note string) (coop
 			resp.SDKExample = coop.SDKSnippetGuidance(node.Request, language(session))
 		}
 	}
-	if node.Type == coop.NodeAsyncHandler && len(node.Events) > 0 {
-		resp.WebhookExample = coop.GenerateWebhookExample(node.Events, language(session))
+	if node.Type == coop.NodeAsyncHandler && len(node.EventTypes()) > 0 {
+		resp.WebhookExample = coop.GenerateWebhookExample(node.EventTypes(), language(session))
 	}
 	return resp, nil
 }

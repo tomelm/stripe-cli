@@ -66,7 +66,7 @@ func TestStepInfoByNumberIncludesBlueprintFields(t *testing.T) {
 	s.Steps[1].Nodes[0].Description = "Handle the signed event."
 	s.Steps[1].Nodes[0].ReviewPrompt = "Confirm the webhook branch runs."
 	s.Steps[1].Nodes[0].ReviewCommand = "stripe trigger invoice.paid"
-	s.Steps[1].Nodes[0].Events = []string{"invoice.paid"}
+	s.Steps[1].Nodes[0].Events = []EventDefinition{{EventType: "invoice.paid"}}
 	s.Steps[1].Nodes[0].Semantics = &BlueprintSemantics{
 		EventRoles: []EventRoleSemantics{{Event: "invoice.paid", Role: "invoice_state", StateUpdate: "mark_invoice_paid"}},
 	}
@@ -80,7 +80,7 @@ func TestStepInfoByNumberIncludesBlueprintFields(t *testing.T) {
 	assert.Equal(t, "Handle the signed event.", info.Description)
 	assert.Equal(t, "Confirm the webhook branch runs.", info.ReviewPrompt)
 	assert.Equal(t, "stripe trigger invoice.paid", info.ReviewCommand)
-	assert.Equal(t, []string{"invoice.paid"}, info.Events)
+	assert.Equal(t, []string{"invoice.paid"}, info.EventTypes())
 	require.NotNil(t, info.Semantics)
 	assert.Equal(t, []EventRoleSemantics{{Event: "invoice.paid", Role: "invoice_state", StateUpdate: "mark_invoice_paid"}}, info.Semantics.EventRoles)
 }

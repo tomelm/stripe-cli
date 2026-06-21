@@ -2,7 +2,10 @@
 // AI agent + human developer Stripe integration building.
 package coop
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // NodeState represents the lifecycle state of a single blueprint node.
 type NodeState string
@@ -57,11 +60,59 @@ type Verification struct {
 
 // APIRequest describes the expected API call for a node.
 type APIRequest struct {
-	Path         string            `json:"path"`
-	Method       string            `json:"method"`
-	Headers      map[string]string `json:"headers,omitempty"`
-	Params       interface{}       `json:"params,omitempty"`
-	HiddenParams interface{}       `json:"hidden_params,omitempty"`
+	Path           string                 `json:"path"`
+	Method         string                 `json:"method"`
+	Headers        map[string]string      `json:"headers,omitempty"`
+	Params         interface{}            `json:"params,omitempty"`
+	HiddenParams   interface{}            `json:"hidden_params,omitempty"`
+	RequestOptions map[string]interface{} `json:"requestOptions,omitempty"`
+}
+
+// EventDefinition describes a webhook or async event required by a blueprint.
+type EventDefinition struct {
+	EventType        string `json:"eventType"`
+	EventPayloadType string `json:"eventPayloadType,omitempty"`
+	legacyString     bool
+}
+
+func (e *EventDefinition) UnmarshalJSON(data []byte) error {
+	var eventType string
+	if err := json.Unmarshal(data, &eventType); err == nil {
+		e.EventType = eventType
+		e.EventPayloadType = ""
+		e.legacyString = true
+		return nil
+	}
+
+	type eventDefinition EventDefinition
+	var parsed eventDefinition
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return err
+	}
+	*e = EventDefinition(parsed)
+	e.legacyString = false
+	return nil
+}
+
+func (e EventDefinition) MarshalJSON() ([]byte, error) {
+	if e.legacyString && e.EventPayloadType == "" {
+		return json.Marshal(e.EventType)
+	}
+	type eventDefinition EventDefinition
+	return json.Marshal(eventDefinition(e))
+}
+
+func eventTypes(events []EventDefinition) []string {
+	if len(events) == 0 {
+		return nil
+	}
+	types := make([]string, 0, len(events))
+	for _, event := range events {
+		if event.EventType != "" {
+			types = append(types, event.EventType)
+		}
+	}
+	return types
 }
 
 // TestHelperRequest describes an API-backed request used to advance test state.
@@ -143,35 +194,47 @@ type ServerVerificationSemantics struct {
 
 // StepInfo is the agent-facing blueprint contract for a single node.
 type StepInfo struct {
-	Number        int                 `json:"number,omitempty"`
-	Key           string              `json:"key"`
-	Title         string              `json:"title"`
-	Type          NodeType            `json:"type"`
-	Description   string              `json:"description,omitempty"`
-	ReviewPrompt  string              `json:"review_prompt,omitempty"`
-	ReviewCommand string              `json:"review_command,omitempty"`
-	AutoConfirm   bool                `json:"auto_confirm,omitempty"`
-	APIRequest    *APIRequest         `json:"api_request,omitempty"`
-	TestRequests  []TestHelperRequest `json:"requests,omitempty"`
-	Events        []string            `json:"events,omitempty"`
-	Semantics     *BlueprintSemantics `json:"semantics,omitempty"`
-	AppRoles      []AppRole           `json:"app_roles,omitempty"`
+	Number                 int                 `json:"number,omitempty"`
+	Key                    string              `json:"key"`
+	Title                  string              `json:"title"`
+	Type                   NodeType            `json:"type"`
+	Description            string              `json:"description,omitempty"`
+	ReviewPrompt           string              `json:"review_prompt,omitempty"`
+	ReviewCommand          string              `json:"review_command,omitempty"`
+	AutoConfirm            bool                `json:"auto_confirm,omitempty"`
+	APIRequest             *APIRequest         `json:"api_request,omitempty"`
+	TestRequests           []TestHelperRequest `json:"requests,omitempty"`
+	Events                 []EventDefinition   `json:"events,omitempty"`
+	ExpectedNumberOfEvents int                 `json:"expectedNumberOfEvents,omitempty"`
+	Link                   string              `json:"link,omitempty"`
+	Semantics              *BlueprintSemantics `json:"semantics,omitempty"`
+	AppRoles               []AppRole           `json:"app_roles,omitempty"`
+}
+
+func (s StepInfo) EventTypes() []string {
+	return eventTypes(s.Events)
 }
 
 // NodeDefinition is the source-derived static definition for a node.
 type NodeDefinition struct {
-	Type          NodeType            `json:"type"`
-	Key           string              `json:"key"`
-	Title         string              `json:"title"`
-	Description   string              `json:"description,omitempty"`
-	ReviewPrompt  string              `json:"review_prompt,omitempty"`
-	ReviewCommand string              `json:"review_command,omitempty"`
-	AutoConfirm   bool                `json:"auto_confirm,omitempty"`
-	Request       *APIRequest         `json:"request,omitempty"`
-	TestRequests  []TestHelperRequest `json:"requests,omitempty"`
-	Events        []string            `json:"events,omitempty"`
-	Semantics     *BlueprintSemantics `json:"semantics,omitempty"`
-	AppRoles      []AppRole           `json:"app_roles,omitempty"`
+	Type                   NodeType            `json:"type"`
+	Key                    string              `json:"key"`
+	Title                  string              `json:"title"`
+	Description            string              `json:"description,omitempty"`
+	ReviewPrompt           string              `json:"review_prompt,omitempty"`
+	ReviewCommand          string              `json:"review_command,omitempty"`
+	AutoConfirm            bool                `json:"auto_confirm,omitempty"`
+	Request                *APIRequest         `json:"request,omitempty"`
+	TestRequests           []TestHelperRequest `json:"requests,omitempty"`
+	Events                 []EventDefinition   `json:"events,omitempty"`
+	ExpectedNumberOfEvents int                 `json:"expectedNumberOfEvents,omitempty"`
+	Link                   string              `json:"link,omitempty"`
+	Semantics              *BlueprintSemantics `json:"semantics,omitempty"`
+	AppRoles               []AppRole           `json:"app_roles,omitempty"`
+}
+
+func (n NodeDefinition) EventTypes() []string {
+	return eventTypes(n.Events)
 }
 
 // StepDefinition is the source-derived static definition for a step.

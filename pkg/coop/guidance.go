@@ -39,9 +39,10 @@ func GenerateStepGuidance(step StepInfo) string {
 			b.WriteString(" When sdk_example is present, use it as the generated SDK translation of blueprint_step.api_request; adapt it to the app's existing Stripe client pattern and resolve blueprint references instead of copying placeholders literally.")
 		}
 	case NodeAsyncHandler:
-		if len(step.Events) > 0 {
+		events := step.EventTypes()
+		if len(events) > 0 {
 			b.WriteString(" ")
-			b.WriteString(GenerateAsyncHandlerGuidanceForStep(step.Events, step.Semantics))
+			b.WriteString(GenerateAsyncHandlerGuidanceForStep(events, step.Semantics))
 			b.WriteString(" When webhook_example is present, use it as the generated handler translation of blueprint_step.events; adapt the route, framework, persistence, and side effects to the app without dropping or renaming blueprint events.")
 		}
 	case NodeUIComponent:
@@ -85,7 +86,7 @@ func GenerateImplementationRequirements(step StepInfo) []string {
 		}
 	case NodeAsyncHandler:
 		requirements = append(requirements, "Implement a signed webhook or async-event handler using the raw request body and the official SDK signature helper.")
-		if len(step.Events) > 0 {
+		if len(step.EventTypes()) > 0 {
 			requirements = append(requirements, "Branch on every blueprint_step.events value without dropping, renaming, or replacing events with lookup-only work.")
 		}
 	case NodeUIComponent:
@@ -461,7 +462,7 @@ func stepGuidanceContext(step StepInfo) string {
 	if step.APIRequest != nil {
 		values = append(values, step.APIRequest.Path, step.APIRequest.Method, blueprintReferenceSource(step.APIRequest.Params))
 	}
-	values = append(values, step.Events...)
+	values = append(values, step.EventTypes()...)
 	return strings.ToLower(strings.Join(values, " "))
 }
 

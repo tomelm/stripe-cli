@@ -108,7 +108,7 @@ func GenerateAcceptanceCriteria(step StepInfo) []string {
 		}
 		criteria = append(criteria, apiRequestAcceptanceCriteria(step.APIRequest)...)
 	case NodeAsyncHandler:
-		events := normalizedEvents(step.Events)
+		events := normalizedEvents(step.EventTypes())
 		if len(events) > 0 {
 			criteria = append(criteria, "A signed handler verifies the Stripe signature from the raw request body and branches on every blueprint event: "+strings.Join(events, ", ")+".")
 			criteria = append(criteria, "Verification proves each listed event changes or refreshes the app state or side effect the later blueprint flow depends on.")
@@ -236,7 +236,7 @@ func blueprintSignalsFor(bp *Blueprint) blueprintSignals {
 					refs[ref] = true
 				}
 			}
-			for _, event := range n.Events {
+			for _, event := range n.EventTypes() {
 				event = strings.TrimSpace(event)
 				if event != "" {
 					events[event] = true

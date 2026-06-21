@@ -3,19 +3,21 @@ package coop
 // NewStepInfo returns the agent-facing blueprint contract for a session node.
 func NewStepInfo(number int, node SessionNode) StepInfo {
 	return StepInfo{
-		Number:        number,
-		Key:           node.Key,
-		Title:         node.Title,
-		Type:          node.Type,
-		Description:   node.Description,
-		ReviewPrompt:  node.ReviewPrompt,
-		ReviewCommand: node.ReviewCommand,
-		AutoConfirm:   node.AutoConfirm,
-		APIRequest:    node.Request,
-		TestRequests:  append([]TestHelperRequest(nil), node.TestRequests...),
-		Events:        append([]string(nil), node.Events...),
-		Semantics:     node.Semantics,
-		AppRoles:      append([]AppRole(nil), node.AppRoles...),
+		Number:                 number,
+		Key:                    node.Key,
+		Title:                  node.Title,
+		Type:                   node.Type,
+		Description:            node.Description,
+		ReviewPrompt:           node.ReviewPrompt,
+		ReviewCommand:          node.ReviewCommand,
+		AutoConfirm:            node.AutoConfirm,
+		APIRequest:             node.Request,
+		TestRequests:           append([]TestHelperRequest(nil), node.TestRequests...),
+		Events:                 append([]EventDefinition(nil), node.Events...),
+		ExpectedNumberOfEvents: node.ExpectedNumberOfEvents,
+		Link:                   node.Link,
+		Semantics:              node.Semantics,
+		AppRoles:               append([]AppRole(nil), node.AppRoles...),
 	}
 }
 

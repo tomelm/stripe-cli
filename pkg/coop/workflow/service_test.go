@@ -37,7 +37,10 @@ func TestStartWorkReturnsWebhookExampleForAsyncHandler(t *testing.T) {
 	_, err := store.Update(session.ID, func(session *coop.Session) error {
 		session.Settings = map[string]string{"language": "node"}
 		session.Steps[0].Nodes[0].Type = coop.NodeAsyncHandler
-		session.Steps[0].Nodes[0].Events = []string{"invoice.paid", "customer.subscription.created"}
+		session.Steps[0].Nodes[0].Events = []coop.EventDefinition{
+			{EventType: "invoice.paid"},
+			{EventType: "customer.subscription.created"},
+		}
 		return nil
 	})
 	require.NoError(t, err)
@@ -54,7 +57,7 @@ func TestStartWorkReturnsWebhookExampleForAsyncHandler(t *testing.T) {
 	assert.Contains(t, resp.WebhookExample, "v1.<event>")
 	assert.Contains(t, resp.AgentGuidance, "signed webhook/event handler")
 	require.NotNil(t, resp.BlueprintStep)
-	assert.Equal(t, []string{"invoice.paid", "customer.subscription.created"}, resp.BlueprintStep.Events)
+	assert.Equal(t, []string{"invoice.paid", "customer.subscription.created"}, resp.BlueprintStep.EventTypes())
 }
 
 func TestStartWorkReturnsSDKExampleForBlueprintParams(t *testing.T) {

@@ -45,10 +45,13 @@ func TestGenerateIntegrationContractDerivesObligationsFromBlueprint(t *testing.T
 						Events: nil,
 					},
 					{
-						Key:    "webhook",
-						Type:   NodeAsyncHandler,
-						Title:  "Handle checkout",
-						Events: []string{"checkout.session.completed", "v2.core.account[configuration.recipient].capability_status_updated"},
+						Key:   "webhook",
+						Type:  NodeAsyncHandler,
+						Title: "Handle checkout",
+						Events: []EventDefinition{
+							{EventType: "checkout.session.completed"},
+							{EventType: "v2.core.account[configuration.recipient].capability_status_updated"},
+						},
 					},
 				},
 			},
@@ -96,7 +99,7 @@ func TestGenerateAppMapRequirementsDerivesQuestionsFromBlueprint(t *testing.T) {
 						Key:    "handle-invoice",
 						Type:   NodeAsyncHandler,
 						Title:  "Handle invoice",
-						Events: []string{"invoice.payment_succeeded"},
+						Events: []EventDefinition{{EventType: "invoice.payment_succeeded"}},
 					},
 				},
 			},
@@ -134,8 +137,11 @@ func TestGenerateAcceptanceCriteriaForCheckoutAPI(t *testing.T) {
 
 func TestGenerateAcceptanceCriteriaForAsyncHandler(t *testing.T) {
 	criteria := GenerateAcceptanceCriteria(StepInfo{
-		Type:   NodeAsyncHandler,
-		Events: []string{"checkout.session.completed", "v2.core.account[configuration.recipient].capability_status_updated"},
+		Type: NodeAsyncHandler,
+		Events: []EventDefinition{
+			{EventType: "checkout.session.completed"},
+			{EventType: "v2.core.account[configuration.recipient].capability_status_updated"},
+		},
 	})
 
 	assert.Contains(t, criteria, "A signed handler verifies the Stripe signature from the raw request body and branches on every blueprint event: checkout.session.completed, v2.core.account[configuration.recipient].capability_status_updated.")

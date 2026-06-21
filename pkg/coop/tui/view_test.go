@@ -78,7 +78,7 @@ func testModel() Model {
 								Key:    "n3",
 								Title:  "Handle event",
 								Type:   coop.NodeAsyncHandler,
-								Events: []string{"checkout.session.completed"},
+								Events: []coop.EventDefinition{{EventType: "checkout.session.completed"}},
 							},
 							State: coop.NodePending,
 						},
@@ -281,7 +281,7 @@ func TestRenderDetailWebhook(t *testing.T) {
 	m.selectionCursor = 2 // asyncHandler node
 	m.expanded = true
 	m.detailTab = 2
-	m.session.Steps[1].Nodes[0].Events = []string{"checkout.session.completed", "invoice.paid"}
+	m.session.Steps[1].Nodes[0].Events = []coop.EventDefinition{{EventType: "checkout.session.completed"}, {EventType: "invoice.paid"}}
 	detail := m.renderDetail()
 
 	assertContainsPlain(t, detail, "Checks")
@@ -297,7 +297,7 @@ func TestRenderDetailWebhookReferenceShowsGeneratedExample(t *testing.T) {
 	m.selectionCursor = 2 // asyncHandler node
 	m.expanded = true
 	m.detailTab = 3
-	m.session.Steps[1].Nodes[0].Events = []string{"checkout.session.completed", "invoice.paid"}
+	m.session.Steps[1].Nodes[0].Events = []coop.EventDefinition{{EventType: "checkout.session.completed"}, {EventType: "invoice.paid"}}
 
 	detail := m.renderDetail()
 
@@ -470,7 +470,7 @@ func TestRenderFooterReviewCommand(t *testing.T) {
 func TestSelectedReviewCommandForAsyncNodeUsesAllEvents(t *testing.T) {
 	m := testModel()
 	m.session.Steps[1].Nodes[0].State = coop.NodeReview
-	m.session.Steps[1].Nodes[0].Events = []string{"checkout.session.completed", "invoice.paid"}
+	m.session.Steps[1].Nodes[0].Events = []coop.EventDefinition{{EventType: "checkout.session.completed"}, {EventType: "invoice.paid"}}
 	m.selectionCursor = 2
 
 	assert.Equal(t, "stripe trigger checkout.session.completed && stripe trigger invoice.paid", m.selectedReviewCommand())

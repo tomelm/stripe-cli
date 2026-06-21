@@ -364,8 +364,8 @@ func reviewCommandForNode(node *coop.SessionNode) string {
 	if node.ReviewCommand != "" {
 		return node.ReviewCommand
 	}
-	if node.Type == coop.NodeAsyncHandler && len(node.Events) > 0 {
-		return strings.Join(asyncEventTriggerCommands(node.Events), " && ")
+	if node.Type == coop.NodeAsyncHandler && len(node.EventTypes()) > 0 {
+		return strings.Join(asyncEventTriggerCommands(node.EventTypes()), " && ")
 	}
 	return ""
 }

@@ -188,7 +188,7 @@ func TestGenerateStepGuidanceCompilesStructuredEventRoles(t *testing.T) {
 		Key:    "handle-webhooks",
 		Title:  "Handle webhooks",
 		Type:   NodeAsyncHandler,
-		Events: []string{"checkout.session.completed"},
+		Events: []EventDefinition{{EventType: "checkout.session.completed"}},
 		Semantics: &BlueprintSemantics{
 			EventRoles: []EventRoleSemantics{
 				{
@@ -214,7 +214,7 @@ func TestGenerateStepGuidanceUsesWebhookExampleAsEventTranslation(t *testing.T) 
 		Title:        "Handle checkout.session.completed",
 		Type:         NodeAsyncHandler,
 		ReviewPrompt: "Confirm fulfillment happens after signature verification.",
-		Events:       []string{"checkout.session.completed"},
+		Events:       []EventDefinition{{EventType: "checkout.session.completed"}},
 	})
 
 	assert.Contains(t, guidance, "blueprint_step.events")
@@ -291,7 +291,7 @@ func TestGenerateStructuredRequirementsForWebhook(t *testing.T) {
 		Key:    "handle-payment",
 		Title:  "Handle payment webhook",
 		Type:   NodeAsyncHandler,
-		Events: []string{"payment_intent.succeeded"},
+		Events: []EventDefinition{{EventType: "payment_intent.succeeded"}},
 	}
 
 	implementation := GenerateImplementationRequirements(step)

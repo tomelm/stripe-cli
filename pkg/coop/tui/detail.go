@@ -269,8 +269,8 @@ func (m Model) writeStepChecksDetail(md *strings.Builder, ch *coop.SessionStep) 
 func (m Model) writeStepReferenceDetail(md *strings.Builder, ch *coop.SessionStep) {
 	wrote := false
 	for _, node := range ch.Nodes {
-		if node.Type == coop.NodeAsyncHandler && len(node.Events) > 0 {
-			md.WriteString("- `" + strings.Join(node.Events, "`, `") + "` webhook triggers for " + node.Title + "\n")
+		if node.Type == coop.NodeAsyncHandler && len(node.EventTypes()) > 0 {
+			md.WriteString("- `" + strings.Join(node.EventTypes(), "`, `") + "` webhook triggers for " + node.Title + "\n")
 			wrote = true
 		}
 		if node.Type == coop.NodeAPIRequest && node.Request != nil {
@@ -340,10 +340,10 @@ func stepConfirmationNodes(ch *coop.SessionStep) string {
 }
 
 func (m Model) writeAsyncHandlerCheckDetail(md *strings.Builder, node *coop.SessionNode) {
-	if node.Type != coop.NodeAsyncHandler || len(node.Events) == 0 {
+	if node.Type != coop.NodeAsyncHandler || len(node.EventTypes()) == 0 {
 		return
 	}
-	commands := asyncEventTriggerCommands(node.Events)
+	commands := asyncEventTriggerCommands(node.EventTypes())
 	if len(commands) == 0 {
 		return
 	}
@@ -361,10 +361,10 @@ func (m Model) writeAsyncHandlerCheckDetail(md *strings.Builder, node *coop.Sess
 }
 
 func (m Model) writeAsyncHandlerReferenceDetail(md *strings.Builder, node *coop.SessionNode) {
-	if node.Type != coop.NodeAsyncHandler || len(node.Events) == 0 {
+	if node.Type != coop.NodeAsyncHandler || len(node.EventTypes()) == 0 {
 		return
 	}
-	commands := asyncEventTriggerCommands(node.Events)
+	commands := asyncEventTriggerCommands(node.EventTypes())
 	if len(commands) == 0 {
 		return
 	}
@@ -381,10 +381,10 @@ func (m Model) writeAsyncHandlerReferenceDetail(md *strings.Builder, node *coop.
 }
 
 func (m Model) writeAsyncHandlerExampleDetail(md *strings.Builder, node *coop.SessionNode) {
-	if node.Type != coop.NodeAsyncHandler || len(node.Events) == 0 {
+	if node.Type != coop.NodeAsyncHandler || len(node.EventTypes()) == 0 {
 		return
 	}
-	example := strings.TrimSpace(coop.GenerateWebhookExample(node.Events, m.detailLanguage()))
+	example := strings.TrimSpace(coop.GenerateWebhookExample(node.EventTypes(), m.detailLanguage()))
 	if example == "" {
 		return
 	}
