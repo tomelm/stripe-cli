@@ -57,7 +57,11 @@ func driveHuman(ctx context.Context, store *coop.Store, sessionID string, plan [
 		if !ok {
 			continue
 		}
-		heartbeatSeen := store.HeartbeatAge(sessionID) >= 0 && store.HeartbeatAge(sessionID) < 5*time.Second
+		heartbeatAge, err := store.HeartbeatAge(sessionID)
+		if err != nil {
+			return actions, err
+		}
+		heartbeatSeen := heartbeatAge >= 0 && heartbeatAge < 5*time.Second
 		if !heartbeatSeen {
 			continue
 		}
@@ -102,31 +106,31 @@ type reviewTarget struct {
 }
 
 func reviewTargetForSession(session *coop.Session) (reviewTarget, bool) {
-	for chapterIndex, chapter := range session.Chapters {
-		if !session.ChapterReadyForReview(chapterIndex) || !session.ChapterHasReview(chapterIndex) {
+	for stepIndex, stepDef := range session.Steps {
+		if !session.StepReadyForReview(stepIndex) || !session.StepHasReview(stepIndex) {
 			continue
 		}
 		var steps []int
 		step := 0
-		for i := range session.Chapters {
-			for j := range session.Chapters[i].Nodes {
+		for i := range session.Steps {
+			for j := range session.Steps[i].Nodes {
 				step++
-				if i == chapterIndex && session.Chapters[i].Nodes[j].State == coop.StepReview {
+				if i == stepIndex && session.Steps[i].Nodes[j].State == coop.NodeReview {
 					steps = append(steps, step)
 				}
 			}
 		}
 		if len(steps) > 0 {
-			return reviewTarget{steps: steps, chapter: chapter.Title}, true
+			return reviewTarget{steps: steps, chapter: stepDef.Title}, true
 		}
 	}
 	step := 0
-	for i := range session.Chapters {
-		for j := range session.Chapters[i].Nodes {
+	for i := range session.Steps {
+		for j := range session.Steps[i].Nodes {
 			step++
-			node := session.Chapters[i].Nodes[j]
-			if node.State == coop.StepReview && session.ReviewGranularityForStep(step) != coop.ReviewGranularityChapter {
-				return reviewTarget{steps: []int{step}, chapter: session.Chapters[i].Title}, true
+			node := session.Steps[i].Nodes[j]
+			if node.State == coop.NodeReview {
+				return reviewTarget{steps: []int{step}, chapter: session.Steps[i].Title}, true
 			}
 		}
 	}

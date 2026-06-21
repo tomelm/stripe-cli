@@ -24,12 +24,12 @@ func scoreCase(result *CaseResult, c Case, session *coop.Session, sessionErr err
 
 	allTerminal := true
 	missingEvidence := []string{}
-	for _, ch := range session.Chapters {
+	for _, ch := range session.Steps {
 		for _, node := range ch.Nodes {
-			if node.State != coop.StepDone && node.State != coop.StepSkipped {
+			if node.State != coop.NodeDone && node.State != coop.NodeSkipped {
 				allTerminal = false
 			}
-			if !node.AutoConfirm && node.State == coop.StepDone {
+			if !node.AutoConfirm && node.State == coop.NodeDone {
 				if node.Implementation == nil || node.Implementation.File == "" || !verificationsPassed(node.Verifications) {
 					missingEvidence = append(missingEvidence, node.Title)
 				}
@@ -72,7 +72,7 @@ func scoreCase(result *CaseResult, c Case, session *coop.Session, sessionErr err
 		for _, action := range requested {
 			for _, step := range action.Steps {
 				node, err := session.NodeByNumber(step)
-				if err != nil || node.State != coop.StepDone || node.Implementation == nil || node.Implementation.File == "" || !verificationsPassed(node.Verifications) {
+				if err != nil || node.State != coop.NodeDone || node.Implementation == nil || node.Implementation.File == "" || !verificationsPassed(node.Verifications) {
 					ok = false
 				}
 			}
@@ -282,7 +282,7 @@ func scoreAsyncEventEvidence(result *CaseResult, session *coop.Session) {
 	var missing []string
 	var unverified []string
 	var unsigned []string
-	for _, ch := range session.Chapters {
+	for _, ch := range session.Steps {
 		for _, node := range ch.Nodes {
 			if !isActiveAsyncEventNode(node) {
 				continue
@@ -324,7 +324,7 @@ func scoreAsyncEventEvidence(result *CaseResult, session *coop.Session) {
 }
 
 func sessionHasAsyncEvents(session *coop.Session) bool {
-	for _, ch := range session.Chapters {
+	for _, ch := range session.Steps {
 		for _, node := range ch.Nodes {
 			if isActiveAsyncEventNode(node) {
 				return true
@@ -335,7 +335,7 @@ func sessionHasAsyncEvents(session *coop.Session) bool {
 }
 
 func isActiveAsyncEventNode(node coop.SessionNode) bool {
-	return node.Type == coop.NodeAsyncHandler && node.State != coop.StepSkipped && len(node.Events) > 0
+	return node.Type == coop.NodeAsyncHandler && node.State != coop.NodeSkipped && len(node.Events) > 0
 }
 
 func nodeEvidenceMentions(node coop.SessionNode, event string) bool {
@@ -426,7 +426,7 @@ func looksLikeAsyncVerification(check string) bool {
 }
 
 func sessionRequiresAppImplementation(session *coop.Session) bool {
-	for _, ch := range session.Chapters {
+	for _, ch := range session.Steps {
 		for _, node := range ch.Nodes {
 			if isAppImplementationNode(node) {
 				return true
@@ -437,7 +437,7 @@ func sessionRequiresAppImplementation(session *coop.Session) bool {
 }
 
 func isAppImplementationNode(node coop.SessionNode) bool {
-	if node.State == coop.StepSkipped {
+	if node.State == coop.NodeSkipped {
 		return false
 	}
 	switch node.Type {
@@ -503,7 +503,7 @@ func sessionReportsChangedAppSource(session *coop.Session, workspace string, cha
 	if len(changed) == 0 {
 		return false
 	}
-	for _, ch := range session.Chapters {
+	for _, ch := range session.Steps {
 		for _, node := range ch.Nodes {
 			if !isAppImplementationNode(node) || node.Implementation == nil {
 				continue
@@ -531,7 +531,7 @@ func workspaceRelativePath(workspace, path string) string {
 }
 
 func sessionHasAppFlowVerification(session *coop.Session) bool {
-	for _, ch := range session.Chapters {
+	for _, ch := range session.Steps {
 		for _, node := range ch.Nodes {
 			if !isAppImplementationNode(node) {
 				continue

@@ -104,6 +104,18 @@ func TestLoadCasesMinStepsIncludesSkipDefaultCases(t *testing.T) {
 	}, ids)
 }
 
+func TestLoadCasesMinStepsReportsMissingExplicitBlueprint(t *testing.T) {
+	r := NewRunner(Options{
+		RepoRoot: repoRootForTest(),
+		CasesDir: filepath.Join(repoRootForTest(), "pkg", "coop", "evals", "testdata", "cases"),
+		CaseIDs:  []string{"easyappointments-connect-platform-php"},
+		MinSteps: 10,
+	})
+
+	_, err := r.loadCases()
+	require.ErrorContains(t, err, `blueprint "destination-charge" not found`)
+}
+
 func TestLoadCasesRejectsUnknownSuite(t *testing.T) {
 	r := NewRunner(Options{
 		RepoRoot: repoRootForTest(),
@@ -670,11 +682,13 @@ func TestScoreImplementationIntegrationPassesForChangedAppSource(t *testing.T) {
 
 	result := &CaseResult{Workspace: workspace}
 	session := &coop.Session{
-		Chapters: []coop.SessionChapter{{
+		Steps: []coop.SessionStep{{
 			Nodes: []coop.SessionNode{{
-				Type:  coop.NodeAPIRequest,
-				Title: "Create a Checkout Session",
-				State: coop.StepDone,
+				NodeDefinition: coop.NodeDefinition{
+					Type:  coop.NodeAPIRequest,
+					Title: "Create a Checkout Session",
+				},
+				State: coop.NodeDone,
 				Implementation: &coop.Implementation{
 					File: "server.js",
 					Note: "Added checkout route",
@@ -699,11 +713,13 @@ func TestScoreImplementationIntegrationFailsForCLIOnlyWork(t *testing.T) {
 
 	result := &CaseResult{Workspace: workspace}
 	session := &coop.Session{
-		Chapters: []coop.SessionChapter{{
+		Steps: []coop.SessionStep{{
 			Nodes: []coop.SessionNode{{
-				Type:  coop.NodeAPIRequest,
-				Title: "Create a billing meter",
-				State: coop.StepDone,
+				NodeDefinition: coop.NodeDefinition{
+					Type:  coop.NodeAPIRequest,
+					Title: "Create a billing meter",
+				},
+				State: coop.NodeDone,
 				Implementation: &coop.Implementation{
 					File: "README.md",
 					Note: "Created meter with stripe billing meters create",
@@ -728,12 +744,14 @@ func TestScoreEvalHygieneFlagsUnsafeStripeCommands(t *testing.T) {
 	require.NoError(t, os.WriteFile(stripeLog, []byte("args=listen --forward-to localhost:4242/webhook\nblocked=raw_card_number\n"), 0644))
 	result := &CaseResult{Port: 53535}
 	session := &coop.Session{
-		Chapters: []coop.SessionChapter{{
+		Steps: []coop.SessionStep{{
 			Nodes: []coop.SessionNode{{
-				Type:   coop.NodeAsyncHandler,
-				Title:  "Handle invoice.created",
-				State:  coop.StepDone,
-				Events: []string{"invoice.created"},
+				NodeDefinition: coop.NodeDefinition{
+					Type:   coop.NodeAsyncHandler,
+					Title:  "Handle invoice.created",
+					Events: []string{"invoice.created"},
+				},
+				State: coop.NodeDone,
 				Implementation: &coop.Implementation{
 					Note: "Handles signed invoice.created webhooks with Stripe-Signature verification",
 				},
@@ -769,15 +787,17 @@ func TestScoreEvalHygieneRequiresAsyncEventEvidence(t *testing.T) {
 	require.NoError(t, os.WriteFile(stripeLog, nil, 0644))
 	result := &CaseResult{Port: 53535}
 	session := &coop.Session{
-		Chapters: []coop.SessionChapter{{
+		Steps: []coop.SessionStep{{
 			Nodes: []coop.SessionNode{{
-				Type:  coop.NodeAsyncHandler,
-				Title: "Handle webhooks",
-				State: coop.StepDone,
-				Events: []string{
-					"customer.subscription.created",
-					"invoice.created",
+				NodeDefinition: coop.NodeDefinition{
+					Type:  coop.NodeAsyncHandler,
+					Title: "Handle webhooks",
+					Events: []string{
+						"customer.subscription.created",
+						"invoice.created",
+					},
 				},
+				State: coop.NodeDone,
 				Implementation: &coop.Implementation{
 					Note: "Handles customer.subscription.created",
 				},
@@ -806,11 +826,13 @@ func TestScoreCaseSkipsImplementationIntegrationForDebugAgent(t *testing.T) {
 		NextSteps: &coop.NextStepsState{
 			Suggestions: []coop.NextStepSuggestion{{ID: "done", Title: "Done"}},
 		},
-		Chapters: []coop.SessionChapter{{
+		Steps: []coop.SessionStep{{
 			Nodes: []coop.SessionNode{{
-				Type:  coop.NodeAPIRequest,
-				Title: "Create a Checkout Session",
-				State: coop.StepDone,
+				NodeDefinition: coop.NodeDefinition{
+					Type:  coop.NodeAPIRequest,
+					Title: "Create a Checkout Session",
+				},
+				State: coop.NodeDone,
 				Implementation: &coop.Implementation{
 					File: "README.md",
 					Note: "Debug agent reported work without editing app source",

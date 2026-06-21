@@ -132,7 +132,7 @@ func appMapSummary(session *coop.Session) string {
 	if session == nil {
 		return ""
 	}
-	for _, ch := range session.Chapters {
+	for _, ch := range session.Steps {
 		for _, node := range ch.Nodes {
 			if node.Key != "scan-project" || node.Implementation == nil {
 				continue
@@ -162,7 +162,7 @@ func webhookProofSummary(session *coop.Session) string {
 		return ""
 	}
 	var verified, missing []string
-	for _, ch := range session.Chapters {
+	for _, ch := range session.Steps {
 		for _, node := range ch.Nodes {
 			if !isActiveAsyncEventNode(node) {
 				continue
@@ -284,7 +284,7 @@ func hasCheckByName(checks []CheckResult, name string) bool {
 
 func sessionEvidenceText(session *coop.Session) string {
 	var b strings.Builder
-	for _, ch := range session.Chapters {
+	for _, ch := range session.Steps {
 		for _, node := range ch.Nodes {
 			if node.Implementation != nil {
 				b.WriteString(" ")

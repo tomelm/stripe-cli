@@ -227,6 +227,9 @@ func (r *Runner) loadCases() ([]Case, error) {
 		}
 		matches, err := r.caseMatchesSelection(c)
 		if err != nil {
+			if len(wanted) == 0 && isUnavailableBlueprintError(err) {
+				continue
+			}
 			return nil, err
 		}
 		if !matches {
@@ -297,10 +300,14 @@ func blueprintStepCount(id string) (int, error) {
 		return 0, err
 	}
 	steps := 0
-	for _, chapter := range bp.Chapters {
+	for _, chapter := range bp.Steps {
 		steps += len(chapter.Nodes)
 	}
 	return steps, nil
+}
+
+func isUnavailableBlueprintError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "not found")
 }
 
 func validateCase(c Case, path string) error {
