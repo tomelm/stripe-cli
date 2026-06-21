@@ -215,6 +215,9 @@ func (r *Runner) loadCases() ([]Case, error) {
 		if len(wanted) > 0 && !wanted[c.ID] {
 			continue
 		}
+		if c.Disabled && !wanted[c.ID] {
+			continue
+		}
 		selectionFilterSet := r.opts.Suite != "" || r.opts.MinSteps > 0
 		if len(wanted) == 0 && !selectionFilterSet && c.SkipDefault {
 			continue

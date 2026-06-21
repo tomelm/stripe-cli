@@ -77,7 +77,10 @@ exit "$status"
 	if err := os.WriteFile(filepath.Join(dir, "stripe"), []byte(script), 0755); err != nil {
 		return err
 	}
-	return writeBrowserBlockers(dir, logPath)
+	if err := writeBrowserBlockers(dir, logPath); err != nil {
+		return err
+	}
+	return writeHostRuntimeBlockers(dir, logPath)
 }
 
 func writeBrowserBlockers(dir, logPath string) error {
@@ -108,6 +111,94 @@ exit 1
 		"playwright",
 		"puppeteer",
 		"selenium",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0755); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeHostRuntimeBlockers(dir, logPath string) error {
+	script := fmt.Sprintf(`#!/usr/bin/env bash
+name="${0##*/}"
+script_dir="${0%%/*}"
+if [[ "$script_dir" == "$0" ]]; then
+  script_dir="."
+fi
+shim_dir="$(cd "$script_dir" && pwd)"
+
+has_docker_fixture=0
+check_dir="$PWD"
+while [[ -n "$check_dir" && "$check_dir" != "/" ]]; do
+  if [[ -f "$check_dir/docker-compose.yml" || -f "$check_dir/docker-compose.yaml" || -f "$check_dir/compose.yml" || -f "$check_dir/compose.yaml" || -f "$check_dir/Dockerfile" ]]; then
+    has_docker_fixture=1
+    break
+  fi
+  parent="${check_dir%%/*}"
+  if [[ "$parent" == "$check_dir" || -z "$parent" ]]; then
+    check_dir="/"
+  else
+    check_dir="$parent"
+  fi
+done
+
+if [[ "$has_docker_fixture" == "1" && "${COOP_EVAL_ALLOW_HOST_RUNTIME:-0}" != "1" ]]; then
+  {
+    printf 'time=%%s host-runtime-blocked=%%s cwd=%%q args=' "$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)" "$name" "$PWD"
+    printf '%%q ' "$@"
+    printf '\n'
+  } >> %q
+  printf 'host app-runtime command is disabled for Docker-backed co-op eval fixtures: %%s\n' "$name" >&2
+  printf 'Use the fixture Docker/Compose service instead, for example: docker compose run --rm <service> %%s ...\n' "$name" >&2
+  exit 126
+fi
+
+IFS=':' read -r -a path_parts <<< "${PATH:-}"
+for part in "${path_parts[@]}"; do
+  [[ -n "$part" ]] || part="."
+  part_abs="$(cd "$part" 2>/dev/null && pwd || true)"
+  if [[ -n "$part_abs" && "$part_abs" != "$shim_dir" && -x "$part/$name" ]]; then
+    exec "$part/$name" "$@"
+  fi
+done
+
+printf '%%s: command not found outside co-op eval shim directory\n' "$name" >&2
+exit 127
+`, logPath)
+	for _, name := range []string{
+		"php",
+		"composer",
+		"python",
+		"python3",
+		"python3.10",
+		"python3.11",
+		"python3.12",
+		"pip",
+		"pip3",
+		"pip3.10",
+		"pip3.11",
+		"pip3.12",
+		"pytest",
+		"ruff",
+		"mypy",
+		"alembic",
+		"uvicorn",
+		"flask",
+		"django-admin",
+		"fastapi",
+		"node",
+		"npm",
+		"npx",
+		"yarn",
+		"pnpm",
+		"corepack",
+		"ruby",
+		"bundle",
+		"bundler",
+		"gem",
+		"rails",
+		"go",
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0755); err != nil {
 			return err

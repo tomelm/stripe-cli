@@ -204,6 +204,7 @@ func agentPrompt(c Case, startResp struct {
 
 Work in the current directory. Use the "stripe" command from PATH; it is a local wrapper for the candidate CLI and records command usage.
 If COOP_EVAL_FIXTURE.md exists, read it before editing. It describes the existing app shape and the fixture-specific integration expectations.
+If the fixture has Docker or Compose configuration, use the app's containerized tooling for dependency installs, framework CLIs, tests, database migrations, package-version checks, and local server checks. Host app-runtime commands are blocked for Docker-backed fixtures. For example, use commands like "docker-compose run --rm <service> composer install", "docker-compose run --rm <service> php ...", "docker compose run --rm <service> python ...", or the fixture's documented service names instead of assuming host Composer, PHP, Node, Python, or other app runtimes are installed. Keep source edits in this mounted workspace.
 
 The blueprint is the desired Stripe workflow. The deliverable is the app in this workspace implementing that workflow. Direct Stripe CLI/API calls can support setup and verification, but they do not count as implementation for apiRequest, asyncHandler, or uiComponent steps.
 For apiRequest steps, add or update app code that calls Stripe through the project's SDK/client layer, then verify by exercising that app code.

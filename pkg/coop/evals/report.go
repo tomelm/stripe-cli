@@ -201,7 +201,7 @@ type reportSession struct {
 	ID        string          `json:"id"`
 	Blueprint string          `json:"blueprint"`
 	Status    string          `json:"status"`
-	Chapters  []reportChapter `json:"chapters"`
+	Steps     []reportChapter `json:"steps"`
 }
 
 type reportChapter struct {

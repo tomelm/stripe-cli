@@ -82,12 +82,16 @@ scripts/coop-eval.sh \
 
 Set `COOP_EVAL_RUN_DOCKER=1` when you want fixture smoke scripts to start
 Docker services, not just validate Compose configuration and source-level
-integration evidence.
+integration evidence. The runner passes this flag through to agents and
+command checks.
 
 Pass `--timeout` to override a case's `timeout_seconds` value for longer
 real-agent trials.
 
-Cases with `skip_default: true` are skipped unless selected with `--case`.
+Cases with `skip_default: true` are skipped by the default suite unless selected
+with `--case` or a matching suite filter. Cases with `disabled: true` are
+excluded from default, `all`, tag, and min-step selections; select them
+explicitly with `--case` for one-off forensic reruns.
 
 Run with an external agent command:
 
@@ -99,17 +103,23 @@ scripts/coop-eval.sh \
   --agent-command 'codex exec --json --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --ephemeral "$(cat "$COOP_EVAL_PROMPT_FILE")"'
 ```
 
-The external command runs inside the fixture workspace. The runner puts a
-`stripe` shim at the front of `PATH`; the shim calls the candidate binary and
-records invocations in the eval artifacts. For Codex implementation agents,
-include `--json` in `--agent-command` so the runner can read token-count events
-from `agent.stdout.txt`. The recorded `implementation_token_usage` includes the
-entire implementation agent run, including project/context scanning and every
-co-op step. It intentionally excludes the LLM judge, smoke-test commands, and
-deterministic harness work. The runner also sets isolated `HOME` and
-`XDG_CONFIG_HOME` directories for the agent shell. Codex auth is preserved with
-`CODEX_HOME` when available, but Stripe config and co-op state should stay
-inside the eval result directory.
+The external command runs on the host with its current directory set to the
+fixture workspace. The runner puts a `stripe` shim at the front of `PATH`; the
+shim calls the candidate binary and records invocations in the eval artifacts.
+For Codex implementation agents, include `--json` in `--agent-command` so the
+runner can read token-count events from `agent.stdout.txt`. The recorded
+`implementation_token_usage` includes the entire implementation agent run,
+including project/context scanning and every co-op step. It intentionally
+excludes the LLM judge, smoke-test commands, and deterministic harness work.
+When a fixture has Docker or Compose config, the app runtime is expected to run
+through that containerized tooling for dependency installs, package checks,
+framework CLIs, migrations, tests, and server checks. The agent command itself
+still runs on the host, but the shim directory blocks common host app-runtime
+commands such as `composer`, `php`, `python`, `pip`, `node`, `npm`, `ruby`, and
+`go` from Docker-backed fixture workspaces so agents use the fixture services
+instead. The runner also sets isolated `HOME` and `XDG_CONFIG_HOME` directories
+for the agent shell. Codex auth is preserved with `CODEX_HOME` when available,
+but Stripe config and co-op state should stay inside the eval result directory.
 Command agents are wrapped with `scripts/coop-eval-agent-sandbox.sh` by default
 when that script is available. On macOS it prevents host browser executables
 such as Google Chrome from launching during evals, avoiding desktop profile,

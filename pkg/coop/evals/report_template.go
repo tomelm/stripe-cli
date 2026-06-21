@@ -492,7 +492,7 @@ th { color: var(--muted); font-size: 12px; font-weight: 650; }
                 <h3>Agent Work Log</h3>
                 {{if .Session}}
                 <ul class="steps">
-                {{range .Session.Chapters}}
+                {{range .Session.Steps}}
                   {{range .Nodes}}
                   <li class="step {{.State}}">
                     <div class="step-head"><strong>{{.Title}}</strong><span class="pill">{{.State}}</span></div>

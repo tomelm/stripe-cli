@@ -38,6 +38,51 @@ func TestLoadCasesSuiteComplexSelectsComplexCases(t *testing.T) {
 	}, ids)
 }
 
+func TestLoadCasesExternalFixtureIncludesConnectCases(t *testing.T) {
+	r := NewRunner(Options{
+		RepoRoot: repoRootForTest(),
+		CasesDir: filepath.Join(repoRootForTest(), "pkg", "coop", "evals", "testdata", "cases"),
+		Suite:    "tag:external-fixture",
+	})
+
+	cases, err := r.loadCases()
+	require.NoError(t, err)
+
+	var ids []string
+	for _, c := range cases {
+		ids = append(ids, c.ID)
+	}
+	require.Equal(t, []string{
+		"easyappointments-connect-platform-php",
+		"hive-connect-marketplace-python",
+		"hive-one-time-payment-python",
+		"scrumboy-flat-subscription-go",
+	}, ids)
+}
+
+func TestLoadCasesCanSelectDisabledCaseExplicitly(t *testing.T) {
+	casesDir := t.TempDir()
+	writeFile(t, filepath.Join(casesDir, "disabled-case.json"), `{
+  "id": "disabled-case",
+  "blueprint": "one-time-payment",
+  "fixture": "minimal-node",
+  "disabled": true,
+  "disabled_reason": "exercise disabled case selection"
+}`)
+	r := NewRunner(Options{
+		RepoRoot: repoRootForTest(),
+		CasesDir: casesDir,
+		CaseIDs:  []string{"disabled-case"},
+	})
+
+	cases, err := r.loadCases()
+	require.NoError(t, err)
+
+	require.Len(t, cases, 1)
+	require.Equal(t, "disabled-case", cases[0].ID)
+	require.True(t, cases[0].Disabled)
+}
+
 func TestLoadCasesMinStepsIncludesSkipDefaultCases(t *testing.T) {
 	r := NewRunner(Options{
 		RepoRoot: repoRootForTest(),
@@ -161,6 +206,25 @@ func TestCommandAgentInvocationAllowsSandboxOptOut(t *testing.T) {
 
 	require.Equal(t, "sh", name)
 	require.Equal(t, []string{"-c", "codex exec prompt"}, args)
+}
+
+func TestAgentPromptSteersDockerFixtureTooling(t *testing.T) {
+	prompt := agentPrompt(Case{
+		ID:        "easyappointments-connect-platform-php",
+		Blueprint: "destination-charge",
+	}, struct {
+		SessionID         string `json:"session_id"`
+		AgentInstructions string `json:"agent_instructions"`
+		Next              string `json:"next"`
+	}{
+		SessionID: "coop_test",
+		Next:      "stripe coop agent start-work --session=coop_test --step=1",
+	})
+
+	require.Contains(t, prompt, "use the app's containerized tooling")
+	require.Contains(t, prompt, "Host app-runtime commands are blocked")
+	require.Contains(t, prompt, "docker-compose run --rm <service> composer install")
+	require.Contains(t, prompt, "instead of assuming host Composer, PHP, Node, Python")
 }
 
 func TestParseJudgeOutputAcceptsFencedJSONAndNormalizesScores(t *testing.T) {
@@ -393,6 +457,7 @@ func TestWorkspacePathContainsPatternSkipsGeneratedDependencyTrees(t *testing.T)
 
 func TestEvalEnvDisablesBrowserAuth(t *testing.T) {
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "must-not-leak")
+	t.Setenv("COOP_EVAL_RUN_DOCKER", "1")
 	t.Setenv("STRIPE_SECRET_KEY", "sk_test_eval")
 	t.Setenv("STRIPE_API_KEY", "")
 	t.Setenv("DOCKER_HOST", "unix:///tmp/docker.sock")
@@ -409,12 +474,46 @@ func TestEvalEnvDisablesBrowserAuth(t *testing.T) {
 	require.Contains(t, env, "GOOGLE_CHROME_BIN=/tmp/shim/coop-eval-browser-disabled")
 	require.Contains(t, env, "PUPPETEER_EXECUTABLE_PATH=/tmp/shim/coop-eval-browser-disabled")
 	require.Contains(t, env, "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/tmp/shim/coop-eval-browser-disabled")
+	require.Contains(t, env, "COOP_EVAL_RUN_DOCKER=1")
 	require.Contains(t, env, "STRIPE_SECRET_KEY=sk_test_eval")
 	require.Contains(t, env, "STRIPE_API_KEY=sk_test_eval")
 	require.Contains(t, env, "COOP_EVAL_RUN_DOCKER=1")
 	require.Contains(t, env, "DOCKER_HOST=unix:///tmp/docker.sock")
 	require.NotContains(t, env, "AWS_SECRET_ACCESS_KEY=must-not-leak")
 	require.NotContains(t, env, "COOP_EVAL_HOST_HOME="+os.Getenv("HOME"))
+}
+
+func TestHostRuntimeBlockersRequireDockerToolingInDockerFixtures(t *testing.T) {
+	shimDir := t.TempDir()
+	realDir := t.TempDir()
+	workspace := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "runtime.log")
+	realCalledPath := filepath.Join(t.TempDir(), "real-called")
+	realPython := filepath.Join(realDir, "python3")
+	realScript := "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" >> " + strconv.Quote(realCalledPath) + "\n"
+	require.NoError(t, os.WriteFile(realPython, []byte(realScript), 0755))
+	require.NoError(t, writeHostRuntimeBlockers(shimDir, logPath))
+
+	cmd := exec.Command(filepath.Join(shimDir, "python3"), "-m", "pip", "index", "versions", "stripe")
+	cmd.Dir = workspace
+	cmd.Env = []string{"PATH=" + shimDir + string(os.PathListSeparator) + realDir + string(os.PathListSeparator) + os.Getenv("PATH")}
+	require.NoError(t, cmd.Run())
+	realCalled, err := os.ReadFile(realCalledPath)
+	require.NoError(t, err)
+	require.Equal(t, "-m\npip\nindex\nversions\nstripe\n", string(realCalled))
+
+	require.NoError(t, os.WriteFile(filepath.Join(workspace, "docker-compose.yml"), []byte("services: {}\n"), 0644))
+	cmd = exec.Command(filepath.Join(shimDir, "python3"), "-m", "pip", "index", "versions", "stripe")
+	cmd.Dir = workspace
+	cmd.Env = []string{"PATH=" + shimDir + string(os.PathListSeparator) + realDir + string(os.PathListSeparator) + os.Getenv("PATH")}
+	output, err := cmd.CombinedOutput()
+	require.Error(t, err)
+	require.Contains(t, string(output), "host app-runtime command is disabled")
+
+	logData, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	require.Contains(t, string(logData), "host-runtime-blocked=python3")
+	require.Contains(t, string(logData), "pip")
 }
 
 func TestStripeShimBlocksLoginAndBrowserOpen(t *testing.T) {
@@ -672,10 +771,13 @@ func TestScoreEvalHygieneRequiresAsyncEventEvidence(t *testing.T) {
 	session := &coop.Session{
 		Chapters: []coop.SessionChapter{{
 			Nodes: []coop.SessionNode{{
-				Type:   coop.NodeAsyncHandler,
-				Title:  "Handle webhooks",
-				State:  coop.StepDone,
-				Events: []string{"customer.subscription.created", "invoice.created"},
+				Type:  coop.NodeAsyncHandler,
+				Title: "Handle webhooks",
+				State: coop.StepDone,
+				Events: []string{
+					"customer.subscription.created",
+					"invoice.created",
+				},
 				Implementation: &coop.Implementation{
 					Note: "Handles customer.subscription.created",
 				},

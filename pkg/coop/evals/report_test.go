@@ -110,7 +110,7 @@ func writeReportCaseFixture(t *testing.T, runDir, caseID string, passed bool, ov
 		ID:        "coop_test",
 		Blueprint: "one-time-payment",
 		Status:    "completed",
-		Chapters: []reportChapter{{
+		Steps: []reportChapter{{
 			Key:   "context",
 			Title: "Context",
 			Nodes: []reportNode{{
