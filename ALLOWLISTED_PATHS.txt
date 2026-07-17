@@ -1,3 +1,5 @@
 ALLOWLISTED_PATHS.txt
 HYPOTHESIS.md
+HYPOTHESIS.manifest.json
+pkg/coop/observe/**
 pkg/coop/verification/**

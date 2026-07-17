@@ -1,32 +1,31 @@
-# Verification Core Hypothesis
+# Passive Observers Hypothesis
 
 ## Status and scope
 
-This branch descends from the frozen candidate at
-`d96ee4806bd9df1da2b7516efe4431d1cd0607a2`. Its treatment is the inert Go
-package in `pkg/coop/verification`: stable result and check IDs, a versioned
-result envelope, status and evidence vocabulary, failure domains, validation,
-deterministic serialization, and policy-neutral indeterminate/fail-open
-classification primitives.
+This branch descends exactly from verification-core commit
+`1f9347a43c64a8b24e4a52e53f695baf269c3ba2`. Its treatment is the inert,
+transport-neutral package in `pkg/coop/observe`: explicit per-session inputs,
+passive `stripe logs tail` and `stripe listen` connection contracts, bounded
+startup and observation windows, collector health state, reconnect timing,
+health epochs, minimal observations, TUI-facing summaries, and availability
+results expressed with verification-core primitives.
 
-The existing Co-op runtime does not import this package. The branch therefore
-changes no current check, session, completion, or UI behavior.
-
-No model evaluation has run on this branch. Unit tests and static analysis
-exercise only the data contract. They do not establish that a Stripe
-integration is correct, and this branch makes no correctness, quality,
-efficiency, token, or runtime improvement claim.
+The package does not spawn a CLI process, read ambient Stripe login or
+configuration, contact Stripe, register a current Co-op runtime, or gate work.
+Only an explicitly injected connector can open a stream. No model evaluation
+or live qualification has run on this branch.
 
 ## Hypothesis
 
-If independently developed verification producers share one strict,
-versioned, policy-neutral result contract, then later feature branches can
-exchange and retain evidence without inventing incompatible meanings for
-pass, failure, evidence gaps, collector outages, or identity.
+If passive request and event streams expose explicit readiness, structured
+failure state, continuous health epochs, and separately accounted activity,
+then a later consumer can distinguish healthy zero activity from broken
+coverage without treating an environmental collector outage as an integration
+failure.
 
-The expected mechanism is earlier deterministic rejection of malformed or
-ambiguous results plus byte-stable retained output. This is a hypothesis about
-a shared primitive, not evidence that any future check or workflow will be
+The expected mechanism is deterministic state and coverage accounting around
+an injected passive transport. This is a hypothesis about observer primitives,
+not evidence that an application is correct or that a model will perform
 better.
 
 ## Deterministic observable
@@ -34,167 +33,198 @@ better.
 At the pinned branch commit, model-free tests must demonstrate all of the
 following:
 
-1. The documented stable-ID grammar accepts known-good IDs and rejects empty,
-   malformed, uppercase, slash-containing, or overlength IDs.
-2. Results with valid IDs, enums, status/domain relationships, and unique
-   evidence keys validate; targeted contract mutants return an error.
-3. `not_observed` and `unavailable` are indeterminate, while `passed`,
-   `failed`, and `skipped` are not.
-4. `FailsOpen` is true only for a CLI-owned, transient, `unavailable` result
-   in the `collector` failure domain. Changing any member of that tuple makes
-   the predicate false.
-5. Equivalent result/evidence multisets serialize to identical compact JSON,
-   sorted by result ID and evidence key, without reordering caller-owned
-   slices.
-6. Duplicate result IDs and unsupported schema versions fail validation.
+1. A collector cannot be constructed without an explicit bounded session ID,
+   stream, API key, device name, timeout policy, and jittered backoff policy.
+   Config, connector-request, snapshot, summary, and result serialization omit
+   the injected key.
+2. The only public streams are `logs_tail` and `listen`; the only public
+   transport states are `ready`, `retrying`, `unhealthy`, and `stopped`.
+3. A connection becomes ready only after `WaitUntilReady` succeeds inside one
+   bounded startup window. Cancellation and close cannot create a late ready
+   epoch.
+4. Transient connect, startup, and stream failures enter `retrying` with capped
+   exponential backoff and injected jitter. A permanent classified failure
+   enters `unhealthy`; an explicit, coalesced `RetryNow` starts a new attempt.
+5. Each reconnect creates a new monotonically numbered health epoch and a gap.
+   Snapshots expose only bounded request/event metadata and count malformed or
+   source-incompatible observations as dropped.
+6. An action-window absence is usable only when one ready epoch continuously
+   spans the entire bounded window and that window contains zero observations.
+   Zero activity remains visible when coverage is healthy, and never repairs a
+   timeout, reconnect, stop, or clock regression.
+7. TUI-facing summaries distinguish `healthy_no_activity` from retrying or
+   unhealthy limited assurance without embedding terminal or workflow code.
+8. Availability maps to verification core as `passed` while ready, `skipped`
+   while intentionally stopped, and `unavailable` in the `collector` domain
+   while coverage is broken. Only the exact transient environmental tuple
+   satisfies `verification.Result.FailsOpen`.
+9. Concurrent observation ingestion, snapshots, summaries, epoch reads, and
+   availability-result creation pass the Go race detector.
 
-The focused observable is:
+The focused observables are:
 
 ```sh
-go test -race ./pkg/coop/verification -count=1
+go test ./pkg/coop/observe -count=1
+go test -race ./pkg/coop/observe -count=1
+go vet ./pkg/coop/observe
+go build ./pkg/coop/observe
 ```
 
-The compatibility observable is:
+The dependency compatibility observable is:
 
 ```sh
-go test ./pkg/coop/... -count=1
-go vet ./pkg/coop/...
+go test ./pkg/coop/verification ./pkg/coop/observe -count=1
 ```
 
 ## Expected benefit
 
-If later consumers adopt the contract correctly, expected benefits are:
+If later consumers adopt the contracts correctly, expected benefits are:
 
-- stable identities for manifests, reports, and cross-run comparisons;
-- explicit separation of failures from missing or unavailable evidence;
-- consistent evidence-handling labels without pretending those labels redact
-  values;
-- deterministic retained JSON that is easier to digest, diff, and audit;
-- a narrow factual collector-outage classification that policy branches can
-  consume without embedding policy in check producers.
+- explicit stream health instead of inferring readiness from process startup;
+- bounded reconnect behavior whose timing can be reproduced with fake clocks;
+- a durable distinction between no observed activity and no trustworthy
+  observation coverage;
+- minimal, source-specific retained facts that exclude raw payloads, headers,
+  query strings, and signing secrets;
+- a small presentation-neutral state projection for a later TUI; and
+- consistent environmental-unavailability classification through the shared
+  verification contract.
 
-These benefits remain unmeasured. In particular, this inert branch cannot
-improve an evaluation outcome by itself.
+These benefits are unmeasured. The branch makes no integration-correctness,
+model-quality, runtime-efficiency, or token-efficiency claim.
 
 ## Known blind spots
 
-- The contract does not execute checks or establish that evidence is true,
-  complete, fresh, or causally related to an application action.
-- Evidence classes do not redact, encrypt, authorize display, or prevent a
-  producer from supplying sensitive material.
-- Stable-ID allocation and cross-producer namespace governance are documented
-  expectations, not a central registry.
-- Deterministic JSON does not provide signatures, authentication, provenance,
-  storage durability, or compatibility with non-Go consumers.
-- The tests do not qualify production-scale result volumes or adversarially
-  large strings.
-- The package has no timestamps, coverage epochs, retry state, stale-result
-  semantics, or workflow decisions.
-- No live Stripe request, application fixture, hidden verifier, model agent,
-  reviewer, or judge is exercised here.
-- Only schema version 1 is implemented; future migration behavior is not yet
-  qualified.
+- The injected `Connector` and `Connection` interfaces do not implement a
+  subprocess, socket, authentication handshake, or Stripe transport. Real
+  adapters require separate qualification and must not fall back to ambient
+  login.
+- A ready transport does not prove that Stripe will emit every relevant fact,
+  that filters are correct, or that an observation corresponds to a particular
+  application action.
+- `AbsenceUsable` establishes only uninterrupted passive coverage plus zero
+  bounded observations. It is not a product assertion and cannot prove that a
+  required request or event should have happened.
+- Request observations retain normalized paths and event observations retain
+  event types; downstream display and retention policy remain separate work.
+- Bounded startup depends on connectors honoring context cancellation. A
+  connector that violates the interface contract can retain its own blocked
+  goroutine even though the supervisor stops waiting.
+- Tests use scripted connectors and injected clocks. They do not exercise CLI
+  output formats, live reconnect behavior, operating-system signals, proxies,
+  account permissions, or network partitions.
+- This branch does not correlate request and event streams, application state,
+  blueprint obligations, resources, or durable application state.
 
-## Expected token and runtime cost
+## Expected cost
 
-The current branch adds no model calls and consumes zero runtime model tokens.
-Because the package is not imported, it adds no current Co-op execution cost.
+The existing Co-op runtime does not import this package, so current runtime and
+model-token cost is zero. A future adopter would keep one supervisor goroutine
+and a small fixed set of per-attempt goroutines per passive stream, plus bounded
+snapshot state, minimal last-observation metadata, health-epoch history, and
+caller-opened coverage tokens. Observation ingestion and snapshots are
+constant-time apart from lock contention; retained epoch storage grows linearly
+with session reconnects, while unfinished coverage-window storage is capped at
+64 tokens per supervisor.
 
-For a future consumer, validation is linear in result and evidence count.
-Deterministic serialization additionally sorts results and each result's
-evidence, for expected cost of `O(R log R + sum(E_i log E_i))`, and copies the
-result/evidence slices before sorting. Wire size and any prompt-token cost grow
-linearly with the serialized fields a consumer chooses to expose. No numeric
-prompt-token saving is claimed.
-
-The focused test suite is expected to finish in seconds on a development
-machine. Any future matched evaluation must freeze and report added serialized
-bytes, implementation/reviewer tokens, turns, and wall-clock time rather than
-assuming this primitive is free.
+Reconnect delay doubles from the configured initial delay, applies symmetric
+injected jitter, and never exceeds the configured maximum. Startup and action
+observation windows are each capped at 24 hours by validation. No quantitative
+latency or memory improvement is claimed.
 
 ## Fail-open and fail-closed behavior
 
-Contract validation and deterministic serialization fail closed: malformed
-IDs, unknown enum values, inconsistent status/domain combinations, duplicate
-evidence keys, duplicate result IDs, and unsupported schema versions return an
-error and produce no serialized result set.
+Configuration validation fails closed before I/O for missing explicit
+credentials, unknown streams, invalid filters, malformed bounded text,
+unbounded durations, or invalid backoff/jitter parameters. Malformed connector
+failures become non-transient `connector_invalid`; malformed observations are
+dropped and counted rather than retained.
 
-Indeterminate outcomes never become passes. `not_observed` means evidence was
-absent or ambiguous; `unavailable` means its source could not be evaluated.
-`skipped` is intentional non-execution and is not indeterminate.
+Environmental connection unavailability, startup timeout, or stream closure
+produces a CLI-owned, transient, `unavailable` verification result in the
+`collector` failure domain. That exact tuple is recognized by the inherited
+`verification.Result.FailsOpen` primitive. Authentication rejection and
+connector-contract errors are non-transient and do not match it. An intentional
+stop is `skipped`, and a ready collector is `passed`.
 
-`Result.FailsOpen` is only a factual classification primitive. It recognizes
-the exact transient CLI collector-outage tuple described above, but it does
-not advance a workflow, suppress a result, retry a check, or convert the
-result to `passed`. Any future decision to continue despite that result
-belongs on the separately isolated workflow-policy branch.
+No result advances, blocks, retries, reopens, completes, or suppresses a
+workflow. Retry timing is collector transport recovery only. The inherited
+fail-open predicate remains a factual classification and never converts
+unavailability into a pass.
 
 ## Model-free qualification corpus
 
-The retained known-good corpus in `verification_test.go` includes:
+The known-good corpus includes:
 
-- opaque IDs using dot, underscore, colon, and hyphen separators;
-- a valid passed CLI result with identifier and fingerprint evidence;
-- a valid transient CLI collector outage that is indeterminate and matches
-  the narrow fail-open predicate;
-- an intentionally skipped agent result;
-- equivalent result sets supplied in different result/evidence orders;
-- a valid empty versioned result set and a JSON decode/validate round trip.
+- explicit listen configuration with bounded event filters and exact
+  credential injection into a fake connector;
+- immediately ready logs-tail and listen connections;
+- healthy zero-activity and healthy observed-activity summaries;
+- valid minimal request and event observations;
+- a complete zero-activity action window inside one health epoch;
+- a transient stream disconnect followed by deterministic backoff and a new
+  ready epoch;
+- a permanent authentication failure recovered only by manual retry; and
+- concurrent snapshots, summaries, epoch reads, result creation, and
+  observation ingestion under the race detector.
 
-The targeted mutant corpus includes:
+The targeted failure corpus includes:
 
-- missing, uppercase, separator-leading/trailing, whitespace-containing,
-  slash-containing, and overlength IDs;
-- missing result/check IDs and unknown source or status values;
-- passed results with a failure domain or transient marker;
-- failed results without a failure domain;
-- unknown evidence classes and duplicate evidence keys;
-- targeted mutations covering every member of the recognized fail-open tuple;
-- duplicate result IDs and unsupported schema versions.
+- missing explicit credentials, wrong-stream filters, overlong timeouts, and
+  invalid jitter samples;
+- query-bearing request paths, wrong-stream facts, and empty observations;
+- startup timeout and a canceled readiness wait followed by a late signal;
+- a reconnect inside an action window, an expired observation window, a clock
+  regression, and reuse of a consumed window token;
+- permanent collector failure that must not satisfy fail-open; and
+- environmental retrying state that must satisfy only verification core's
+  exact fail-open tuple.
 
-Qualification stops if a known-good fails, a targeted mutant is accepted, the
-serializer mutates caller-owned ordering, or two equivalent multisets produce
-different bytes.
+Qualification stops on any known-good failure, accepted targeted mutant,
+credential leak, late readiness epoch, usable absence across a health gap, or
+race-detector finding.
 
 ## Criteria for a future matched evaluation
 
-There is no useful standalone model evaluation for this inert shared core: a
-model sees no behavior change until a concrete feature consumes it. A future
-matched evaluation is justified only when all of these conditions hold:
+No model evaluation is authorized during this cleanup cycle. A future matched
+evaluation is justified only after this branch passes model-free qualification
+and separate approval creates `tomer/coop-evals-passive-observers` from
+`tomer/coop-vanilla-baseline-evals`. That evaluator branch must invoke
+authenticated control and treatment binaries externally, compare exactly this
+treatment against its declared control, freeze identical cases, fixtures,
+blueprint digests, prompts, model settings, reviewer/judge budgets, credentials,
+and schedules, and retain no product implementation.
 
-1. This core's commit, source tree, schema version, and model-free corpus are
-   pinned and passing.
-2. Exactly one independently scoped product feature adopts the contract; no
-   omnibus verification stack is used.
-3. The control and treatment binaries are authenticated and invoked externally
-   by an evaluator branch that contains no product implementation.
-4. Control and treatment use identical blueprint digests, fixtures, prompts,
-   model/reasoning settings, credentials, schedules, reviewer budgets, and
-   evaluator-owned live assertions.
-5. Primary outcomes and stop conditions are registered before execution,
-   including live-assertion performance, false completion/blocking,
-   infrastructure exclusions, token/turn cost, and runtime.
-6. The consuming feature's known-goods pass and every targeted mutant fails
-   before any model call.
-7. Results report this core as a dependency rather than attributing the
-   consuming feature's effect to the contract alone.
-
-Until those criteria are met, only the deterministic model-free observables in
-this document may be reported.
+Before a model call, a real connector adapter must independently qualify
+readiness, bounded cancellation, reconnect classification, credential handling,
+and minimal observation parsing against known-good and failure fixtures. Live
+infrastructure failures must be reported separately from integration outcomes.
 
 ## Explicit non-goals
 
 This branch does not contain or define:
 
-- concrete verification checks or expected application behavior;
-- passive log/event observers, webhook probes, or Stripe resource checks;
-- Tree-sitter grammars, query packs, or static-flow analysis;
-- retries, backoff, circuit breakers, stale-result handling, completion
-  sweeps, reopening, gating, or any other workflow policy;
-- tracing or causal-correlation protocols;
+- Stripe resource, account-context, field, or cross-node linkage checks;
+- signed webhook delivery, forged/replay probes, forwarding, or any active
+  request to an application;
+- workflow retries, stale-result handling, completion sweeps, circuit breakers,
+  reopening, or gating policy;
+- Tree-sitter grammars, query packs, static-flow analysis, tracing, or causal
+  correlation;
+- blueprint metadata, canonical blueprint edits, App Roles, lifecycle
+  semantics, or App Map;
 - evaluator cases, fixtures, hidden verifiers, reviewer/judge code, model
-  runners, or evaluation results;
-- blueprint overlays or changes to canonical blueprint JSON;
-- credentials, Docker configuration, external services, or live Stripe calls;
-- TUI presentation, user-facing claims, or automatic redaction;
+  runners, reports, or evaluation results;
+- process execution, IPC, daemon management, Docker, network clients,
+  credentials on disk, environment-variable login, or ambient configuration;
+- raw request/event payload retention, headers, response bodies, query strings,
+  signing secrets, or a rendered TUI; or
 - adoption by the existing Co-op runtime.
+
+## Claim boundary
+
+Only deterministic model-free contract behavior is claimed. No live Stripe
+stream, application fixture, hidden verifier, model agent, reviewer, or judge
+was exercised. This branch does not establish that any integration is correct,
+that absence corresponds to a missing product action, or that a future agent
+will use passive evidence well.
