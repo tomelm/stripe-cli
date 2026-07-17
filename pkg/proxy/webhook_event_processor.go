@@ -38,6 +38,20 @@ type WebhookEventProcessorConfig struct {
 
 	// LoggedInAccountID is the currently logged-in account ID
 	LoggedInAccountID string
+
+	// OmitMarshaledPayload prevents duplicate raw event JSON from entering OutCh.
+	OmitMarshaledPayload bool
+
+	// DisconnectOnMalformedPayload emits a reconnect boundary for malformed
+	// webhook event content instead of silently preserving healthy coverage.
+	DisconnectOnMalformedPayload bool
+
+	// AcceptWebhookEvents and AcceptStripeV2Events define the message families
+	// authorized by the session. They are enforced only in strict
+	// DisconnectOnMalformedPayload mode so existing callers retain their
+	// permissive behavior.
+	AcceptWebhookEvents  bool
+	AcceptStripeV2Events bool
 }
 
 // WebhookEventProcessor encapsulates logic around processing and forwarding
@@ -98,11 +112,20 @@ func NewWebhookEventProcessor(sendMessage func(*websocket.OutgoingMessage), rout
 func (p *WebhookEventProcessor) ProcessEvent(msg websocket.IncomingMessage) {
 	switch {
 	case msg.WebhookEvent != nil:
+		if p.cfg.DisconnectOnMalformedPayload && !p.cfg.AcceptWebhookEvents {
+			p.reportMalformedPayload()
+			return
+		}
 		p.processEvent(msg.WebhookEvent)
 	case msg.StripeV2Event != nil:
+		if p.cfg.DisconnectOnMalformedPayload && !p.cfg.AcceptStripeV2Events {
+			p.reportMalformedPayload()
+			return
+		}
 		p.processV2Event(msg.StripeV2Event)
 	default:
 		p.cfg.Log.Debug("WebSocket specified for Webhooks received non-webhook event")
+		p.reportMalformedPayload()
 		return
 	}
 }
@@ -119,6 +142,7 @@ func (p *WebhookEventProcessor) processEvent(webhookEvent *websocket.WebhookEven
 	err := json.Unmarshal([]byte(webhookEvent.EventPayload), &evt)
 	if err != nil {
 		p.cfg.Log.Debug("Received malformed event from Stripe, ignoring")
+		p.reportMalformedPayload()
 		return
 	}
 	evt.LoggedInAccountID = p.cfg.LoggedInAccountID
@@ -127,6 +151,7 @@ func (p *WebhookEventProcessor) processEvent(webhookEvent *websocket.WebhookEven
 
 	if err != nil {
 		p.cfg.Log.Debug("Received malformed event from Stripe, ignoring")
+		p.reportMalformedPayload()
 		return
 	}
 
@@ -159,9 +184,13 @@ func (p *WebhookEventProcessor) processEvent(webhookEvent *websocket.WebhookEven
 	}
 
 	if p.events["*"] || p.events[evt.Type] {
+		marshaled := formatOutput(outputFormatJSON, webhookEvent.EventPayload)
+		if p.cfg.OmitMarshaledPayload {
+			marshaled = ""
+		}
 		p.cfg.OutCh <- websocket.DataElement{
 			Data:      evt,
-			Marshaled: formatOutput(outputFormatJSON, webhookEvent.EventPayload),
+			Marshaled: marshaled,
 		}
 
 		for _, endpoint := range p.endpointClients {
@@ -179,6 +208,7 @@ func (p *WebhookEventProcessor) processV2Event(v2Event *websocket.StripeV2Event)
 	err := json.Unmarshal([]byte(v2Event.Payload), &evt)
 	if err != nil {
 		p.cfg.Log.Debug("Received malformed event from Stripe, ignoring")
+		p.reportMalformedPayload()
 		return
 	}
 
@@ -213,6 +243,12 @@ func (p *WebhookEventProcessor) processV2Event(v2Event *websocket.StripeV2Event)
 		if endpoint.isEventDestination && endpoint.SupportsContext(evt.Context) {
 			go endpoint.PostV2(evtCtx)
 		}
+	}
+}
+
+func (p *WebhookEventProcessor) reportMalformedPayload() {
+	if p.cfg.DisconnectOnMalformedPayload {
+		p.cfg.OutCh <- websocket.StateElement{State: websocket.Reconnecting}
 	}
 }
 

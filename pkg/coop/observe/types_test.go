@@ -38,6 +38,10 @@ func TestConfigRequiresExplicitBoundedSessionInput(t *testing.T) {
 	wrongFilters.EventTypes = []string{"charge.succeeded"}
 	assert.ErrorContains(t, wrongFilters.Validate(), "does not accept event_types")
 
+	unknownFilter := config
+	unknownFilter.EventTypes = []string{"payment_intent.suceeded"}
+	assert.ErrorContains(t, unknownFilter.Validate(), "not a supported listen event")
+
 	unbounded := config
 	unbounded.ObservationTimeout = 24*time.Hour + time.Nanosecond
 	assert.ErrorContains(t, unbounded.Validate(), "observation_timeout")

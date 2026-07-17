@@ -2,15 +2,22 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	ws "github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
 
 	"github.com/stripe/stripe-cli/pkg/requests"
 	"github.com/stripe/stripe-cli/pkg/stripe"
+	"github.com/stripe/stripe-cli/pkg/stripeauth"
 	"github.com/stripe/stripe-cli/pkg/websocket"
 )
 
@@ -212,6 +219,16 @@ func TestExtractRequestData(t *testing.T) {
 		_, err := ExtractRequestData(evt.RequestData)
 		require.Error(t, err)
 	})
+	t.Run("map with non-string id", func(t *testing.T) {
+		evt := StripeEvent{RequestData: map[string]interface{}{"id": 123}}
+		_, err := ExtractRequestData(evt.RequestData)
+		require.Error(t, err)
+	})
+	t.Run("map with non-string idempotency key", func(t *testing.T) {
+		evt := StripeEvent{RequestData: map[string]interface{}{"idempotency_key": true}}
+		_, err := ExtractRequestData(evt.RequestData)
+		require.Error(t, err)
+	})
 }
 
 func TestRun_RetryOnAuthorizationServerError(t *testing.T) {
@@ -287,4 +304,89 @@ func TestRun_NoRetryOnAuthorizationClientError_TooManyRequests(t *testing.T) {
 	err = p.Run(context.Background())
 	require.ErrorContains(t, err, "you have too many `stripe listen` sessions open, please close some and try again")
 	require.Equal(t, 1, nAttempts)
+}
+
+func TestRunSuccessfulExpiredSessionsResetAuthorizationAttempts(t *testing.T) {
+	var mu sync.Mutex
+	authorizations := 0
+	connections := map[string]int{}
+	upgrader := ws.Upgrader{}
+	webSocketServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		webSocketID := request.Header.Get("Websocket-Id")
+		mu.Lock()
+		connections[webSocketID]++
+		connectionNumber := connections[webSocketID]
+		mu.Unlock()
+		if connectionNumber > 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"message":"Unknown WebSocket ID."}}`))
+			return
+		}
+		connection, err := upgrader.Upgrade(w, request, nil)
+		if err != nil {
+			return
+		}
+		_ = connection.WriteControl(ws.CloseMessage, ws.FormatCloseMessage(ws.CloseGoingAway, "expire session"), time.Now().Add(time.Second))
+		_ = connection.Close()
+	}))
+	defer webSocketServer.Close()
+	webSocketURL := "ws" + strings.TrimPrefix(webSocketServer.URL, "http")
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		mu.Lock()
+		authorizations++
+		webSocketID := fmt.Sprintf("ws_%d", authorizations)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(stripeauth.StripeCLISession{
+			ReconnectDelay:             3600,
+			WebSocketAuthorizedFeature: "webhooks",
+			WebSocketID:                webSocketID,
+			WebSocketURL:               webSocketURL,
+		})
+	}))
+	defer apiServer.Close()
+	baseURL, err := url.Parse(apiServer.URL)
+	require.NoError(t, err)
+
+	deviceToken := ""
+	output := make(chan websocket.IElement, 32)
+	p, err := Init(context.Background(), &Config{
+		Client:                      &stripe.Client{APIKey: "sk_test_123", BaseURL: baseURL},
+		DeviceToken:                 &deviceToken,
+		OutCh:                       output,
+		WebSocketFeatures:           []string{"webhooks"},
+		WebSocketConnectAttemptWait: time.Millisecond,
+	})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan error, 1)
+	go func() { runDone <- p.Run(ctx) }()
+
+	readyCount := 0
+	deadline := time.After(10 * time.Second)
+	visitor := &websocket.Visitor{VisitStatus: func(status websocket.StateElement) error {
+		if status.State == websocket.Ready {
+			readyCount++
+		}
+		return nil
+	}}
+	for readyCount < 4 {
+		select {
+		case element, open := <-output:
+			require.True(t, open)
+			require.NoError(t, element.Accept(visitor))
+		case <-deadline:
+			t.Fatal("successful sessions stopped reauthorizing after the retry cap")
+		}
+	}
+	cancel()
+	for range output {
+	}
+	require.NoError(t, <-runDone)
+	mu.Lock()
+	require.GreaterOrEqual(t, authorizations, 4)
+	mu.Unlock()
 }

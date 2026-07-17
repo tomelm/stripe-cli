@@ -453,6 +453,13 @@ func (supervisor *Supervisor) runAttempt(runContext context.Context) attemptOutc
 			if !open || err == nil {
 				err = ConnectorError{Failure: Failure{Code: FailureStreamClosed, Transient: true}}
 			}
+			supervisor.drainAvailableObservations(observations)
+			if attemptContext.Err() != nil {
+				outcome := supervisor.outcomeForAttemptError(runContext, attemptContext, attemptContext.Err())
+				outcome.wasReady = true
+				outcome.readyAt = readyAt
+				return outcome
+			}
 			failure := failureFromError(err)
 			return attemptOutcome{failure: failure, wasReady: true, readyAt: readyAt}
 		case <-attemptContext.Done():
@@ -460,6 +467,20 @@ func (supervisor *Supervisor) runAttempt(runContext context.Context) attemptOutc
 			outcome.wasReady = true
 			outcome.readyAt = readyAt
 			return outcome
+		}
+	}
+}
+
+func (supervisor *Supervisor) drainAvailableObservations(observations <-chan Observation) {
+	for observations != nil {
+		select {
+		case observation, open := <-observations:
+			if !open {
+				return
+			}
+			supervisor.recordObservation(observation)
+		default:
+			return
 		}
 	}
 }

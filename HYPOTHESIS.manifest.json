@@ -10,7 +10,15 @@
     "HYPOTHESIS.md",
     "HYPOTHESIS.manifest.json",
     "pkg/coop/observe/**",
-    "pkg/coop/verification/**"
+    "pkg/coop/verification/**",
+    "pkg/logtailing/tailer.go",
+    "pkg/logtailing/tailer_test.go",
+    "pkg/proxy/proxy.go",
+    "pkg/proxy/proxy_test.go",
+    "pkg/proxy/webhook_event_processor.go",
+    "pkg/stripe/client.go",
+    "pkg/websocket/client.go",
+    "pkg/websocket/client_test.go"
   ],
   "donor_references": [
     "83f92223b510df58936ca517b940f61df461184d",
@@ -29,11 +37,16 @@
     "go test -race ./pkg/coop/observe -count=1",
     "go vet ./pkg/coop/observe",
     "go build ./pkg/coop/observe",
-    "go test ./pkg/coop/verification ./pkg/coop/observe -count=1"
+    "go test ./pkg/coop/verification ./pkg/coop/observe -count=1",
+    "go test -race ./pkg/coop/observe -run 'TestStripeConnectorProduction(Oversized|Malformed|LogsRejects|ListenRejects)' -count=10",
+    "go test -race ./pkg/logtailing ./pkg/proxy -run 'TestRunSuccessfulExpiredSessionsResetAuthorizationAttempts' -count=3",
+    "go test -race ./pkg/websocket ./pkg/logtailing ./pkg/proxy ./pkg/stripe -count=1",
+    "go vet ./pkg/websocket ./pkg/logtailing ./pkg/proxy ./pkg/stripe",
+    "go build ./pkg/websocket ./pkg/logtailing ./pkg/proxy ./pkg/stripe"
   ],
   "model_eval_run": false,
   "live_qualification_run": false,
-  "connector_adapter_implemented": false,
+  "connector_adapter_implemented": true,
   "workflow_policy_implemented": false,
   "resource_checks_implemented": false,
   "webhook_probes_implemented": false,

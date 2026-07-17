@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -50,6 +51,34 @@ type Config struct {
 
 	// OutCh is the channel to send logs and statuses to for processing in other packages
 	OutCh chan websocket.IElement
+
+	// WebSocketDialer, when non-nil, is used verbatim instead of the CLI's
+	// ambient proxy/Unix-socket-aware dialer.
+	WebSocketDialer websocket.Dialer
+
+	// WebSocketReadLimit bounds one inbound message before JSON decoding. Zero
+	// preserves the existing logs-tail behavior.
+	WebSocketReadLimit int64
+
+	// WebSocketConnectAttemptWait overrides the delay between WebSocket connect
+	// attempts. Zero preserves the existing default.
+	WebSocketConnectAttemptWait time.Duration
+
+	// ReportConnectionGaps emits Reconnecting before an established WebSocket
+	// is reset or reconnects after a network failure.
+	ReportConnectionGaps bool
+
+	// SynchronousEventHandling keeps WebSocket payload production owned by Run
+	// so output can be closed only after all producers have terminated.
+	SynchronousEventHandling bool
+
+	// OmitMarshaledPayload prevents the duplicate raw JSON representation from
+	// entering OutCh when a structured EventPayload is sufficient.
+	OmitMarshaledPayload bool
+
+	// DisconnectOnMalformedPayload reports malformed WebSocket JSON and malformed
+	// request-log payloads as coverage-breaking reconnects.
+	DisconnectOnMalformedPayload bool
 }
 
 // Tailer is the main interface for running the log tailing session
@@ -130,36 +159,61 @@ func (t *Tailer) Run(ctx context.Context) error {
 			warned = true
 		}
 
+		var readyOnce sync.Once
+		connectedOnce := false
 		t.webSocketClient = websocket.NewClient(
 			session.WebSocketURL,
 			session.WebSocketID,
 			session.WebSocketAuthorizedFeature,
 			&websocket.Config{
-				EventHandler:      websocket.EventHandlerFunc(t.processRequestLogEvent),
-				Log:               t.cfg.Log,
-				NoWSS:             t.cfg.NoWSS,
-				ReconnectInterval: time.Duration(session.ReconnectDelay) * time.Second,
+				EventHandler:                 websocket.EventHandlerFunc(t.processRequestLogEvent),
+				ConnectAttemptWait:           t.cfg.WebSocketConnectAttemptWait,
+				SynchronousEventHandling:     t.cfg.SynchronousEventHandling,
+				DisconnectOnMalformedMessage: t.cfg.DisconnectOnMalformedPayload,
+				Dialer:                       t.cfg.WebSocketDialer,
+				Log:                          t.cfg.Log,
+				NoWSS:                        t.cfg.NoWSS,
+				ReadLimit:                    t.cfg.WebSocketReadLimit,
+				ReconnectInterval:            time.Duration(session.ReconnectDelay) * time.Second,
+				OnConnect: func() {
+					connectedOnce = true
+					readyOnce.Do(func() {
+						select {
+						case t.cfg.OutCh <- websocket.StateElement{State: websocket.Ready}:
+						case <-ctx.Done():
+						}
+					})
+				},
+				OnDisconnect: func() {
+					if t.cfg.ReportConnectionGaps {
+						select {
+						case t.cfg.OutCh <- websocket.StateElement{State: websocket.Reconnecting}:
+						case <-ctx.Done():
+						}
+					}
+				},
 			},
 		)
 
-		go func() {
-			<-t.webSocketClient.Connected()
-			nAttempts = 0
-			t.cfg.OutCh <- websocket.StateElement{
-				State: websocket.Ready,
-			}
-		}()
-
-		go t.webSocketClient.Run(ctx)
+		webSocketDone := make(chan struct{})
 		nAttempts++
+		go func() {
+			t.webSocketClient.Run(ctx)
+			close(webSocketDone)
+		}()
 
 		select {
 		case <-ctx.Done():
+			<-webSocketDone
 			t.cfg.OutCh <- &websocket.StateElement{
 				State: websocket.Done,
 			}
 			return nil
 		case <-t.webSocketClient.NotifyExpired:
+			<-webSocketDone
+			if connectedOnce {
+				nAttempts = 0
+			}
 			if nAttempts < maxConnectAttempts {
 				t.cfg.OutCh <- &websocket.StateElement{
 					State: websocket.Reconnecting,
@@ -238,6 +292,9 @@ func (t *Tailer) createSession(ctx context.Context) (*stripeauth.StripeCLISessio
 func (t *Tailer) processRequestLogEvent(msg websocket.IncomingMessage) {
 	if msg.RequestLogEvent == nil {
 		t.cfg.Log.Debug("WebSocket specified for request logs received non-request-logs event")
+		if t.cfg.DisconnectOnMalformedPayload {
+			t.cfg.OutCh <- websocket.StateElement{State: websocket.Reconnecting}
+		}
 		return
 	}
 
@@ -251,6 +308,10 @@ func (t *Tailer) processRequestLogEvent(msg websocket.IncomingMessage) {
 	var payload EventPayload
 	if err := json.Unmarshal([]byte(requestLogEvent.EventPayload), &payload); err != nil {
 		t.cfg.Log.Debug("Received malformed payload: ", err)
+		if t.cfg.DisconnectOnMalformedPayload {
+			t.cfg.OutCh <- websocket.StateElement{State: websocket.Reconnecting}
+			return
+		}
 	}
 
 	// at this point the message is valid so we can acknowledge it
@@ -263,10 +324,11 @@ func (t *Tailer) processRequestLogEvent(msg websocket.IncomingMessage) {
 		return
 	}
 
-	t.cfg.OutCh <- websocket.DataElement{
-		Data:      payload,
-		Marshaled: requestLogEvent.EventPayload,
+	marshaled := requestLogEvent.EventPayload
+	if t.cfg.OmitMarshaledPayload {
+		marshaled = ""
 	}
+	t.cfg.OutCh <- websocket.DataElement{Data: payload, Marshaled: marshaled}
 }
 
 func jsonifyFilters(logFilters *LogFilters) (string, error) {

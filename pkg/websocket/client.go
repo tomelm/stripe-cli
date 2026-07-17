@@ -27,7 +27,7 @@ import (
 type Config struct {
 	ConnectAttemptWait time.Duration
 
-	Dialer *ws.Dialer
+	Dialer Dialer
 
 	Log *log.Logger
 
@@ -38,6 +38,10 @@ type Config struct {
 
 	PongWait time.Duration
 
+	// ReadLimit bounds one inbound WebSocket message before JSON decoding. Zero
+	// preserves the CLI's existing unlimited behavior.
+	ReadLimit int64
+
 	// Interval at which the websocket client should reset the connection
 	ReconnectInterval time.Duration
 
@@ -47,6 +51,29 @@ type Config struct {
 	WriteWait time.Duration
 
 	EventHandler EventHandler
+
+	// SynchronousEventHandling keeps event ownership within the read pump so a
+	// caller can wait for bounded producer shutdown before closing its output.
+	SynchronousEventHandling bool
+
+	// DisconnectOnMalformedMessage turns malformed JSON and unknown message
+	// types into an ordinary disconnect instead of silently continuing.
+	DisconnectOnMalformedMessage bool
+
+	// OnConnect runs synchronously after a connection is fully established and
+	// its read and write pumps have started.
+	OnConnect func()
+
+	// OnDisconnect runs synchronously before an established connection is reset
+	// after a network disconnect or scheduled reconnect. Context cancellation
+	// and an explicit Stop do not invoke it.
+	OnDisconnect func()
+}
+
+// Dialer is the minimal WebSocket dialing contract used by Client. Supplying
+// one prevents NewClient from consulting ambient proxy or Unix-socket state.
+type Dialer interface {
+	DialContext(context.Context, string, http.Header) (*ws.Conn, *http.Response, error)
 }
 
 // EventHandler handles an event.
@@ -82,6 +109,8 @@ type Client struct {
 
 	conn             *ws.Conn
 	done             chan struct{}
+	doneOnce         sync.Once
+	connected        chan struct{}
 	isConnected      bool
 	isConnectedMutex sync.RWMutex
 
@@ -91,40 +120,42 @@ type Client struct {
 	stopReadPumpMutex sync.RWMutex
 	stopReadPump      chan struct{}
 	stopWritePump     chan struct{}
+	connectionDone    chan struct{}
 	wg                *sync.WaitGroup
 }
 
-func (c *Client) setIsConnected(newValue bool) {
+func (c *Client) markDisconnected() {
 	c.isConnectedMutex.Lock()
 	defer c.isConnectedMutex.Unlock()
-	c.isConnected = newValue
+	if c.isConnected {
+		c.isConnected = false
+		c.connected = make(chan struct{})
+	}
 }
 
-func (c *Client) getIsConnected() bool {
-	c.isConnectedMutex.RLock()
-	defer c.isConnectedMutex.RUnlock()
-	return c.isConnected
+func (c *Client) markConnected() {
+	c.isConnectedMutex.Lock()
+	defer c.isConnectedMutex.Unlock()
+	if !c.isConnected {
+		c.isConnected = true
+		close(c.connected)
+	}
 }
 
 // Connected returns a channel that's closed when the client has finished
-// establishing the websocket connection.
+// establishing its current or next WebSocket connection. A disconnect starts
+// a new channel generation, so callers cannot mistake an earlier connection
+// for current readiness.
 func (c *Client) Connected() <-chan struct{} {
-	d := make(chan struct{})
-
-	go func() {
-		for !c.getIsConnected() {
-			time.Sleep(100 * time.Millisecond)
-		}
-		close(d)
-	}()
-
-	return d
+	c.isConnectedMutex.RLock()
+	defer c.isConnectedMutex.RUnlock()
+	return c.connected
 }
 
 // Run starts listening for incoming webhook requests from Stripe.
 func (c *Client) Run(ctx context.Context) {
 	for {
-		c.setIsConnected(false)
+		c.markDisconnected()
 		c.cfg.Log.WithFields(log.Fields{
 			"prefix": "websocket.Client.Run",
 		}).Debug("Attempting to connect to Stripe")
@@ -152,6 +183,7 @@ func (c *Client) Run(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				c.Stop()
+				return
 			case <-time.After(c.cfg.ConnectAttemptWait):
 			}
 			err = c.connect(ctx)
@@ -159,21 +191,31 @@ func (c *Client) Run(ctx context.Context) {
 
 		select {
 		case <-ctx.Done():
-			close(c.send)
+			c.markDisconnected()
 			c.Close(ws.CloseNormalClosure, "Connection Done")
+			c.wg.Wait()
 			return
 		case <-c.done:
-			close(c.send)
+			c.markDisconnected()
 			close(c.NotifyExpired)
 			c.Close(ws.CloseNormalClosure, "Connection Done")
+			c.wg.Wait()
 			return
 		case <-c.notifyClose:
+			c.markDisconnected()
+			if c.cfg.OnDisconnect != nil {
+				c.cfg.OnDisconnect()
+			}
 			c.cfg.Log.WithFields(log.Fields{
 				"prefix": "websocket.Client.Run",
 			}).Debug("Disconnected from Stripe")
 			c.Close(ws.CloseGoingAway, "Server closed the connection")
 			c.wg.Wait()
 		case <-time.After(c.cfg.ReconnectInterval):
+			c.markDisconnected()
+			if c.cfg.OnDisconnect != nil {
+				c.cfg.OnDisconnect()
+			}
 			c.cfg.Log.WithFields(log.Fields{
 				"prefix": "websocket.Client.Run",
 			}).Debug("Resetting the connection")
@@ -194,6 +236,7 @@ func (c *Client) Run(ctx context.Context) {
 // Close executes a proper closure handshake then closes the connection
 // list of close codes: https://datatracker.ietf.org/doc/html/rfc6455#section-7.4
 func (c *Client) Close(closeCode int, text string) {
+	c.markDisconnected()
 	c.cfg.Log.WithFields(log.Fields{
 		"prefix": "websocket.Client.Close",
 	}).Debug("Acquiring stopReadPumpMutex")
@@ -203,6 +246,7 @@ func (c *Client) Close(closeCode int, text string) {
 	c.cfg.Log.WithFields(log.Fields{
 		"prefix": "websocket.Client.Close",
 	}).Debug("Closing stopReadPump channel")
+	close(c.connectionDone)
 	close(c.stopReadPump)
 
 	c.cfg.Log.WithFields(log.Fields{
@@ -238,12 +282,24 @@ func (c *Client) Close(closeCode int, text string) {
 
 // Stop stops listening for incoming webhook events.
 func (c *Client) Stop() {
-	close(c.done)
+	c.doneOnce.Do(func() {
+		close(c.done)
+	})
 }
 
 // SendMessage sends a message to Stripe through the websocket.
 func (c *Client) SendMessage(msg *OutgoingMessage) {
-	c.send <- msg
+	c.stopReadPumpMutex.RLock()
+	connectionDone := c.connectionDone
+	c.stopReadPumpMutex.RUnlock()
+	if connectionDone == nil {
+		return
+	}
+	select {
+	case c.send <- msg:
+	case <-connectionDone:
+	case <-c.done:
+	}
 }
 
 func readWSConnectErrorMessage(resp *http.Response) string {
@@ -278,6 +334,10 @@ var unknownIDMessage = "Unknown WebSocket ID."
 
 // ErrUnknownID can occur when the websocket session is expired or invalid
 var ErrUnknownID = errors.New(unknownIDMessage)
+
+// ErrMalformedMessage marks a coverage-breaking malformed or unknown inbound
+// WebSocket message without retaining its raw payload.
+var ErrMalformedMessage = errors.New("malformed websocket message")
 
 // connect makes a single attempt to connect to the websocket URL. It returns
 // the success of the attempt.
@@ -319,7 +379,9 @@ func (c *Client) connect(ctx context.Context) error {
 	defer resp.Body.Close()
 
 	c.changeConnection(conn)
-	c.setIsConnected(true)
+	if c.cfg.ReadLimit > 0 {
+		conn.SetReadLimit(c.cfg.ReadLimit)
+	}
 
 	c.wg = &sync.WaitGroup{}
 	c.wg.Add(2)
@@ -327,6 +389,10 @@ func (c *Client) connect(ctx context.Context) error {
 	go c.readPump()
 
 	go c.writePump()
+	c.markConnected()
+	if c.cfg.OnConnect != nil {
+		c.cfg.OnConnect()
+	}
 
 	c.cfg.Log.WithFields(log.Fields{
 		"prefix": "websocket.Client.connect",
@@ -343,6 +409,7 @@ func (c *Client) changeConnection(conn *ws.Conn) {
 	c.notifyClose = make(chan error, 1)
 	c.stopReadPump = make(chan struct{})
 	c.stopWritePump = make(chan struct{})
+	c.connectionDone = make(chan struct{})
 }
 
 // readPump pumps messages from the websocket connection and pushes them into
@@ -428,10 +495,29 @@ func (c *Client) readPump() {
 				"message": string(data),
 			}).Debug("Received malformed message: ", err)
 
+			if c.cfg.DisconnectOnMalformedMessage {
+				c.notifyMalformedMessage()
+				return
+			}
 			continue
 		}
+		if msg.Unknown != nil && c.cfg.DisconnectOnMalformedMessage {
+			c.notifyMalformedMessage()
+			return
+		}
 
-		go c.cfg.EventHandler.ProcessEvent(msg)
+		if c.cfg.SynchronousEventHandling {
+			c.cfg.EventHandler.ProcessEvent(msg)
+		} else {
+			go c.cfg.EventHandler.ProcessEvent(msg)
+		}
+	}
+}
+
+func (c *Client) notifyMalformedMessage() {
+	select {
+	case c.notifyClose <- ErrMalformedMessage:
+	case <-c.stopReadPump:
 	}
 }
 
@@ -490,8 +576,12 @@ func (c *Client) writePump() {
 					}).Error("Error on WriteJSON: ", err)
 				}
 
-				// Requeue the message to be processed when writePump restarts
-				c.send <- outMsg
+				// Requeue the message to be processed when writePump restarts.
+				select {
+				case c.send <- outMsg:
+				case <-c.connectionDone:
+				case <-c.done:
+				}
 
 				select {
 				case <-c.stopWritePump:
@@ -604,8 +694,18 @@ func NewClient(url string, webSocketID string, websocketAuthorizedFeature string
 		WebSocketAuthorizedFeature: websocketAuthorizedFeature,
 		cfg:                        cfg,
 		done:                       make(chan struct{}),
+		connected:                  make(chan struct{}),
 		send:                       make(chan *OutgoingMessage, 10),
 		NotifyExpired:              make(chan struct{}),
+	}
+}
+
+// NewDirectDialer returns a WebSocket dialer that never consults environment
+// proxy variables or STRIPE_CLI_UNIX_SOCKET.
+func NewDirectDialer() Dialer {
+	return &ws.Dialer{
+		HandshakeTimeout: 10 * time.Second,
+		Subprotocols:     subprotocols[:],
 	}
 }
 

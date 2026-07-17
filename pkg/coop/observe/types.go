@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/stripe/stripe-cli/pkg/proxy"
 )
 
 const (
@@ -73,6 +75,7 @@ const (
 	FailureStreamClosed           FailureCode = "stream_closed"
 	FailureStartupTimeout         FailureCode = "startup_timeout"
 	FailureAuthenticationRejected FailureCode = "authentication_rejected"
+	FailureObservationOverflow    FailureCode = "observation_overflow"
 	FailureConnectorInvalid       FailureCode = "connector_invalid"
 )
 
@@ -83,6 +86,7 @@ func (code FailureCode) Valid() bool {
 		FailureStreamClosed,
 		FailureStartupTimeout,
 		FailureAuthenticationRejected,
+		FailureObservationOverflow,
 		FailureConnectorInvalid:
 		return true
 	default:
@@ -105,7 +109,7 @@ func (failure Failure) Validate() error {
 	}
 	if failure.Transient {
 		switch failure.Code {
-		case FailureConnectionUnavailable, FailureStreamClosed, FailureStartupTimeout:
+		case FailureConnectionUnavailable, FailureStreamClosed, FailureStartupTimeout, FailureObservationOverflow:
 		default:
 			return fmt.Errorf("collector failure %q cannot be transient", failure.Code)
 		}
@@ -176,6 +180,9 @@ func (config Config) Validate() error {
 		}
 		if seenEvents[eventType] {
 			return fmt.Errorf("event_types[%d] %q is duplicated", index, eventType)
+		}
+		if config.Stream == StreamListen && !proxy.IsValidEventType(eventType) {
+			return fmt.Errorf("event_types[%d] %q is not a supported listen event", index, eventType)
 		}
 		seenEvents[eventType] = true
 	}

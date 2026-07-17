@@ -3,6 +3,7 @@ package websocket
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,164 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+type dialerFunc func(context.Context, string, http.Header) (*ws.Conn, *http.Response, error)
+
+func (dialer dialerFunc) DialContext(ctx context.Context, rawURL string, headers http.Header) (*ws.Conn, *http.Response, error) {
+	return dialer(ctx, rawURL, headers)
+}
+
+func TestClientCanceledFailedConnectReturnsAndStopIsIdempotent(t *testing.T) {
+	client := NewClient("ws://127.0.0.1:1", "websocket-id", "webhooks", &Config{
+		ConnectAttemptWait: time.Hour,
+		Dialer: dialerFunc(func(context.Context, string, http.Header) (*ws.Conn, *http.Response, error) {
+			return nil, nil, errors.New("injected connection failure")
+		}),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	runDone := make(chan struct{})
+	go func() {
+		client.Run(ctx)
+		close(runDone)
+	}()
+	select {
+	case <-runDone:
+	case <-time.After(time.Second):
+		t.Fatal("canceled failed connection did not return")
+	}
+	client.Stop()
+	client.Stop()
+	select {
+	case <-client.Connected():
+		t.Fatal("failed connection reported ready")
+	default:
+	}
+}
+
+func TestClientScheduledResetNotifiesBeforeReconnect(t *testing.T) {
+	upgrader := ws.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		connection, err := upgrader.Upgrade(w, request, nil)
+		if err != nil {
+			return
+		}
+		defer connection.Close()
+		for {
+			if _, _, err := connection.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	nextGenerations := make(chan (<-chan struct{}), 2)
+	var client *Client
+	client = NewClient("ws"+strings.TrimPrefix(server.URL, "http"), "websocket-id", "webhooks", &Config{
+		ReconnectInterval: 100 * time.Millisecond,
+		CloseDelayPeriod:  time.Millisecond,
+		OnDisconnect: func() {
+			nextGenerations <- client.Connected()
+		},
+	})
+	firstGeneration := client.Connected()
+	runDone := make(chan struct{})
+	go func() {
+		client.Run(ctx)
+		close(runDone)
+	}()
+	select {
+	case <-firstGeneration:
+	case <-time.After(time.Second):
+		t.Fatal("websocket did not become ready")
+	}
+	var nextGeneration <-chan struct{}
+	select {
+	case nextGeneration = <-nextGenerations:
+	case <-time.After(time.Second):
+		t.Fatal("scheduled reset was not reported")
+	}
+	select {
+	case <-nextGeneration:
+		t.Fatal("disconnected client reported the prior connection as ready")
+	default:
+	}
+	select {
+	case <-nextGeneration:
+	case <-time.After(time.Second):
+		t.Fatal("new connection generation did not become ready")
+	}
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(time.Second):
+		t.Fatal("client did not stop after reconnect")
+	}
+}
+
+func TestClientMalformedFrameNotifiesDisconnect(t *testing.T) {
+	testClientInvalidFrameNotifiesDisconnect(t, []byte(`{"type":`))
+}
+
+func TestClientUnknownFrameNotifiesDisconnect(t *testing.T) {
+	testClientInvalidFrameNotifiesDisconnect(t, []byte(`{"type":"future_message"}`))
+}
+
+func testClientInvalidFrameNotifiesDisconnect(t *testing.T, payload []byte) {
+	t.Helper()
+	upgrader := ws.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		connection, err := upgrader.Upgrade(w, request, nil)
+		if err != nil {
+			return
+		}
+		defer connection.Close()
+		_ = connection.WriteMessage(ws.TextMessage, payload)
+		for {
+			if _, _, err := connection.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	disconnected := make(chan struct{})
+	var disconnectOnce sync.Once
+	client := NewClient("ws"+strings.TrimPrefix(server.URL, "http"), "websocket-id", "webhooks", &Config{
+		Dialer:                       NewDirectDialer(),
+		DisconnectOnMalformedMessage: true,
+		ReconnectInterval:            time.Hour,
+		CloseDelayPeriod:             time.Millisecond,
+		OnDisconnect: func() {
+			disconnectOnce.Do(func() { close(disconnected) })
+			cancel()
+		},
+	})
+	runDone := make(chan struct{})
+	go func() {
+		client.Run(ctx)
+		close(runDone)
+	}()
+	select {
+	case <-client.Connected():
+	case <-time.After(time.Second):
+		t.Fatal("websocket did not become ready")
+	}
+	select {
+	case <-disconnected:
+	case <-time.After(time.Second):
+		t.Fatal("malformed websocket frame did not report a disconnect")
+	}
+	select {
+	case <-runDone:
+	case <-time.After(time.Second):
+		t.Fatal("client did not stop after malformed websocket frame")
+	}
+}
 
 func TestClientWebhookEventHandler(t *testing.T) {
 	upgrader := ws.Upgrader{}

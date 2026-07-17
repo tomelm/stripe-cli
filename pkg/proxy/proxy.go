@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -115,6 +117,38 @@ type Config struct {
 	// OutCh is the channel to send logs and statuses to for processing in other packages
 	OutCh chan websocket.IElement
 
+	// WebSocketDialer, when non-nil, is used verbatim instead of the CLI's
+	// ambient proxy/Unix-socket-aware dialer.
+	WebSocketDialer websocket.Dialer
+
+	// WebSocketReadLimit bounds one inbound message before JSON decoding. Zero
+	// preserves the existing listen behavior.
+	WebSocketReadLimit int64
+
+	// WebSocketConnectAttemptWait overrides the delay between WebSocket connect
+	// attempts. Zero preserves the existing default.
+	WebSocketConnectAttemptWait time.Duration
+
+	// ReportConnectionGaps emits Reconnecting before an established WebSocket
+	// is reset or reconnects after a network failure.
+	ReportConnectionGaps bool
+
+	// SynchronousEventHandling keeps WebSocket payload production owned by Run
+	// so output can be closed only after all producers have terminated.
+	SynchronousEventHandling bool
+
+	// OmitReadySecret prevents the session signing secret from entering OutCh.
+	// Passive observers that never forward HTTP deliveries should enable it.
+	OmitReadySecret bool
+
+	// OmitMarshaledPayload prevents duplicate raw event JSON from entering OutCh
+	// when the structured event is sufficient.
+	OmitMarshaledPayload bool
+
+	// DisconnectOnMalformedPayload reports malformed WebSocket JSON and malformed
+	// event payloads as coverage-breaking reconnects.
+	DisconnectOnMalformedPayload bool
+
 	// LoggedInAccountID is the currently logged-in account ID
 	LoggedInAccountID string
 }
@@ -168,45 +202,74 @@ func (p *Proxy) Run(ctx context.Context) error {
 		}
 
 		*p.cfg.DeviceToken = session.DeviceToken
+		var readyOnce sync.Once
+		connectedOnce := false
 		p.webSocketClient = websocket.NewClient(
 			session.WebSocketURL,
 			session.WebSocketID,
 			session.WebSocketAuthorizedFeature,
 			&websocket.Config{
-				Log:               p.cfg.Log,
-				NoWSS:             p.cfg.NoWSS,
-				ReconnectInterval: time.Duration(session.ReconnectDelay) * time.Second,
-				EventHandler:      p.webhookEventProcessor,
+				Log:                          p.cfg.Log,
+				Dialer:                       p.cfg.WebSocketDialer,
+				ConnectAttemptWait:           p.cfg.WebSocketConnectAttemptWait,
+				NoWSS:                        p.cfg.NoWSS,
+				ReadLimit:                    p.cfg.WebSocketReadLimit,
+				ReconnectInterval:            time.Duration(session.ReconnectDelay) * time.Second,
+				EventHandler:                 p.webhookEventProcessor,
+				SynchronousEventHandling:     p.cfg.SynchronousEventHandling,
+				DisconnectOnMalformedMessage: p.cfg.DisconnectOnMalformedPayload,
+				OnConnect: func() {
+					connectedOnce = true
+					readyOnce.Do(func() {
+						displayedAPIVersion := ""
+						if p.cfg.UseLatestAPIVersion && session.LatestVersion != "" {
+							displayedAPIVersion = "You are using Stripe API Version [" + session.LatestVersion + "]. "
+						} else if !p.cfg.UseLatestAPIVersion && session.DefaultVersion != "" {
+							displayedAPIVersion = "You are using Stripe API Version [" + session.DefaultVersion + "]. "
+						}
+						readyData := []string{displayedAPIVersion, session.Secret}
+						if p.cfg.OmitReadySecret {
+							readyData = nil
+						}
+						select {
+						case p.cfg.OutCh <- websocket.StateElement{
+							State: websocket.Ready,
+							Data:  readyData,
+						}:
+						case <-ctx.Done():
+						}
+					})
+				},
+				OnDisconnect: func() {
+					if p.cfg.ReportConnectionGaps {
+						select {
+						case p.cfg.OutCh <- websocket.StateElement{State: websocket.Reconnecting}:
+						case <-ctx.Done():
+						}
+					}
+				},
 			},
 		)
 
-		go func() {
-			<-p.webSocketClient.Connected()
-			nAttempts = 0
-
-			displayedAPIVersion := ""
-			if p.cfg.UseLatestAPIVersion && session.LatestVersion != "" {
-				displayedAPIVersion = "You are using Stripe API Version [" + session.LatestVersion + "]. "
-			} else if !p.cfg.UseLatestAPIVersion && session.DefaultVersion != "" {
-				displayedAPIVersion = "You are using Stripe API Version [" + session.DefaultVersion + "]. "
-			}
-
-			p.cfg.OutCh <- websocket.StateElement{
-				State: websocket.Ready,
-				Data:  []string{displayedAPIVersion, session.Secret},
-			}
-		}()
-
-		go p.webSocketClient.Run(ctx)
+		webSocketDone := make(chan struct{})
 		nAttempts++
+		go func() {
+			p.webSocketClient.Run(ctx)
+			close(webSocketDone)
+		}()
 
 		select {
 		case <-ctx.Done():
+			<-webSocketDone
 			p.cfg.OutCh <- &websocket.StateElement{
 				State: websocket.Done,
 			}
 			return nil
 		case <-p.webSocketClient.NotifyExpired:
+			<-webSocketDone
+			if connectedOnce {
+				nAttempts = 0
+			}
 			if nAttempts < maxConnectAttempts {
 				p.cfg.OutCh <- &websocket.StateElement{
 					State: websocket.Reconnecting,
@@ -445,14 +508,18 @@ func Init(ctx context.Context, cfg *Config) (*Proxy, error) {
 	}
 
 	processorConfig := &WebhookEventProcessorConfig{
-		Log:                 cfg.Log,
-		Events:              cfg.Events,
-		ThinEvents:          cfg.ThinEvents,
-		OutCh:               cfg.OutCh,
-		UseLatestAPIVersion: cfg.UseLatestAPIVersion,
-		SkipVerify:          cfg.SkipVerify,
-		Timeout:             cfg.Timeout,
-		LoggedInAccountID:   cfg.LoggedInAccountID,
+		Log:                          cfg.Log,
+		Events:                       cfg.Events,
+		ThinEvents:                   cfg.ThinEvents,
+		OutCh:                        cfg.OutCh,
+		UseLatestAPIVersion:          cfg.UseLatestAPIVersion,
+		SkipVerify:                   cfg.SkipVerify,
+		Timeout:                      cfg.Timeout,
+		LoggedInAccountID:            cfg.LoggedInAccountID,
+		OmitMarshaledPayload:         cfg.OmitMarshaledPayload,
+		DisconnectOnMalformedPayload: cfg.DisconnectOnMalformedPayload,
+		AcceptWebhookEvents:          slices.Contains(cfg.WebSocketFeatures, "webhooks"),
+		AcceptStripeV2Events:         slices.Contains(cfg.WebSocketFeatures, "v2_events"),
 	}
 
 	p := &Proxy{
@@ -466,6 +533,13 @@ func Init(ctx context.Context, cfg *Config) (*Proxy, error) {
 	return p, nil
 }
 
+// IsValidEventType reports whether eventType is a supported snapshot event or
+// the listen wildcard. Callers that use absence as evidence should fail closed
+// on unknown filters instead of relying on Init's interactive warning.
+func IsValidEventType(eventType string) bool {
+	return eventType == "*" || validEvents[eventType]
+}
+
 // ExtractRequestData takes an interface with request data from a Stripe event payload
 // and properly parses it into a StripeRequest struct before returning it
 func ExtractRequestData(data interface{}) (StripeRequest, error) {
@@ -475,11 +549,19 @@ func ExtractRequestData(data interface{}) (StripeRequest, error) {
 		req := StripeRequest{}
 
 		if rawID, ok := v["id"]; ok && rawID != nil {
-			req.ID = rawID.(string)
+			id, ok := rawID.(string)
+			if !ok {
+				return StripeRequest{}, errors.New("received malformed event from Stripe")
+			}
+			req.ID = id
 		}
 
 		if rawKey, ok := v["idempotency_key"]; ok && rawKey != nil {
-			req.IdempotencyKey = rawKey.(string)
+			key, ok := rawKey.(string)
+			if !ok {
+				return StripeRequest{}, errors.New("received malformed event from Stripe")
+			}
+			req.IdempotencyKey = key
 		}
 
 		return req, nil
