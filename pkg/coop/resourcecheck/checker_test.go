@@ -4,9 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
+	"sort"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -15,8 +16,17 @@ import (
 )
 
 var (
-	testAccount = AccountContext{Mode: ModeTest, AccountID: "acct_test123"}
-	testPayment = ResourceRef{Type: "payment_intent", ID: "pi_test123"}
+	testCreated    = time.Date(2026, time.July, 17, 12, 0, 0, 0, time.UTC)
+	testWindow     = CreationWindow{Start: testCreated.Add(-time.Minute), End: testCreated.Add(time.Minute)}
+	testAccount    = AccountContext{Mode: ModeTest, AccountID: "acct_test123"}
+	testScope      = VerificationScope{SessionID: "session-1", BlueprintDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+	testPayment    = ResourceRef{Type: ResourcePaymentIntent, ID: "pi_test123"}
+	testPredicates = []FieldPredicate{{Field: "metadata.coop_marker", Expected: mustStringScalar("run-123")}}
+)
+
+const (
+	testPaymentNode = "node.payment"
+	testInvoiceNode = "node.invoice"
 )
 
 type fakeReader struct {
@@ -26,36 +36,48 @@ type fakeReader struct {
 	fetchErrs map[string]error
 	listPage  ListPage
 	listErr   error
+	fetchFn   func(context.Context, FetchRequest) (Resource, error)
+	listFn    func(context.Context, ListRequest) (ListPage, error)
 
 	fetches []FetchRequest
 	lists   []ListRequest
 }
 
 func (reader *fakeReader) Fetch(ctx context.Context, request FetchRequest) (Resource, error) {
-	if err := ctx.Err(); err != nil {
-		return Resource{}, err
-	}
 	reader.mu.Lock()
-	defer reader.mu.Unlock()
 	reader.fetches = append(reader.fetches, request)
-	if err, ok := reader.fetchErrs[resourceKey(request.Resource)]; ok {
+	hook := reader.fetchFn
+	err := reader.fetchErrs[resourceKey(request.Resource)]
+	resource, found := reader.resources[resourceKey(request.Resource)]
+	reader.mu.Unlock()
+	if hook != nil {
+		return hook(ctx, request)
+	}
+	if err != nil {
 		return Resource{}, err
 	}
-	resource, ok := reader.resources[resourceKey(request.Resource)]
-	if !ok {
+	if contextErr := ctx.Err(); contextErr != nil {
+		return Resource{}, contextErr
+	}
+	if !found {
 		return Resource{}, ErrNotFound
 	}
 	return resource, nil
 }
 
 func (reader *fakeReader) List(ctx context.Context, request ListRequest) (ListPage, error) {
-	if err := ctx.Err(); err != nil {
-		return ListPage{}, err
-	}
 	reader.mu.Lock()
-	defer reader.mu.Unlock()
 	reader.lists = append(reader.lists, request)
-	return reader.listPage, reader.listErr
+	hook := reader.listFn
+	page, err := reader.listPage, reader.listErr
+	reader.mu.Unlock()
+	if hook != nil {
+		return hook(ctx, request)
+	}
+	if contextErr := ctx.Err(); contextErr != nil {
+		return ListPage{}, contextErr
+	}
+	return page, err
 }
 
 func (reader *fakeReader) fetchRequests() []FetchRequest {
@@ -70,24 +92,46 @@ func (reader *fakeReader) listRequests() []ListRequest {
 	return append([]ListRequest(nil), reader.lists...)
 }
 
+func (reader *fakeReader) setResource(resource Resource) {
+	reader.mu.Lock()
+	defer reader.mu.Unlock()
+	if reader.resources == nil {
+		reader.resources = make(map[string]Resource)
+	}
+	reader.resources[resourceKey(ResourceRef{Type: resource.Type, ID: resource.ID})] = resource
+}
+
+func (reader *fakeReader) deleteResource(ref ResourceRef) {
+	reader.mu.Lock()
+	defer reader.mu.Unlock()
+	delete(reader.resources, resourceKey(ref))
+}
+
 func resourceKey(ref ResourceRef) string {
-	return ref.Type + "\x00" + ref.ID
+	return string(ref.Type) + "\x00" + ref.ID
 }
 
 func validResource(ref ResourceRef) Resource {
 	return Resource{
 		Type:      ref.Type,
 		ID:        ref.ID,
+		CreatedAt: testCreated,
 		Mode:      ModeTest,
 		AccountID: testAccount.AccountID,
-		Fields:    map[string]string{},
+		Fields:    map[string]JSONScalar{},
 		Links:     map[string]ResourceRef{},
 	}
 }
 
+func windowResource(ref ResourceRef) Resource {
+	resource := validResource(ref)
+	resource.Fields[testPredicates[0].Field] = testPredicates[0].Expected
+	return resource
+}
+
 func newTestChecker(t *testing.T, reader *fakeReader) *Checker {
 	t.Helper()
-	checker, err := NewChecker(reader, testAccount)
+	checker, err := NewChecker(reader, testAccount, testScope)
 	require.NoError(t, err)
 	return checker
 }
@@ -98,7 +142,7 @@ func requireValidResult(t *testing.T, result verification.Result) {
 	assert.Equal(t, verification.SourceCLI, result.Source)
 }
 
-func TestStableCheckIDs(t *testing.T) {
+func TestStableCheckIDsAndTrustedTypes(t *testing.T) {
 	t.Parallel()
 	for _, id := range []verification.CheckID{
 		CheckResourceExists,
@@ -108,29 +152,39 @@ func TestStableCheckIDs(t *testing.T) {
 	} {
 		require.NoError(t, id.Validate())
 	}
+	types := SupportedResourceTypes()
+	require.NotEmpty(t, types)
+	assert.True(t, sort.SliceIsSorted(types, func(left, right int) bool { return types[left] < types[right] }))
+	types[0] = "caller_mutation"
+	assert.NotEqual(t, ResourceType("caller_mutation"), SupportedResourceTypes()[0])
 }
 
-func TestCheckExistenceOutcomes(t *testing.T) {
+func TestObserveExistenceCreationWindowAndReadOutcomes(t *testing.T) {
 	t.Parallel()
+	placeholderAccount := validResource(testPayment)
+	placeholderAccount.AccountID = "acct_none123"
 
 	tests := []struct {
-		name      string
-		resource  *Resource
-		err       error
-		status    verification.Status
-		domain    verification.FailureDomain
-		transient bool
-		failsOpen bool
+		name        string
+		resource    *Resource
+		err         error
+		window      CreationWindow
+		status      verification.Status
+		domain      verification.FailureDomain
+		transient   bool
+		failsOpen   bool
+		observation bool
 	}{
-		{name: "exists", resource: resourcePointer(validResource(testPayment)), status: verification.StatusPassed},
-		{name: "not found", err: ErrNotFound, status: verification.StatusFailed, domain: verification.FailureDomainIntegration},
-		{name: "malformed response", resource: resourcePointer(Resource{Type: testPayment.Type, ID: "wrong_id", Mode: ModeTest, AccountID: testAccount.AccountID}), status: verification.StatusUnavailable, domain: verification.FailureDomainCollector},
-		{name: "missing mode metadata", resource: resourcePointer(Resource{Type: testPayment.Type, ID: testPayment.ID, AccountID: testAccount.AccountID}), status: verification.StatusUnavailable, domain: verification.FailureDomainCollector},
-		{name: "unavailable", err: fmt.Errorf("transport detail: %w", ErrUnavailable), status: verification.StatusUnavailable, domain: verification.FailureDomainCollector},
-		{name: "unknown unavailable", err: errors.New("raw upstream payload"), status: verification.StatusUnavailable, domain: verification.FailureDomainCollector},
-		{name: "transient fail open", err: fmt.Errorf("transport detail: %w", ErrTransientUnavailable), status: verification.StatusUnavailable, domain: verification.FailureDomainCollector, transient: true, failsOpen: true},
-		{name: "deadline fail open", err: context.DeadlineExceeded, status: verification.StatusUnavailable, domain: verification.FailureDomainCollector, transient: true, failsOpen: true},
-		{name: "unauthorized does not fail open", err: ErrUnauthorized, status: verification.StatusUnavailable, domain: verification.FailureDomainSafety},
+		{name: "exists in window", resource: resourcePointer(validResource(testPayment)), window: testWindow, status: verification.StatusPassed, observation: true},
+		{name: "outside creation window", resource: resourcePointer(validResource(testPayment)), window: CreationWindow{Start: testCreated.Add(time.Second), End: testCreated.Add(time.Minute)}, status: verification.StatusNotObserved, domain: verification.FailureDomainCoverage},
+		{name: "unproven not found", err: ErrNotFound, window: testWindow, status: verification.StatusNotObserved, domain: verification.FailureDomainCoverage},
+		{name: "malformed response", resource: resourcePointer(Resource{Type: testPayment.Type, ID: testPayment.ID, CreatedAt: testCreated, Mode: ModeTest}), window: testWindow, status: verification.StatusUnavailable, domain: verification.FailureDomainCollector},
+		{name: "placeholder response account", resource: resourcePointer(placeholderAccount), window: testWindow, status: verification.StatusUnavailable, domain: verification.FailureDomainCollector},
+		{name: "unavailable", err: fmt.Errorf("transport detail: %w", ErrUnavailable), window: testWindow, status: verification.StatusUnavailable, domain: verification.FailureDomainCollector},
+		{name: "unknown unavailable", err: errors.New("raw upstream payload"), window: testWindow, status: verification.StatusUnavailable, domain: verification.FailureDomainCollector},
+		{name: "explicit transient fail open", err: fmt.Errorf("transport detail: %w", ErrTransientUnavailable), window: testWindow, status: verification.StatusUnavailable, domain: verification.FailureDomainCollector, transient: true, failsOpen: true},
+		{name: "deadline is not fail open", err: context.DeadlineExceeded, window: testWindow, status: verification.StatusUnavailable, domain: verification.FailureDomainCollector},
+		{name: "unauthorized does not fail open", err: ErrUnauthorized, window: testWindow, status: verification.StatusUnavailable, domain: verification.FailureDomainSafety},
 	}
 
 	for _, test := range tests {
@@ -144,9 +198,11 @@ func TestCheckExistenceOutcomes(t *testing.T) {
 			if test.err != nil {
 				reader.fetchErrs[resourceKey(testPayment)] = test.err
 			}
-			result, err := newTestChecker(t, reader).CheckExistence(context.Background(), ExistenceCheck{
+			observation, result, err := newTestChecker(t, reader).ObserveExistence(context.Background(), ExistenceCheck{
 				ResultID: "resource.exists:payment",
+				NodeID:   testPaymentNode,
 				Resource: testPayment,
+				Window:   test.window,
 			})
 			require.NoError(t, err)
 			requireValidResult(t, result)
@@ -155,253 +211,480 @@ func TestCheckExistenceOutcomes(t *testing.T) {
 			assert.Equal(t, test.domain, result.FailureDomain)
 			assert.Equal(t, test.transient, result.Transient)
 			assert.Equal(t, test.failsOpen, result.FailsOpen())
+			assert.Equal(t, test.observation, observation.ResultID() != "")
+			if test.observation {
+				assert.Equal(t, testPayment, observation.Resource())
+				assert.Equal(t, testCreated, observation.CreatedAt())
+				assert.Equal(t, result.ID, observation.ResultID())
+				assert.Equal(t, testPaymentNode, observation.NodeID())
+				assert.Equal(t, testScope.BlueprintDigest, evidenceValue(result, "blueprint_digest"))
+				assert.Equal(t, testPaymentNode, evidenceValue(result, "node_id"))
+			}
 			assert.NotContains(t, result.Detail, "transport detail")
 			assert.NotContains(t, result.Detail, "raw upstream payload")
-
-			requests := reader.fetchRequests()
-			require.Len(t, requests, 1)
-			assert.Equal(t, testAccount, requests[0].Account)
-			assert.Equal(t, testPayment, requests[0].Resource)
+			require.Len(t, reader.fetchRequests(), 1)
 		})
 	}
 }
 
-func TestCheckAccountContextRejectsWrongAccountAndLivemode(t *testing.T) {
+func TestObserveCreationWindowRequiresExactlyOneCompleteMatch(t *testing.T) {
 	t.Parallel()
 
+	other := ResourceRef{Type: ResourcePaymentIntent, ID: "pi_other123"}
 	tests := []struct {
-		name   string
-		mutate func(*Resource)
-		domain verification.FailureDomain
-		detail string
+		name        string
+		page        ListPage
+		status      verification.Status
+		domain      verification.FailureDomain
+		observation bool
 	}{
-		{
-			name: "wrong account",
-			mutate: func(resource *Resource) {
-				resource.AccountID = "acct_other123"
-			},
-			domain: verification.FailureDomainIntegration,
-			detail: "different account context",
-		},
-		{
-			name: "live mode",
-			mutate: func(resource *Resource) {
-				resource.Mode = ModeLive
-			},
-			domain: verification.FailureDomainSafety,
-			detail: "live mode",
-		},
-	}
-	for _, test := range tests {
-		test := test
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			resource := validResource(testPayment)
-			test.mutate(&resource)
-			reader := &fakeReader{resources: map[string]Resource{resourceKey(testPayment): resource}}
-			result, err := newTestChecker(t, reader).CheckAccountContext(context.Background(), AccountCheck{
-				ResultID: "resource.account:payment",
-				Resource: testPayment,
-			})
-			require.NoError(t, err)
-			requireValidResult(t, result)
-			assert.Equal(t, CheckResourceAccount, result.CheckID)
-			assert.Equal(t, verification.StatusFailed, result.Status)
-			assert.Equal(t, test.domain, result.FailureDomain)
-			assert.Contains(t, result.Detail, test.detail)
-			assert.False(t, result.FailsOpen())
-		})
-	}
-}
-
-func TestCheckFieldComparisonAndRedaction(t *testing.T) {
-	t.Parallel()
-
-	secretExpected := "expected-sensitive-field-value"
-	secretObserved := "observed-sensitive-field-value"
-	tests := []struct {
-		name       string
-		fields     map[string]string
-		expected   string
-		status     verification.Status
-		comparison string
-	}{
-		{name: "match", fields: map[string]string{"status": "succeeded"}, expected: "succeeded", status: verification.StatusPassed, comparison: "match"},
-		{name: "absent", fields: map[string]string{}, expected: "succeeded", status: verification.StatusFailed, comparison: "absent"},
-		{name: "mismatch", fields: map[string]string{"status": secretObserved}, expected: secretExpected, status: verification.StatusFailed, comparison: "mismatch"},
-	}
-	for _, test := range tests {
-		test := test
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			resource := validResource(testPayment)
-			resource.Fields = test.fields
-			reader := &fakeReader{resources: map[string]Resource{resourceKey(testPayment): resource}}
-			result, err := newTestChecker(t, reader).CheckField(context.Background(), FieldCheck{
-				ResultID: "resource.field:payment-status",
-				Resource: testPayment,
-				Field:    "status",
-				Expected: test.expected,
-			})
-			require.NoError(t, err)
-			requireValidResult(t, result)
-			assert.Equal(t, CheckResourceField, result.CheckID)
-			assert.Equal(t, test.status, result.Status)
-			assert.Equal(t, test.comparison, evidenceValue(result, "comparison"))
-
-			encoded, err := verification.NewResultSet(result).MarshalDeterministic()
-			require.NoError(t, err)
-			assert.NotContains(t, string(encoded), secretExpected)
-			assert.NotContains(t, string(encoded), secretObserved)
-		})
-	}
-}
-
-func TestCheckFieldRejectsOversizedObservedValueAsMalformed(t *testing.T) {
-	t.Parallel()
-	resource := validResource(testPayment)
-	resource.Fields["status"] = strings.Repeat("x", maxScalarBytes+1)
-	reader := &fakeReader{resources: map[string]Resource{resourceKey(testPayment): resource}}
-	result, err := newTestChecker(t, reader).CheckField(context.Background(), FieldCheck{
-		ResultID: "resource.field:oversized",
-		Resource: testPayment,
-		Field:    "status",
-		Expected: "succeeded",
-	})
-	require.NoError(t, err)
-	requireValidResult(t, result)
-	assert.Equal(t, verification.StatusUnavailable, result.Status)
-	assert.Equal(t, verification.FailureDomainCollector, result.FailureDomain)
-	assert.False(t, result.Transient)
-}
-
-func TestCheckLinkage(t *testing.T) {
-	t.Parallel()
-
-	invoice := ResourceRef{Type: "invoice", ID: "in_test123"}
-	target := testPayment
-	other := ResourceRef{Type: "payment_intent", ID: "pi_other123"}
-	wrongAccountTarget := validResource(target)
-	wrongAccountTarget.AccountID = "acct_other123"
-
-	tests := []struct {
-		name       string
-		link       *ResourceRef
-		target     *Resource
-		status     verification.Status
-		domain     verification.FailureDomain
-		comparison string
-		fetchCount int
-	}{
-		{name: "linked target exists", link: &target, target: resourcePointer(validResource(target)), status: verification.StatusPassed, comparison: "match", fetchCount: 2},
-		{name: "missing link", status: verification.StatusFailed, domain: verification.FailureDomainIntegration, comparison: "absent", fetchCount: 1},
-		{name: "link mismatch", link: &other, status: verification.StatusFailed, domain: verification.FailureDomainIntegration, comparison: "mismatch", fetchCount: 1},
-		{name: "target not found", link: &target, status: verification.StatusFailed, domain: verification.FailureDomainIntegration, comparison: "match", fetchCount: 2},
-		{name: "target wrong account", link: &target, target: &wrongAccountTarget, status: verification.StatusFailed, domain: verification.FailureDomainIntegration, comparison: "match", fetchCount: 2},
-	}
-
-	for _, test := range tests {
-		test := test
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			source := validResource(invoice)
-			if test.link != nil {
-				source.Links["payment_intent"] = *test.link
-			}
-			reader := &fakeReader{resources: map[string]Resource{resourceKey(invoice): source}}
-			if test.target != nil {
-				reader.resources[resourceKey(target)] = *test.target
-			}
-			result, err := newTestChecker(t, reader).CheckLinkage(context.Background(), LinkageCheck{
-				ResultID: "resource.linkage:invoice-payment",
-				Source:   invoice,
-				Link:     "payment_intent",
-				Target:   target,
-			})
-			require.NoError(t, err)
-			requireValidResult(t, result)
-			assert.Equal(t, CheckResourceLinkage, result.CheckID)
-			assert.Equal(t, test.status, result.Status)
-			assert.Equal(t, test.domain, result.FailureDomain)
-			assert.Equal(t, test.comparison, evidenceValue(result, "comparison"))
-			assert.Len(t, reader.fetchRequests(), test.fetchCount)
-		})
-	}
-}
-
-func TestCheckListExistenceIsBounded(t *testing.T) {
-	t.Parallel()
-
-	other := ResourceRef{Type: testPayment.Type, ID: "pi_other123"}
-	tests := []struct {
-		name   string
-		page   ListPage
-		status verification.Status
-		domain verification.FailureDomain
-	}{
-		{name: "present", page: ListPage{Resources: []Resource{validResource(testPayment)}}, status: verification.StatusPassed},
-		{name: "not observed with more pages", page: ListPage{Resources: []Resource{validResource(other)}, HasMore: true}, status: verification.StatusNotObserved, domain: verification.FailureDomainCoverage},
-		{name: "authoritative final absence", page: ListPage{Resources: []Resource{validResource(other)}}, status: verification.StatusFailed, domain: verification.FailureDomainIntegration},
+		{name: "exactly one", page: ListPage{Resources: []Resource{windowResource(testPayment)}}, status: verification.StatusPassed, observation: true},
+		{name: "zero", page: ListPage{}, status: verification.StatusNotObserved, domain: verification.FailureDomainCoverage},
+		{name: "multiple", page: ListPage{Resources: []Resource{windowResource(testPayment), windowResource(other)}}, status: verification.StatusNotObserved, domain: verification.FailureDomainCoverage},
+		{name: "incomplete one", page: ListPage{Resources: []Resource{windowResource(testPayment)}, HasMore: true}, status: verification.StatusNotObserved, domain: verification.FailureDomainCoverage},
+		{name: "incomplete zero", page: ListPage{HasMore: true}, status: verification.StatusNotObserved, domain: verification.FailureDomainCoverage},
 	}
 	for _, test := range tests {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			reader := &fakeReader{listPage: test.page}
-			result, err := newTestChecker(t, reader).CheckListExistence(context.Background(), ListExistenceCheck{
-				ResultID: "resource.exists:list-payment",
-				Resource: testPayment,
-				Limit:    10,
+			observation, result, err := newTestChecker(t, reader).ObserveCreationWindow(context.Background(), CreationWindowCheck{
+				ResultID:     "resource.exists:window-payment",
+				NodeID:       testPaymentNode,
+				ResourceType: ResourcePaymentIntent,
+				Window:       testWindow,
+				Predicates:   testPredicates,
+				Limit:        10,
 			})
 			require.NoError(t, err)
 			requireValidResult(t, result)
 			assert.Equal(t, test.status, result.Status)
 			assert.Equal(t, test.domain, result.FailureDomain)
 			assert.False(t, result.FailsOpen())
+			assert.Equal(t, test.observation, observation.ResultID() != "")
 			requests := reader.listRequests()
 			require.Len(t, requests, 1)
 			assert.Equal(t, testAccount, requests[0].Account)
-			assert.Equal(t, testPayment.Type, requests[0].ResourceType)
+			assert.Equal(t, testScope, requests[0].Scope)
+			assert.Equal(t, ResourcePaymentIntent, requests[0].ResourceType)
+			assert.Equal(t, normalizeWindow(testWindow), requests[0].Window)
+			assert.Equal(t, testPredicates, requests[0].Predicates)
 			assert.Equal(t, 10, requests[0].Limit)
 		})
 	}
 }
 
-func TestCheckListExistenceRejectsOversizedPage(t *testing.T) {
+func TestCreationWindowMalformedOrOversizedOutputIsUnavailable(t *testing.T) {
 	t.Parallel()
-	other := ResourceRef{Type: testPayment.Type, ID: "pi_other123"}
-	reader := &fakeReader{listPage: ListPage{Resources: []Resource{
-		validResource(testPayment),
-		validResource(other),
-	}}}
-	result, err := newTestChecker(t, reader).CheckListExistence(context.Background(), ListExistenceCheck{
-		ResultID: "resource.exists:oversized-page",
-		Resource: testPayment,
-		Limit:    1,
+	outOfWindow := windowResource(testPayment)
+	outOfWindow.CreatedAt = testWindow.End
+	wrongPredicate := validResource(testPayment)
+	wrongPredicate.Fields[testPredicates[0].Field] = mustStringScalar("another-run")
+	other := windowResource(ResourceRef{Type: ResourcePaymentIntent, ID: "pi_other123"})
+	tests := []struct {
+		name  string
+		page  ListPage
+		limit int
+	}{
+		{name: "out of requested window", page: ListPage{Resources: []Resource{outOfWindow}}, limit: 10},
+		{name: "wrong structural predicate", page: ListPage{Resources: []Resource{wrongPredicate}}, limit: 10},
+		{name: "over declared limit", page: ListPage{Resources: []Resource{windowResource(testPayment), other}}, limit: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reader := &fakeReader{listPage: test.page}
+			result, err := newTestChecker(t, reader).CheckCreationWindow(context.Background(), CreationWindowCheck{
+				ResultID:     "resource.exists:malformed-window",
+				NodeID:       testPaymentNode,
+				ResourceType: ResourcePaymentIntent,
+				Window:       testWindow,
+				Predicates:   testPredicates,
+				Limit:        test.limit,
+			})
+			require.NoError(t, err)
+			requireValidResult(t, result)
+			assert.Equal(t, verification.StatusUnavailable, result.Status)
+			assert.Equal(t, verification.FailureDomainCollector, result.FailureDomain)
+			assert.False(t, result.Transient)
+		})
+	}
+}
+
+func TestSupportedDescriptorsAndPlaceholdersStopBeforeIO(t *testing.T) {
+	t.Parallel()
+	reader := &fakeReader{}
+	checker := newTestChecker(t, reader)
+	for _, ref := range []ResourceRef{
+		{Type: ResourcePaymentIntent, ID: "cus_wrong123"},
+		{Type: ResourcePaymentIntent, ID: "pi_example"},
+		{Type: ResourcePaymentIntent, ID: "pi_pending_123"},
+		{Type: ResourcePaymentIntent, ID: "pi_placeholder123"},
+		{Type: ResourcePaymentIntent, ID: "pi_placeholderabcdefghijklmnopqrstuvwxyz0123456789"},
+		{Type: ResourcePaymentIntent, ID: "pi_nil"},
+		{Type: ResourcePaymentIntent, ID: "pi_nullvalue123"},
+		{Type: ResourcePaymentIntent, ID: "pi_none_at_all"},
+		{Type: ResourcePaymentIntent, ID: "pi_"},
+		{Type: "future_resource", ID: "future_123"},
+	} {
+		_, err := checker.CheckExistence(context.Background(), ExistenceCheck{
+			ResultID: "resource.exists:invalid-ref", NodeID: testPaymentNode, Resource: ref, Window: testWindow,
+		})
+		assert.Error(t, err)
+	}
+	_, err := checker.CheckCreationWindow(context.Background(), CreationWindowCheck{
+		ResultID: "resource.exists:unsupported-window", NodeID: testPaymentNode, ResourceType: "future_resource", Window: testWindow, Predicates: testPredicates, Limit: 10,
+	})
+	assert.Error(t, err)
+	_, err = NewChecker(reader, AccountContext{Mode: ModeTest, AccountID: "acct_example"}, testScope)
+	assert.ErrorContains(t, err, "placeholder")
+	_, err = NewChecker(reader, AccountContext{Mode: ModeTest, AccountID: "acct_none123"}, testScope)
+	assert.ErrorContains(t, err, "placeholder")
+	assert.Empty(t, reader.fetchRequests())
+	assert.Empty(t, reader.listRequests())
+}
+
+func TestEveryReadHasPackageDeadlineAndCallerDeadlineNeverFailsOpen(t *testing.T) {
+	t.Parallel()
+
+	preExpiredReader := &fakeReader{}
+	preExpired := newTestChecker(t, preExpiredReader)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result, err := preExpired.CheckExistence(ctx, ExistenceCheck{
+		ResultID: "resource.exists:pre-expired", NodeID: testPaymentNode, Resource: testPayment, Window: testWindow,
 	})
 	require.NoError(t, err)
 	requireValidResult(t, result)
 	assert.Equal(t, verification.StatusUnavailable, result.Status)
 	assert.Equal(t, verification.FailureDomainCollector, result.FailureDomain)
-	assert.False(t, result.Transient)
+	assert.False(t, result.FailsOpen())
+	assert.Empty(t, preExpiredReader.fetchRequests())
+
+	listResult, err := preExpired.CheckCreationWindow(ctx, CreationWindowCheck{
+		ResultID: "resource.exists:pre-expired-list", NodeID: testPaymentNode, ResourceType: ResourcePaymentIntent, Window: testWindow, Predicates: testPredicates, Limit: 10,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, verification.StatusUnavailable, listResult.Status)
+	assert.Empty(t, preExpiredReader.listRequests())
+
+	deadlineSeen := make(chan time.Time, 1)
+	blocking := &fakeReader{fetchFn: func(ctx context.Context, _ FetchRequest) (Resource, error) {
+		deadline, ok := ctx.Deadline()
+		if ok {
+			deadlineSeen <- deadline
+		}
+		<-ctx.Done()
+		return Resource{}, ctx.Err()
+	}}
+	checker, err := NewCheckerWithReadTimeout(blocking, testAccount, testScope, 20*time.Millisecond)
+	require.NoError(t, err)
+	started := time.Now()
+	result, err = checker.CheckExistence(context.Background(), ExistenceCheck{
+		ResultID: "resource.exists:internal-timeout", NodeID: testPaymentNode, Resource: testPayment, Window: testWindow,
+	})
+	require.NoError(t, err)
+	requireValidResult(t, result)
+	assert.Equal(t, verification.StatusUnavailable, result.Status)
+	assert.Equal(t, verification.FailureDomainCollector, result.FailureDomain)
+	assert.False(t, result.FailsOpen())
+	assert.Less(t, time.Since(started), 500*time.Millisecond)
+	select {
+	case deadline := <-deadlineSeen:
+		assert.LessOrEqual(t, deadline.Sub(started), 100*time.Millisecond)
+	default:
+		t.Fatal("reader did not receive a package deadline")
+	}
+
+	listDeadlineSeen := false
+	listReader := &fakeReader{listFn: func(ctx context.Context, _ ListRequest) (ListPage, error) {
+		_, listDeadlineSeen = ctx.Deadline()
+		return ListPage{Resources: []Resource{windowResource(testPayment)}}, nil
+	}}
+	listChecker, err := NewCheckerWithReadTimeout(listReader, testAccount, testScope, 20*time.Millisecond)
+	require.NoError(t, err)
+	listResult, err = listChecker.CheckCreationWindow(context.Background(), CreationWindowCheck{
+		ResultID: "resource.exists:list-deadline", NodeID: testPaymentNode, ResourceType: ResourcePaymentIntent, Window: testWindow, Predicates: testPredicates, Limit: 10,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, verification.StatusPassed, listResult.Status)
+	assert.True(t, listDeadlineSeen)
+
+	lateSuccess := &fakeReader{fetchFn: func(context.Context, FetchRequest) (Resource, error) {
+		time.Sleep(30 * time.Millisecond)
+		return validResource(testPayment), nil
+	}}
+	lateChecker, err := NewCheckerWithReadTimeout(lateSuccess, testAccount, testScope, 10*time.Millisecond)
+	require.NoError(t, err)
+	result, err = lateChecker.CheckExistence(context.Background(), ExistenceCheck{
+		ResultID: "resource.exists:late-success", NodeID: testPaymentNode, Resource: testPayment, Window: testWindow,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, verification.StatusUnavailable, result.Status)
+	assert.False(t, result.FailsOpen())
+
+	callerBlocking := &fakeReader{fetchFn: func(ctx context.Context, _ FetchRequest) (Resource, error) {
+		<-ctx.Done()
+		return Resource{}, ctx.Err()
+	}}
+	callerChecker := newTestChecker(t, callerBlocking)
+	callerContext, callerCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer callerCancel()
+	result, err = callerChecker.CheckExistence(callerContext, ExistenceCheck{
+		ResultID: "resource.exists:caller-timeout", NodeID: testPaymentNode, Resource: testPayment, Window: testWindow,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, verification.StatusUnavailable, result.Status)
+	assert.Equal(t, verification.FailureDomainCollector, result.FailureDomain)
+	assert.False(t, result.FailsOpen())
+}
+
+func TestCheckAccountContextRejectsWrongAccountAndLivemode(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		mutate func(*Resource)
+		domain verification.FailureDomain
+	}{
+		{name: "wrong account", mutate: func(resource *Resource) { resource.AccountID = "acct_other123" }, domain: verification.FailureDomainIntegration},
+		{name: "live mode", mutate: func(resource *Resource) { resource.Mode = ModeLive }, domain: verification.FailureDomainSafety},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			reader := &fakeReader{resources: map[string]Resource{resourceKey(testPayment): validResource(testPayment)}}
+			checker := newTestChecker(t, reader)
+			observation, observed, err := checker.ObserveExistence(context.Background(), ExistenceCheck{
+				ResultID: "resource.exists:account-target", NodeID: testPaymentNode, Resource: testPayment, Window: testWindow,
+			})
+			require.NoError(t, err)
+			require.Equal(t, verification.StatusPassed, observed.Status)
+			resource := validResource(testPayment)
+			test.mutate(&resource)
+			reader.setResource(resource)
+			result, err := checker.CheckAccountContext(context.Background(), AccountCheck{
+				ResultID: "resource.account:payment", Resource: observation,
+			})
+			require.NoError(t, err)
+			requireValidResult(t, result)
+			assert.Equal(t, verification.StatusFailed, result.Status)
+			assert.Equal(t, test.domain, result.FailureDomain)
+			assert.False(t, result.FailsOpen())
+		})
+	}
+}
+
+func TestLinkageRequiresPriorPassedCLIObservation(t *testing.T) {
+	t.Parallel()
+
+	invoice := ResourceRef{Type: ResourceInvoice, ID: "in_test123"}
+	reader := &fakeReader{resources: map[string]Resource{}}
+	reader.setResource(validResource(testPayment))
+	checker := newTestChecker(t, reader)
+	target, observedResult, err := checker.ObserveExistence(context.Background(), ExistenceCheck{
+		ResultID: "resource.exists:target", NodeID: testPaymentNode, Resource: testPayment, Window: testWindow,
+	})
+	require.NoError(t, err)
+	require.Equal(t, verification.StatusPassed, observedResult.Status)
+
+	source := validResource(invoice)
+	source.Links["payment_intent"] = testPayment
+	reader.setResource(source)
+	sourceObservation, sourceResult, err := checker.ObserveExistence(context.Background(), ExistenceCheck{
+		ResultID: "resource.exists:source", NodeID: testInvoiceNode, Resource: invoice, Window: testWindow,
+	})
+	require.NoError(t, err)
+	require.Equal(t, verification.StatusPassed, sourceResult.Status)
+	result, err := checker.CheckLinkage(context.Background(), LinkageCheck{
+		ResultID: "resource.linkage:invoice-payment", Source: sourceObservation, Link: "payment_intent", Target: target,
+	})
+	require.NoError(t, err)
+	requireValidResult(t, result)
+	assert.Equal(t, verification.StatusPassed, result.Status)
+	assert.Equal(t, testPaymentNode, target.NodeID())
+	assert.Equal(t, testInvoiceNode, sourceObservation.NodeID())
+	assert.Equal(t, string(sourceResult.ID), evidenceValue(result, "source_observation_result"))
+	assert.Equal(t, string(observedResult.ID), evidenceValue(result, "target_observation_result"))
+	_, err = target.MarshalJSON()
+	assert.Error(t, err)
+	assert.NotContains(t, fmt.Sprint(target), testPayment.ID)
+
+	before := len(reader.fetchRequests())
+	_, err = checker.CheckLinkage(context.Background(), LinkageCheck{
+		ResultID: "resource.linkage:unproven", Source: sourceObservation, Link: "payment_intent", Target: ObservedResource{},
+	})
+	assert.ErrorContains(t, err, "lacks a passed CLI observation")
+	assert.Len(t, reader.fetchRequests(), before)
+	_, err = checker.CheckLinkage(context.Background(), LinkageCheck{
+		ResultID: "resource.linkage:unproven-source", Source: ObservedResource{}, Link: "payment_intent", Target: target,
+	})
+	assert.ErrorContains(t, err, "lacks a passed CLI observation")
+	assert.Len(t, reader.fetchRequests(), before)
+
+	otherReader := &fakeReader{resources: map[string]Resource{resourceKey(invoice): source, resourceKey(testPayment): validResource(testPayment)}}
+	otherChecker := newTestChecker(t, otherReader)
+	otherSource, _, err := otherChecker.ObserveExistence(context.Background(), ExistenceCheck{
+		ResultID: "resource.exists:other-source", NodeID: testInvoiceNode, Resource: invoice, Window: testWindow,
+	})
+	require.NoError(t, err)
+	otherBefore := len(otherReader.fetchRequests())
+	_, err = otherChecker.CheckLinkage(context.Background(), LinkageCheck{
+		ResultID: "resource.linkage:other-checker", Source: otherSource, Link: "payment_intent", Target: target,
+	})
+	assert.ErrorContains(t, err, "this checker")
+	assert.Len(t, otherReader.fetchRequests(), otherBefore)
+}
+
+func TestLinkageContradictionsAfterProvenTarget(t *testing.T) {
+	t.Parallel()
+
+	invoice := ResourceRef{Type: ResourceInvoice, ID: "in_test123"}
+	tests := []struct {
+		name         string
+		link         *ResourceRef
+		removeSource bool
+		removeTarget bool
+		mutateTarget func(*Resource)
+		status       verification.Status
+		domain       verification.FailureDomain
+		comparison   string
+	}{
+		{name: "missing source link", status: verification.StatusFailed, domain: verification.FailureDomainIntegration, comparison: "absent"},
+		{name: "mismatched source link", link: resourceRefPointer(ResourceRef{Type: ResourcePaymentIntent, ID: "pi_other123"}), status: verification.StatusFailed, domain: verification.FailureDomainIntegration, comparison: "mismatch"},
+		{name: "proven source disappeared", link: resourceRefPointer(testPayment), removeSource: true, status: verification.StatusFailed, domain: verification.FailureDomainIntegration},
+		{name: "proven target disappeared", link: resourceRefPointer(testPayment), removeTarget: true, status: verification.StatusFailed, domain: verification.FailureDomainIntegration, comparison: "match"},
+		{name: "target creation metadata changed", link: resourceRefPointer(testPayment), mutateTarget: func(resource *Resource) { resource.CreatedAt = resource.CreatedAt.Add(time.Second) }, status: verification.StatusUnavailable, domain: verification.FailureDomainCollector, comparison: "match"},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			reader := &fakeReader{resources: map[string]Resource{resourceKey(testPayment): validResource(testPayment)}}
+			checker := newTestChecker(t, reader)
+			target, result, err := checker.ObserveExistence(context.Background(), ExistenceCheck{
+				ResultID: "resource.exists:link-target", NodeID: testPaymentNode, Resource: testPayment, Window: testWindow,
+			})
+			require.NoError(t, err)
+			require.Equal(t, verification.StatusPassed, result.Status)
+
+			source := validResource(invoice)
+			if test.link != nil {
+				source.Links["payment_intent"] = *test.link
+			}
+			reader.setResource(source)
+			sourceObservation, sourceResult, err := checker.ObserveExistence(context.Background(), ExistenceCheck{
+				ResultID: "resource.exists:link-source", NodeID: testInvoiceNode, Resource: invoice, Window: testWindow,
+			})
+			require.NoError(t, err)
+			require.Equal(t, verification.StatusPassed, sourceResult.Status)
+			if test.removeSource {
+				reader.deleteResource(invoice)
+			} else if test.removeTarget {
+				reader.deleteResource(testPayment)
+			} else if test.mutateTarget != nil {
+				resource := validResource(testPayment)
+				test.mutateTarget(&resource)
+				reader.setResource(resource)
+			}
+
+			result, err = checker.CheckLinkage(context.Background(), LinkageCheck{
+				ResultID: "resource.linkage:contradiction", Source: sourceObservation, Link: "payment_intent", Target: target,
+			})
+			require.NoError(t, err)
+			requireValidResult(t, result)
+			assert.Equal(t, test.status, result.Status)
+			assert.Equal(t, test.domain, result.FailureDomain)
+			assert.Equal(t, test.comparison, evidenceValue(result, "comparison"))
+			assert.False(t, result.FailsOpen())
+		})
+	}
+}
+
+func TestDownstreamValidationAndProvenanceStopBeforeAdditionalIO(t *testing.T) {
+	t.Parallel()
+	reader := &fakeReader{resources: map[string]Resource{resourceKey(testPayment): validResource(testPayment)}}
+	checker := newTestChecker(t, reader)
+	observation, observed, err := checker.ObserveExistence(context.Background(), ExistenceCheck{
+		ResultID: "resource.exists:validation-target", NodeID: testPaymentNode, Resource: testPayment, Window: testWindow,
+	})
+	require.NoError(t, err)
+	require.Equal(t, verification.StatusPassed, observed.Status)
+	before := len(reader.fetchRequests())
+
+	_, err = checker.CheckField(context.Background(), FieldCheck{
+		ResultID: "resource.field:invalid-path", Resource: observation, Field: "Authorization", Expected: mustStringScalar("secret"),
+	})
+	assert.ErrorContains(t, err, "field path")
+	_, err = checker.CheckField(context.Background(), FieldCheck{
+		ResultID: "resource.field:invalid-scalar", Resource: observation, Field: "status", Expected: JSONScalar{},
+	})
+	assert.ErrorContains(t, err, "scalar")
+	_, err = checker.CheckAccountContext(context.Background(), AccountCheck{
+		ResultID: "resource.account:unproven", Resource: ObservedResource{},
+	})
+	assert.ErrorContains(t, err, "lacks a passed CLI observation")
+	_, err = checker.CheckLinkage(context.Background(), LinkageCheck{
+		ResultID: "resource.linkage:unproven-source", Source: ObservedResource{}, Link: "payment_intent", Target: observation,
+	})
+	assert.ErrorContains(t, err, "lacks a passed CLI observation")
+	_, err = checker.CheckLinkage(context.Background(), LinkageCheck{
+		ResultID: "resource.linkage:unproven-target", Source: observation, Link: "payment_intent", Target: ObservedResource{},
+	})
+	assert.ErrorContains(t, err, "lacks a passed CLI observation")
+	assert.Len(t, reader.fetchRequests(), before)
+}
+
+func TestMissingUnprovenResourceIsCoverageGap(t *testing.T) {
+	t.Parallel()
+	invoice := ResourceRef{Type: ResourceInvoice, ID: "in_missing123"}
+	reader := &fakeReader{resources: map[string]Resource{}}
+	checker := newTestChecker(t, reader)
+	result, err := checker.CheckExistence(context.Background(), ExistenceCheck{
+		ResultID: "resource.exists:missing", NodeID: testInvoiceNode, Resource: invoice, Window: testWindow,
+	})
+	require.NoError(t, err)
+	requireValidResult(t, result)
+	assert.Equal(t, verification.StatusNotObserved, result.Status)
+	assert.Equal(t, verification.FailureDomainCoverage, result.FailureDomain)
+	assert.False(t, result.FailsOpen())
 }
 
 func TestInvalidConfigurationStopsBeforeReaderIO(t *testing.T) {
 	t.Parallel()
 	reader := &fakeReader{}
-	_, err := NewChecker(nil, testAccount)
+	_, err := NewChecker(nil, testAccount, testScope)
 	assert.Error(t, err)
-	_, err = NewChecker(reader, AccountContext{Mode: ModeLive, AccountID: testAccount.AccountID})
+	_, err = NewChecker(reader, AccountContext{Mode: ModeLive, AccountID: testAccount.AccountID}, testScope)
 	assert.ErrorContains(t, err, "test mode")
-	_, err = NewChecker(reader, AccountContext{Mode: ModeTest, AccountID: "not-an-account"})
+	_, err = NewChecker(reader, AccountContext{Mode: ModeTest, AccountID: "not-an-account"}, testScope)
 	assert.ErrorContains(t, err, "account context")
+	_, err = NewChecker(reader, testAccount, VerificationScope{SessionID: "INVALID", BlueprintDigest: testScope.BlueprintDigest})
+	assert.ErrorContains(t, err, "session")
+	_, err = NewChecker(reader, testAccount, VerificationScope{SessionID: testScope.SessionID, BlueprintDigest: "sha256:bad"})
+	assert.ErrorContains(t, err, "digest")
+	_, err = NewCheckerWithReadTimeout(reader, testAccount, testScope, 0)
+	assert.ErrorContains(t, err, "timeout")
+	_, err = NewCheckerWithReadTimeout(reader, testAccount, testScope, MaxReadTimeout+time.Nanosecond)
+	assert.ErrorContains(t, err, "timeout")
 
 	checker := newTestChecker(t, reader)
-	_, err = checker.CheckExistence(context.Background(), ExistenceCheck{ResultID: "INVALID", Resource: testPayment})
+	_, err = checker.CheckExistence(context.Background(), ExistenceCheck{ResultID: "INVALID", NodeID: testPaymentNode, Resource: testPayment, Window: testWindow})
 	assert.Error(t, err)
-	_, err = checker.CheckField(context.Background(), FieldCheck{ResultID: "field.invalid", Resource: testPayment, Field: "Authorization", Expected: "secret"})
+	_, err = checker.CheckField(context.Background(), FieldCheck{ResultID: "field.invalid", Resource: ObservedResource{}, Field: "Authorization", Expected: mustStringScalar("secret")})
 	assert.Error(t, err)
-	_, err = checker.CheckListExistence(context.Background(), ListExistenceCheck{ResultID: "list.invalid", Resource: testPayment, Limit: MaxListLimit + 1})
+	_, err = checker.CheckCreationWindow(context.Background(), CreationWindowCheck{ResultID: "list.invalid", NodeID: testPaymentNode, ResourceType: ResourcePaymentIntent, Window: testWindow, Predicates: testPredicates, Limit: MaxListLimit + 1})
+	assert.Error(t, err)
+	_, err = checker.CheckCreationWindow(context.Background(), CreationWindowCheck{ResultID: "window.invalid", NodeID: testPaymentNode, ResourceType: ResourcePaymentIntent, Window: CreationWindow{Start: testCreated, End: testCreated.Add(MaxCreationWindow + time.Second)}, Predicates: testPredicates, Limit: 10})
+	assert.Error(t, err)
+	_, err = checker.CheckCreationWindow(context.Background(), CreationWindowCheck{ResultID: "predicates.missing", NodeID: testPaymentNode, ResourceType: ResourcePaymentIntent, Window: testWindow, Limit: 10})
+	assert.ErrorContains(t, err, "predicates")
+	_, err = checker.CheckCreationWindow(context.Background(), CreationWindowCheck{
+		ResultID: "predicates.duplicate", NodeID: testPaymentNode, ResourceType: ResourcePaymentIntent, Window: testWindow,
+		Predicates: []FieldPredicate{testPredicates[0], testPredicates[0]}, Limit: 10,
+	})
+	assert.ErrorContains(t, err, "duplicated")
+	_, err = checker.CheckField(context.Background(), FieldCheck{ResultID: "field.zero-scalar", Resource: ObservedResource{}, Field: "status", Expected: JSONScalar{}})
 	assert.Error(t, err)
 	assert.Empty(t, reader.fetchRequests())
 	assert.Empty(t, reader.listRequests())
@@ -411,14 +694,11 @@ func TestResultEvidenceIsDeterministicBoundedAndRedacted(t *testing.T) {
 	t.Parallel()
 	secret := "super-secret-api-key-material"
 	rawPayload := `{"request_body":"private-payload"}`
-	reader := &fakeReader{
-		fetchErrs: map[string]error{
-			resourceKey(testPayment): fmt.Errorf("%s %s: %w", secret, rawPayload, ErrTransientUnavailable),
-		},
-	}
+	reader := &fakeReader{fetchErrs: map[string]error{
+		resourceKey(testPayment): fmt.Errorf("%s %s: %w", secret, rawPayload, ErrTransientUnavailable),
+	}}
 	result, err := newTestChecker(t, reader).CheckExistence(context.Background(), ExistenceCheck{
-		ResultID: "resource.exists:redaction",
-		Resource: testPayment,
+		ResultID: "resource.exists:redaction", NodeID: testPaymentNode, Resource: testPayment, Window: testWindow,
 	})
 	require.NoError(t, err)
 	requireValidResult(t, result)
@@ -432,7 +712,7 @@ func TestResultEvidenceIsDeterministicBoundedAndRedacted(t *testing.T) {
 	for _, forbidden := range []string{secret, rawPayload, testAccount.AccountID, testPayment.ID, "Authorization"} {
 		assert.NotContains(t, string(first), forbidden)
 	}
-	assert.LessOrEqual(t, len(result.Evidence), 8)
+	assert.LessOrEqual(t, len(result.Evidence), 12)
 	for _, evidence := range result.Evidence {
 		assert.NotEqual(t, verification.EvidenceSensitive, evidence.Class)
 		assert.LessOrEqual(t, len(evidence.Value), 128)
@@ -441,8 +721,15 @@ func TestResultEvidenceIsDeterministicBoundedAndRedacted(t *testing.T) {
 
 func TestCheckerConcurrentUse(t *testing.T) {
 	reader := &fakeReader{resources: map[string]Resource{resourceKey(testPayment): validResource(testPayment)}}
-	reader.resources[resourceKey(testPayment)].Fields["status"] = "succeeded"
+	resource := reader.resources[resourceKey(testPayment)]
+	resource.Fields["status"] = mustStringScalar("succeeded")
+	reader.resources[resourceKey(testPayment)] = resource
 	checker := newTestChecker(t, reader)
+	observation, observed, err := checker.ObserveExistence(context.Background(), ExistenceCheck{
+		ResultID: "resource.exists:race-target", NodeID: testPaymentNode, Resource: testPayment, Window: testWindow,
+	})
+	require.NoError(t, err)
+	require.Equal(t, verification.StatusPassed, observed.Status)
 
 	const workers = 64
 	errorsFound := make(chan error, workers)
@@ -454,9 +741,9 @@ func TestCheckerConcurrentUse(t *testing.T) {
 			defer wait.Done()
 			result, err := checker.CheckField(context.Background(), FieldCheck{
 				ResultID: verification.ResultID(fmt.Sprintf("resource.field:race-%02d", worker)),
-				Resource: testPayment,
+				Resource: observation,
 				Field:    "status",
-				Expected: "succeeded",
+				Expected: mustStringScalar("succeeded"),
 			})
 			if err != nil {
 				errorsFound <- err
@@ -476,7 +763,7 @@ func TestCheckerConcurrentUse(t *testing.T) {
 	for err := range errorsFound {
 		require.NoError(t, err)
 	}
-	assert.Len(t, reader.fetchRequests(), workers)
+	assert.Len(t, reader.fetchRequests(), workers+1)
 }
 
 func evidenceValue(result verification.Result, key string) string {
@@ -490,4 +777,16 @@ func evidenceValue(result verification.Result, key string) string {
 
 func resourcePointer(resource Resource) *Resource {
 	return &resource
+}
+
+func resourceRefPointer(resource ResourceRef) *ResourceRef {
+	return &resource
+}
+
+func mustStringScalar(value string) JSONScalar {
+	scalar, err := NewStringScalar(value)
+	if err != nil {
+		panic(err)
+	}
+	return scalar
 }
