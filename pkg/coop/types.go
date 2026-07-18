@@ -2,7 +2,11 @@
 // AI agent + human developer Stripe integration building.
 package coop
 
-import "time"
+import (
+	"time"
+
+	"github.com/stripe/stripe-cli/pkg/coop/verification"
+)
 
 // NodeState represents the lifecycle state of a single blueprint node.
 type NodeState string
@@ -93,13 +97,14 @@ type StepDefinition struct {
 // SessionNode is a single action within a session step.
 type SessionNode struct {
 	NodeDefinition
-	State          NodeState       `json:"state"`
-	Activity       string          `json:"activity,omitempty"`
-	Implementation *Implementation `json:"implementation,omitempty"`
-	Verifications  []Verification  `json:"verifications,omitempty"`
-	RejectionNote  string          `json:"rejection_note,omitempty"`
-	StartedAt      *time.Time      `json:"started_at,omitempty"`
-	CompletedAt    *time.Time      `json:"completed_at,omitempty"`
+	State               NodeState               `json:"state"`
+	Activity            string                  `json:"activity,omitempty"`
+	Implementation      *Implementation         `json:"implementation,omitempty"`
+	Verifications       []Verification          `json:"verifications,omitempty"`
+	VerificationResults *verification.ResultSet `json:"verification_results,omitempty"`
+	RejectionNote       string                  `json:"rejection_note,omitempty"`
+	StartedAt           *time.Time              `json:"started_at,omitempty"`
+	CompletedAt         *time.Time              `json:"completed_at,omitempty"`
 }
 
 // SessionStep groups nodes under a titled step.
@@ -143,15 +148,16 @@ type NextStepSuggestion struct {
 
 // CommandResponse is the JSON output format for agent-facing commands.
 type CommandResponse struct {
-	OK          bool        `json:"ok"`
-	SessionID   string      `json:"session_id,omitempty"`
-	Node        int         `json:"node,omitempty"`
-	State       string      `json:"state,omitempty"`
-	Message     string      `json:"message,omitempty"`
-	Next        string      `json:"next,omitempty"`
-	AgentPrompt string      `json:"agent_prompt,omitempty"`
-	APIRequest  *APIRequest `json:"api_request,omitempty"`
-	SDKExample  string      `json:"sdk_example,omitempty"`
-	Error       string      `json:"error,omitempty"`
-	Hint        string      `json:"hint,omitempty"`
+	OK                  bool                   `json:"ok"`
+	SessionID           string                 `json:"session_id,omitempty"`
+	Node                int                    `json:"node,omitempty"`
+	State               string                 `json:"state,omitempty"`
+	Message             string                 `json:"message,omitempty"`
+	Next                string                 `json:"next,omitempty"`
+	AgentPrompt         string                 `json:"agent_prompt,omitempty"`
+	APIRequest          *APIRequest            `json:"api_request,omitempty"`
+	SDKExample          string                 `json:"sdk_example,omitempty"`
+	VerificationResults []verification.Summary `json:"verification_results,omitempty"`
+	Error               string                 `json:"error,omitempty"`
+	Hint                string                 `json:"hint,omitempty"`
 }
