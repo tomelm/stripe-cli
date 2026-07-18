@@ -38,6 +38,17 @@ func TestConfigRequiresExplicitBoundedSessionInput(t *testing.T) {
 	wrongFilters.EventTypes = []string{"charge.succeeded"}
 	assert.ErrorContains(t, wrongFilters.Validate(), "does not accept event_types")
 
+	requestFilters := defaultTestConfig(StreamLogsTail)
+	requestFilters.RequestMethods = []string{"GET", "POST"}
+	requestFilters.RequestPaths = []string{"/v1/invoices/", "/v1/payment_intents"}
+	require.NoError(t, requestFilters.Validate())
+	wrongRequestStream := defaultTestConfig(StreamListen)
+	wrongRequestStream.RequestMethods = []string{"POST"}
+	assert.ErrorContains(t, wrongRequestStream.Validate(), "does not accept request filters")
+	lowercaseMethod := requestFilters
+	lowercaseMethod.RequestMethods = []string{"post"}
+	assert.ErrorContains(t, lowercaseMethod.Validate(), "must be uppercase")
+
 	unknownFilter := config
 	unknownFilter.EventTypes = []string{"payment_intent.suceeded"}
 	assert.ErrorContains(t, unknownFilter.Validate(), "not a supported listen event")

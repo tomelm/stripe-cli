@@ -21,17 +21,18 @@ func (source Source) Valid() bool {
 type Status string
 
 const (
-	StatusPassed      Status = "passed"
-	StatusFailed      Status = "failed"
-	StatusNotObserved Status = "not_observed"
-	StatusUnavailable Status = "unavailable"
-	StatusSkipped     Status = "skipped"
+	StatusPassed       Status = "passed"
+	StatusFailed       Status = "failed"
+	StatusInconclusive Status = "inconclusive"
+	StatusNotObserved  Status = "not_observed"
+	StatusUnavailable  Status = "unavailable"
+	StatusSkipped      Status = "skipped"
 )
 
 // Valid reports whether status is part of the verification contract.
 func (status Status) Valid() bool {
 	switch status {
-	case StatusPassed, StatusFailed, StatusNotObserved, StatusUnavailable, StatusSkipped:
+	case StatusPassed, StatusFailed, StatusInconclusive, StatusNotObserved, StatusUnavailable, StatusSkipped:
 		return true
 	default:
 		return false
@@ -42,7 +43,7 @@ func (status Status) Valid() bool {
 // positive or negative conclusion. A skipped check is intentional non-
 // execution and is therefore not classified as indeterminate.
 func (status Status) Indeterminate() bool {
-	return status == StatusNotObserved || status == StatusUnavailable
+	return status == StatusInconclusive || status == StatusNotObserved || status == StatusUnavailable
 }
 
 // FailureDomain identifies the system that contradicted a requirement or

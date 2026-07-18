@@ -96,6 +96,8 @@ func NewSupervisor(config Config, connector Connector, clock Clock, jitter Jitte
 	if jitter == nil {
 		return nil, fmt.Errorf("passive observer jitter source is required")
 	}
+	config.RequestMethods = append([]string(nil), config.RequestMethods...)
+	config.RequestPaths = append([]string(nil), config.RequestPaths...)
 	config.EventTypes = append([]string(nil), config.EventTypes...)
 	now := clock.Now().UTC()
 	return &Supervisor{
@@ -358,13 +360,15 @@ func (supervisor *Supervisor) runAttempt(runContext context.Context) attemptOutc
 	}()
 
 	request := ConnectRequest{
-		SessionID:  supervisor.config.SessionID,
-		Stream:     supervisor.config.Stream,
-		APIKey:     supervisor.config.APIKey,
-		DeviceName: supervisor.config.DeviceName,
-		AccountID:  supervisor.config.AccountID,
-		EventTypes: append([]string(nil), supervisor.config.EventTypes...),
-		Deadline:   deadline,
+		SessionID:      supervisor.config.SessionID,
+		Stream:         supervisor.config.Stream,
+		APIKey:         supervisor.config.APIKey,
+		DeviceName:     supervisor.config.DeviceName,
+		AccountID:      supervisor.config.AccountID,
+		RequestMethods: append([]string(nil), supervisor.config.RequestMethods...),
+		RequestPaths:   append([]string(nil), supervisor.config.RequestPaths...),
+		EventTypes:     append([]string(nil), supervisor.config.EventTypes...),
+		Deadline:       deadline,
 	}
 	startupTimer := supervisor.clock.NewTimer(supervisor.config.StartupTimeout)
 	defer startupTimer.Stop()

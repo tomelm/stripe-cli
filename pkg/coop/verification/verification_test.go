@@ -50,6 +50,7 @@ func TestStatusIndeterminate(t *testing.T) {
 
 	assert.False(t, StatusPassed.Indeterminate())
 	assert.False(t, StatusFailed.Indeterminate())
+	assert.True(t, StatusInconclusive.Indeterminate())
 	assert.True(t, StatusNotObserved.Indeterminate())
 	assert.True(t, StatusUnavailable.Indeterminate())
 	assert.False(t, StatusSkipped.Indeterminate())

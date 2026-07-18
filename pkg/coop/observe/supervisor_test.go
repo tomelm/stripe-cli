@@ -54,6 +54,24 @@ func TestSupervisorReadyUsesOnlyExplicitSessionInput(t *testing.T) {
 	stopSupervisor(t, supervisor)
 }
 
+func TestSupervisorPassesExplicitRequestFiltersToConnector(t *testing.T) {
+	clock := newFakeClock()
+	connection := newFakeConnection(true)
+	connector := newScriptedConnector(connectStep{connection: connection})
+	config := defaultTestConfig(StreamLogsTail)
+	config.RequestMethods = []string{"GET", "POST"}
+	config.RequestPaths = []string{"/v1/invoices/", "/v1/payment_intents"}
+	supervisor := newTestSupervisor(t, config, connector, clock)
+
+	require.NoError(t, supervisor.Start(context.Background()))
+	waitForState(t, supervisor, StateReady)
+	connector.waitForCalls(t, 1)
+	request := connector.Requests()[0]
+	assert.Equal(t, config.RequestMethods, request.RequestMethods)
+	assert.Equal(t, config.RequestPaths, request.RequestPaths)
+	stopSupervisor(t, supervisor)
+}
+
 func TestSupervisorRecordsOnlyBoundedSourceCompatibleFacts(t *testing.T) {
 	clock := newFakeClock()
 	connection := newFakeConnection(true)

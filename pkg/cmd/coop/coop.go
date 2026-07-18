@@ -12,6 +12,9 @@ import (
 type Options struct {
 	ConfigFolder             func() string
 	SandboxClaimURL          func() string
+	APIKey                   func() (string, error)
+	DeviceName               func() (string, error)
+	AccountID                func() (string, error)
 	AIAgentHelpAnnotationKey string
 }
 

@@ -29,7 +29,7 @@ func (result Result) Validate() error {
 		if result.Transient {
 			return fmt.Errorf("result %q with status %q cannot be transient", result.ID, result.Status)
 		}
-	case StatusFailed, StatusNotObserved, StatusUnavailable:
+	case StatusFailed, StatusInconclusive, StatusNotObserved, StatusUnavailable:
 		if result.FailureDomain == "" {
 			return fmt.Errorf("result %q with status %q requires a failure domain", result.ID, result.Status)
 		}

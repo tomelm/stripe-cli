@@ -18,6 +18,7 @@ import (
 const (
 	maxConfiguredDuration = 24 * time.Hour
 	maxEventTypes         = 256
+	maxRequestFilters     = 256
 )
 
 // Stream identifies the passive Stripe CLI stream represented by a collector.
@@ -141,6 +142,8 @@ type Config struct {
 	APIKey             string        `json:"-"`
 	DeviceName         string        `json:"device_name"`
 	AccountID          string        `json:"account_id,omitempty"`
+	RequestMethods     []string      `json:"request_methods,omitempty"`
+	RequestPaths       []string      `json:"request_paths,omitempty"`
 	EventTypes         []string      `json:"event_types,omitempty"`
 	StartupTimeout     time.Duration `json:"startup_timeout"`
 	ObservationTimeout time.Duration `json:"observation_timeout"`
@@ -169,6 +172,15 @@ func (config Config) Validate() error {
 	}
 	if config.Stream == StreamLogsTail && len(config.EventTypes) > 0 {
 		return fmt.Errorf("logs_tail does not accept event_types")
+	}
+	if config.Stream == StreamListen && (len(config.RequestMethods) > 0 || len(config.RequestPaths) > 0) {
+		return fmt.Errorf("listen does not accept request filters")
+	}
+	if len(config.RequestMethods) > maxRequestFilters || len(config.RequestPaths) > maxRequestFilters {
+		return fmt.Errorf("request filters exceed %d entries", maxRequestFilters)
+	}
+	if err := validateRequestFilters(config.RequestMethods, config.RequestPaths); err != nil {
+		return err
 	}
 	if len(config.EventTypes) > maxEventTypes {
 		return fmt.Errorf("event_types exceeds %d entries", maxEventTypes)
@@ -209,13 +221,45 @@ func (config Config) String() string {
 // ConnectRequest is the complete explicit input passed to a connector attempt.
 // APIKey is never serialized, and EventTypes is defensively copied.
 type ConnectRequest struct {
-	SessionID  string    `json:"session_id"`
-	Stream     Stream    `json:"stream"`
-	APIKey     string    `json:"-"`
-	DeviceName string    `json:"device_name"`
-	AccountID  string    `json:"account_id,omitempty"`
-	EventTypes []string  `json:"event_types,omitempty"`
-	Deadline   time.Time `json:"deadline"`
+	SessionID      string    `json:"session_id"`
+	Stream         Stream    `json:"stream"`
+	APIKey         string    `json:"-"`
+	DeviceName     string    `json:"device_name"`
+	AccountID      string    `json:"account_id,omitempty"`
+	RequestMethods []string  `json:"request_methods,omitempty"`
+	RequestPaths   []string  `json:"request_paths,omitempty"`
+	EventTypes     []string  `json:"event_types,omitempty"`
+	Deadline       time.Time `json:"deadline"`
+}
+
+func validateRequestFilters(methods, paths []string) error {
+	seenMethods := make(map[string]bool, len(methods))
+	for index, method := range methods {
+		if err := validateConfigText(fmt.Sprintf("request_methods[%d]", index), method, 16, false); err != nil {
+			return err
+		}
+		if method != strings.ToUpper(method) {
+			return fmt.Errorf("request_methods[%d] must be uppercase", index)
+		}
+		if seenMethods[method] {
+			return fmt.Errorf("request_methods[%d] %q is duplicated", index, method)
+		}
+		seenMethods[method] = true
+	}
+	seenPaths := make(map[string]bool, len(paths))
+	for index, path := range paths {
+		if err := validateConfigText(fmt.Sprintf("request_paths[%d]", index), path, 1024, false); err != nil {
+			return err
+		}
+		if !strings.HasPrefix(path, "/") || strings.ContainsAny(path, "?#") {
+			return fmt.Errorf("request_paths[%d] must be normalized", index)
+		}
+		if seenPaths[path] {
+			return fmt.Errorf("request_paths[%d] %q is duplicated", index, path)
+		}
+		seenPaths[path] = true
+	}
+	return nil
 }
 
 // String intentionally omits the injected API key.

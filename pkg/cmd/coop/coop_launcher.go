@@ -226,6 +226,8 @@ func (rc *coopRunCmd) runInTmuxSplitWithCommand(stripeBin string, blueprintID st
 		rc.abortStartedSession(session, "store creation failed")
 		return err
 	}
+	stopVerification := startOwnedCoopVerification(session)
+	defer stopVerification()
 
 	paneCmd, cleanup, err := buildPaneCmd(session)
 	if err != nil {
@@ -287,6 +289,8 @@ func (rc *coopRunCmd) runInNewTmuxWithCommand(stripeBin string, blueprintID stri
 			return err
 		}
 	}
+	stopVerification := startOwnedCoopVerification(session)
+	defer stopVerification()
 
 	tuiCmd := fmt.Sprintf("%s coop join", shellQuote(stripeBin))
 	if blueprintID == "" {
@@ -367,6 +371,8 @@ func (rc *coopRunCmd) runFallbackWithCommand(stripeBin string, blueprintID strin
 	} else {
 		fmt.Printf("Open another terminal and run: %s\n", shellCommandWithCoopEnv("stripe coop join --wait"))
 	}
+	stopVerification := startOwnedCoopVerification(session)
+	defer stopVerification()
 	fmt.Println()
 
 	paneCmd, cleanup, err := buildPaneCmd(session)

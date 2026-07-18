@@ -22,12 +22,17 @@ type Session struct {
 
 // Node is the provider-facing metadata for one canonical session node.
 type Node struct {
-	Number int
-	Key    string
-	Type   coop.NodeType
+	Number   int
+	Key      string
+	Type     coop.NodeType
+	Requests []Request
+	Events   []string
+}
+
+// Request is canonical request metadata from a session node.
+type Request struct {
 	Method string
 	Path   string
-	Events []string
 }
 
 // Emit writes one result for a 1-based session node.
@@ -114,7 +119,7 @@ func (runner *Runner) Run(ctx context.Context, sessionID string) error {
 		return nil
 	}
 
-	providerSession := sessionMetadata(session)
+	providerSession := SessionMetadata(session)
 	runContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -173,12 +178,14 @@ func cloneSession(session Session) Session {
 	cloned := session
 	cloned.Nodes = append([]Node(nil), session.Nodes...)
 	for index := range cloned.Nodes {
+		cloned.Nodes[index].Requests = append([]Request(nil), session.Nodes[index].Requests...)
 		cloned.Nodes[index].Events = append([]string(nil), session.Nodes[index].Events...)
 	}
 	return cloned
 }
 
-func sessionMetadata(session *coop.Session) Session {
+// SessionMetadata returns the bounded canonical metadata visible to providers.
+func SessionMetadata(session *coop.Session) Session {
 	metadata := Session{
 		ID:        session.ID,
 		Blueprint: session.Blueprint,
@@ -195,8 +202,10 @@ func sessionMetadata(session *coop.Session) Session {
 				Events: append([]string(nil), node.Events...),
 			}
 			if node.Request != nil {
-				entry.Method = node.Request.Method
-				entry.Path = node.Request.Path
+				entry.Requests = append(entry.Requests, Request{Method: node.Request.Method, Path: node.Request.Path})
+			}
+			for _, request := range node.TestRequests {
+				entry.Requests = append(entry.Requests, Request{Method: request.Method, Path: request.Path})
 			}
 			metadata.Nodes = append(metadata.Nodes, entry)
 		}
