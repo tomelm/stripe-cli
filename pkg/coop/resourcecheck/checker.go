@@ -60,6 +60,40 @@ func (checker *Checker) CheckExistence(ctx context.Context, check ExistenceCheck
 	return result, err
 }
 
+// CheckReference verifies one exact caller-supplied resource and discards the
+// in-memory provenance capability returned by ObserveReference.
+func (checker *Checker) CheckReference(ctx context.Context, check ReferenceCheck) (verification.Result, error) {
+	_, result, err := checker.ObserveReference(ctx, check)
+	return result, err
+}
+
+// ObserveReference verifies one exact caller-supplied resource. Unlike an
+// ID-free observation, an explicit reference does not need a creation window.
+func (checker *Checker) ObserveReference(ctx context.Context, check ReferenceCheck) (ObservedResource, verification.Result, error) {
+	if err := validateResultID(check.ResultID); err != nil {
+		return ObservedResource{}, verification.Result{}, err
+	}
+	if err := validateResourceRef(check.Resource); err != nil {
+		return ObservedResource{}, verification.Result{}, err
+	}
+	if err := validateNodeID(check.NodeID); err != nil {
+		return ObservedResource{}, verification.Result{}, err
+	}
+	if ctx == nil {
+		return ObservedResource{}, verification.Result{}, errors.New("resource check context is required")
+	}
+
+	evidence := evidenceWith(checker.resourceEvidence(check.Resource, "fetch", check.NodeID),
+		verification.Evidence{Key: "reference_source", Class: verification.EvidenceSafe, Value: "explicit"},
+	)
+	resource, result := checker.fetch(ctx, check.ResultID, CheckResourceExists, check.Resource, evidence, "resource", false)
+	if result != nil {
+		return ObservedResource{}, *result, nil
+	}
+	resultValue := passedResult(check.ResultID, CheckResourceExists, "explicit test-mode resource exists in the expected account", evidence)
+	return checker.observation(resource, check.NodeID, resultValue), resultValue, nil
+}
+
 // ObserveExistence verifies one exact resource in its declared creation
 // window. Only a passed CLI result mints an ObservedResource capability.
 func (checker *Checker) ObserveExistence(ctx context.Context, check ExistenceCheck) (ObservedResource, verification.Result, error) {
@@ -452,6 +486,8 @@ func (checker *Checker) readErrorResult(
 		verification.Evidence{Key: "lookup_stage", Class: verification.EvidenceSafe, Value: stage},
 	)
 	switch {
+	case errors.Is(err, ErrMalformed):
+		return malformedResult(resultID, checkID, evidence)
 	case errors.Is(err, ErrNotFound) && missingIsContradiction:
 		return failedResult(resultID, checkID, "previously observed resource was not found", evidence)
 	case errors.Is(err, ErrNotFound):

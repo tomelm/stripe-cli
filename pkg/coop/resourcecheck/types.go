@@ -19,6 +19,14 @@ const (
 	// CheckResourceLinkage verifies a source reference against a previously
 	// observed target resource.
 	CheckResourceLinkage verification.CheckID = "stripe.resource.linkage"
+	// CheckApplicationCorrelation verifies that an exact Stripe resource
+	// reference supplied from an application record was corroborated by Stripe.
+	CheckApplicationCorrelation verification.CheckID = "stripe.resource.application-correlation"
+	// CheckActiveEntitlement verifies customer access to one declared feature.
+	CheckActiveEntitlement verification.CheckID = "stripe.resource.active-entitlement"
+	// CheckMeterUsage verifies that a customer has usage summarized by one
+	// declared billing meter during the bounded action window.
+	CheckMeterUsage verification.CheckID = "stripe.resource.meter-usage"
 )
 
 // Mode identifies the Stripe mode authorized for a check.
@@ -37,23 +45,25 @@ const (
 type ResourceType string
 
 const (
-	ResourceAccount          ResourceType = "account"
-	ResourceCharge           ResourceType = "charge"
-	ResourceCheckoutSession  ResourceType = "checkout.session"
-	ResourceCreditNote       ResourceType = "credit_note"
-	ResourceCustomer         ResourceType = "customer"
-	ResourceInvoice          ResourceType = "invoice"
-	ResourceInvoiceItem      ResourceType = "invoice_item"
-	ResourcePaymentIntent    ResourceType = "payment_intent"
-	ResourcePaymentMethod    ResourceType = "payment_method"
-	ResourcePrice            ResourceType = "price"
-	ResourceProduct          ResourceType = "product"
-	ResourceQuote            ResourceType = "quote"
-	ResourceRefund           ResourceType = "refund"
-	ResourceSetupIntent      ResourceType = "setup_intent"
-	ResourceSubscription     ResourceType = "subscription"
-	ResourceSubscriptionItem ResourceType = "subscription_item"
-	ResourceTaxRate          ResourceType = "tax_rate"
+	ResourceAccount            ResourceType = "account"
+	ResourceBillingMeter       ResourceType = "billing.meter"
+	ResourceCharge             ResourceType = "charge"
+	ResourceCheckoutSession    ResourceType = "checkout.session"
+	ResourceCreditNote         ResourceType = "credit_note"
+	ResourceCustomer           ResourceType = "customer"
+	ResourceInvoice            ResourceType = "invoice"
+	ResourceInvoiceItem        ResourceType = "invoice_item"
+	ResourceEntitlementFeature ResourceType = "entitlements.feature"
+	ResourcePaymentIntent      ResourceType = "payment_intent"
+	ResourcePaymentMethod      ResourceType = "payment_method"
+	ResourcePrice              ResourceType = "price"
+	ResourceProduct            ResourceType = "product"
+	ResourceQuote              ResourceType = "quote"
+	ResourceRefund             ResourceType = "refund"
+	ResourceSetupIntent        ResourceType = "setup_intent"
+	ResourceSubscription       ResourceType = "subscription"
+	ResourceSubscriptionItem   ResourceType = "subscription_item"
+	ResourceTaxRate            ResourceType = "tax_rate"
 )
 
 // AccountContext binds every read to one explicit test-mode Stripe account.
@@ -157,6 +167,15 @@ type ExistenceCheck struct {
 	Window   CreationWindow
 }
 
+// ReferenceCheck verifies one exact resource without performing an ID-free
+// search. It is used when the resource identity came from an explicit caller
+// reference, including an application-owned record.
+type ReferenceCheck struct {
+	ResultID verification.ResultID
+	NodeID   string
+	Resource ResourceRef
+}
+
 // CreationWindowCheck searches one bounded page for exactly one resource of a
 // trusted type matching all structural predicates. It is the fallback when no
 // exact resource ID is available.
@@ -192,6 +211,65 @@ type LinkageCheck struct {
 	Source   ObservedResource
 	Link     string
 	Target   ObservedResource
+}
+
+// ActiveEntitlementRequest is the complete read-only query needed to
+// corroborate that a customer currently has access to one feature.
+type ActiveEntitlementRequest struct {
+	Account  AccountContext
+	Customer ResourceRef
+	Feature  ResourceRef
+}
+
+// ActiveEntitlementObservation reports a bounded list lookup. HasMore matters
+// only when Found is false.
+type ActiveEntitlementObservation struct {
+	Found   bool
+	HasMore bool
+}
+
+// ActiveEntitlementReader is an optional narrow capability implemented by
+// readers that support Stripe Entitlements.
+type ActiveEntitlementReader interface {
+	ReadActiveEntitlement(context.Context, ActiveEntitlementRequest) (ActiveEntitlementObservation, error)
+}
+
+// ActiveEntitlementCheck links a previously observed customer to a declared
+// entitlement feature.
+type ActiveEntitlementCheck struct {
+	ResultID verification.ResultID
+	Customer ObservedResource
+	Feature  ResourceRef
+}
+
+// MeterUsageRequest is the complete bounded query needed to corroborate
+// customer usage for one billing meter.
+type MeterUsageRequest struct {
+	Account  AccountContext
+	Meter    ResourceRef
+	Customer ResourceRef
+	Window   CreationWindow
+}
+
+// MeterUsageObservation reports whether Stripe returned at least one summary
+// for the exact meter/customer/window tuple.
+type MeterUsageObservation struct {
+	Found bool
+}
+
+// MeterUsageReader is an optional narrow capability implemented by readers
+// that support billing meter event summaries.
+type MeterUsageReader interface {
+	ReadMeterUsage(context.Context, MeterUsageRequest) (MeterUsageObservation, error)
+}
+
+// MeterUsageCheck links previously observed customer and billing-meter
+// resources through Stripe's read-only event-summary endpoint.
+type MeterUsageCheck struct {
+	ResultID verification.ResultID
+	Meter    ObservedResource
+	Customer ObservedResource
+	Window   CreationWindow
 }
 
 // ObservedResource is an in-memory capability minted only for a passed CLI

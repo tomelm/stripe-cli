@@ -12,4 +12,7 @@ var (
 	// ErrUnauthorized identifies missing authority to read the configured
 	// account. It is never classified as transient or fail-open.
 	ErrUnauthorized = errors.New("resource source authorization unavailable")
+	// ErrMalformed identifies a response that could not be normalized without
+	// trusting missing, oversized, or structurally invalid metadata.
+	ErrMalformed = errors.New("resource source returned malformed metadata")
 )
