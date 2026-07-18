@@ -74,6 +74,7 @@ type LinkDeclaration struct {
 // referenced feature.
 type ActiveEntitlementDeclaration struct {
 	ResultID         verification.ResultID
+	NodeID           string
 	Customer         string
 	FeatureReference string
 }
@@ -82,6 +83,7 @@ type ActiveEntitlementDeclaration struct {
 // window.
 type MeterUsageDeclaration struct {
 	ResultID verification.ResultID
+	NodeID   string
 	Meter    string
 	Customer string
 }
@@ -463,7 +465,7 @@ func ValidateBlueprintDeclaration(declaration BlueprintDeclaration) error {
 	}
 	for _, entitlement := range declaration.ActiveEntitlements {
 		customer, exists := resources[entitlement.Customer]
-		if !exists || customer.Type != ResourceCustomer || !declarationKeyPattern.MatchString(entitlement.FeatureReference) {
+		if !exists || customer.Type != ResourceCustomer || validateNodeID(entitlement.NodeID) != nil || !declarationKeyPattern.MatchString(entitlement.FeatureReference) {
 			return errors.New("resource declaration contains an invalid active entitlement check")
 		}
 		if err := addResult(entitlement.ResultID); err != nil {
@@ -473,7 +475,7 @@ func ValidateBlueprintDeclaration(declaration BlueprintDeclaration) error {
 	for _, usage := range declaration.MeterUsages {
 		meter, meterExists := resources[usage.Meter]
 		customer, customerExists := resources[usage.Customer]
-		if !meterExists || meter.Type != ResourceBillingMeter || !customerExists || customer.Type != ResourceCustomer {
+		if !meterExists || meter.Type != ResourceBillingMeter || !customerExists || customer.Type != ResourceCustomer || validateNodeID(usage.NodeID) != nil {
 			return errors.New("resource declaration contains an invalid meter usage check")
 		}
 		if err := addResult(usage.ResultID); err != nil {

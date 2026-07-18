@@ -100,7 +100,7 @@ var frozenBlueprintDeclarations = map[string]BlueprintDeclaration{
 			field("resource.field:subscription-interval-count", "subscription", "items.first.price.recurring.interval_count", literal("1")),
 		},
 		Links:              []LinkDeclaration{{ResultID: "resource.linkage:subscription-customer", Source: "subscription", Link: "customer", Target: "customer"}},
-		ActiveEntitlements: []ActiveEntitlementDeclaration{{ResultID: "resource.entitlement:customer-feature", Customer: "customer", FeatureReference: "feature"}},
+		ActiveEntitlements: []ActiveEntitlementDeclaration{{ResultID: "resource.entitlement:customer-feature", NodeID: "subscribe-chapter.check-entitlements", Customer: "customer", FeatureReference: "feature"}},
 	},
 	"flat-fee-and-overages": {
 		BlueprintID: "flat-fee-and-overages", BlueprintDigest: frozenBlueprintDigests["flat-fee-and-overages"],
@@ -121,7 +121,7 @@ var frozenBlueprintDeclarations = map[string]BlueprintDeclaration{
 			field("resource.field:meter-aggregation", "meter", "default_aggregation.formula", literal(`"sum"`)),
 			field("resource.field:meter-customer-map", "meter", "customer_mapping.event_payload_key", literal(`"stripe_customer_id"`)),
 		},
-		MeterUsages: []MeterUsageDeclaration{{ResultID: "resource.usage:meter-customer", Meter: "meter", Customer: "customer"}},
+		MeterUsages: []MeterUsageDeclaration{{ResultID: "resource.usage:meter-customer", NodeID: "subscribe-customer-chapter.waitforservicingactivated", Meter: "meter", Customer: "customer"}},
 	},
 	"learn-accounts-v1-marketplace": {
 		BlueprintID: "learn-accounts-v1-marketplace", BlueprintDigest: frozenBlueprintDigests["learn-accounts-v1-marketplace"],

@@ -12,6 +12,8 @@ import (
 type Options struct {
 	ConfigFolder             func() string
 	SandboxClaimURL          func() string
+	TestModeAPIKey           func() (string, error)
+	AccountID                func() (string, error)
 	AIAgentHelpAnnotationKey string
 }
 

@@ -94,6 +94,15 @@ type ResourceRef struct {
 	ID   string
 }
 
+// NewResourceRef validates and returns one supported Stripe identity.
+func NewResourceRef(resourceType ResourceType, id string) (ResourceRef, error) {
+	ref := ResourceRef{Type: resourceType, ID: id}
+	if err := validateResourceRef(ref); err != nil {
+		return ResourceRef{}, err
+	}
+	return ref, nil
+}
+
 // Resource is the normalized, read-only view consumed by checks. Field values
 // may be sensitive and are compared only in memory; results never retain them.
 type Resource struct {
