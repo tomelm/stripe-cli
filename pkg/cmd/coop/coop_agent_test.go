@@ -113,6 +113,57 @@ func TestParseStripeResourceInputsSupportsMultipleRolesAndDeduplicatesPairs(t *t
 	assert.Equal(t, "product", inputs[2].Role)
 }
 
+func TestParseStripeResourceInputsNeverEchoesSecrets(t *testing.T) {
+	cases := []struct {
+		name         string
+		value        string
+		wantInError  string
+		neverInError []string
+	}{
+		{
+			name:         "bare secret without separator echoes placeholder",
+			value:        "sk_test_abc123secret",
+			wantInError:  `"<unset>"`,
+			neverInError: []string{"abc123secret", "sk_test_abc123secret"},
+		},
+		{
+			name:         "secret in id portion echoes role name only",
+			value:        "role=sk_test_x=y",
+			wantInError:  `"role"`,
+			neverInError: []string{"sk_test_x"},
+		},
+		{
+			name:         "secret-shaped role with empty id is redacted",
+			value:        "sk_test_leaked=",
+			wantInError:  "<redacted>",
+			neverInError: []string{"sk_test_leaked"},
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			inputs, err := parseStripeResourceInputs([]string{testCase.value})
+			require.Error(t, err)
+			assert.Nil(t, inputs)
+			assert.Contains(t, err.Error(), testCase.wantInError)
+			for _, secret := range testCase.neverInError {
+				assert.NotContains(t, err.Error(), secret)
+			}
+		})
+	}
+
+	// Valid inputs still parse and deduplicate.
+	inputs, err := parseStripeResourceInputs([]string{
+		"product=prod_valid123",
+		"product=prod_valid123",
+		"price=price_valid123",
+	})
+	require.NoError(t, err)
+	require.Len(t, inputs, 2)
+	assert.Equal(t, "product", inputs[0].Role)
+	assert.Equal(t, "prod_valid123", inputs[0].ID)
+	assert.Equal(t, "price", inputs[1].Role)
+}
+
 func TestCoopAgentReportWorkAutomaticallyVerifiesMultipleResources(t *testing.T) {
 	previousOptions := options
 	t.Cleanup(func() { options = previousOptions })
@@ -173,6 +224,70 @@ func TestCoopAgentReportWorkAutomaticallyVerifiesMultipleResources(t *testing.T)
 	require.NoError(t, err)
 	require.Len(t, loaded.StripeResources, 2)
 	assert.NotContains(t, output, apiKey)
+}
+
+func TestCoopAgentReportWorkBlockedVerificationEmitsNonZeroExitJSON(t *testing.T) {
+	previousOptions := options
+	t.Cleanup(func() { options = previousOptions })
+	configFolder := t.TempDir()
+	accountID := "acct_blocked123"
+	apiKey := "rkcs_test_blocked123"
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		require.Equal(t, "Bearer "+apiKey, request.Header.Get("Authorization"))
+		if request.URL.Path == "/v1/account" {
+			fmt.Fprintf(response, `{"id":%q,"object":"account"}`, accountID)
+			return
+		}
+		// The reported product does not exist, so the existence check blocks.
+		http.NotFound(response, request)
+	}))
+	defer server.Close()
+	baseURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	options = Options{
+		ConfigFolder:   func() string { return configFolder },
+		TestModeAPIKey: func() (string, error) { return apiKey, nil },
+		AccountID:      func() (string, error) { return accountID, nil },
+		StripeClient:   &stripe.Client{BaseURL: baseURL},
+	}
+
+	blueprint, err := coop.LoadBlueprint("one-time-payment")
+	require.NoError(t, err)
+	session := coop.NewSessionFromBlueprint(blueprint, "command_blocked", nil, nil)
+	store, err := coop.NewStore(configFolder)
+	require.NoError(t, err)
+	require.NoError(t, store.Write(session))
+	_, err = store.Update(session.ID, func(current *coop.Session) error { return current.TransitionNode(2, coop.NodeActive) })
+	require.NoError(t, err)
+
+	command := newCoopAgentReportWorkCmd().cmd
+	command.SilenceErrors = true
+	command.SilenceUsage = true
+	command.SetArgs([]string{
+		"--session", session.ID, "--step", "2",
+		"--stripe-resource", "product=prod_blocked_missing",
+	})
+	var executeErr error
+	output := captureStdout(t, func() { executeErr = command.Execute() })
+
+	// RenderedError signals a nonzero exit while the JSON body carries details.
+	require.Error(t, executeErr)
+	assert.IsType(t, RenderedError{}, executeErr)
+
+	var response coop.CommandResponse
+	require.NoError(t, json.Unmarshal([]byte(output), &response))
+	assert.False(t, response.OK)
+	assert.Equal(t, string(coop.NodeActive), response.State)
+	assert.Equal(t, "Stripe resource verification failed; work was not accepted for review", response.Error)
+	assert.Contains(t, response.Next, "report-work")
+	require.NotEmpty(t, response.VerificationResults)
+	assert.NotContains(t, output, apiKey)
+
+	loaded, err := store.Read(session.ID)
+	require.NoError(t, err)
+	node, err := loaded.NodeByNumber(2)
+	require.NoError(t, err)
+	assert.Equal(t, coop.NodeActive, node.State)
 }
 
 func TestCoopAgentNextActionReturnsStructuredErrorForHelperFailure(t *testing.T) {

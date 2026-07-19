@@ -81,6 +81,39 @@ func (reader *fakeReader) deleteResource(ref ResourceRef) {
 	delete(reader.resources, resourceKey(ref))
 }
 
+// productFeatureFakeReader optionally extends fakeReader with the narrow
+// ProductFeatureReader capability, mirroring how readers opt into entitlement
+// support: the capability exists only on readers that declare it, and plain
+// fakeReader values continue to lack it.
+type productFeatureFakeReader struct {
+	*fakeReader
+
+	productFeature    ProductFeatureObservation
+	productFeatureErr error
+
+	productFeatureCalls []ProductFeatureRequest
+}
+
+var _ ProductFeatureReader = (*productFeatureFakeReader)(nil)
+
+func (reader *productFeatureFakeReader) ReadProductFeature(_ context.Context, request ProductFeatureRequest) (ProductFeatureObservation, error) {
+	reader.mu.Lock()
+	reader.productFeatureCalls = append(reader.productFeatureCalls, request)
+	observation := reader.productFeature
+	err := reader.productFeatureErr
+	reader.mu.Unlock()
+	if err != nil {
+		return ProductFeatureObservation{}, err
+	}
+	return observation, nil
+}
+
+func (reader *productFeatureFakeReader) productFeatureRequests() []ProductFeatureRequest {
+	reader.mu.Lock()
+	defer reader.mu.Unlock()
+	return append([]ProductFeatureRequest(nil), reader.productFeatureCalls...)
+}
+
 func resourceKey(ref ResourceRef) string {
 	return string(ref.Type) + "\x00" + ref.ID
 }
@@ -116,9 +149,20 @@ func TestStableCheckIDsAndTrustedTypes(t *testing.T) {
 		CheckResourceExists,
 		CheckResourceField,
 		CheckResourceLinkage,
+		CheckActiveEntitlement,
+		CheckProductFeature,
+		CheckCoverage,
 	} {
 		require.NoError(t, id.Validate())
 	}
+	assert.Equal(t, verification.CheckID("stripe.resource.product-feature"), CheckProductFeature)
+	assert.Equal(t, verification.CheckID("stripe.resource.coverage"), CheckCoverage)
+	assert.Equal(t, ResourceType("v2.billing.pricing_plan"), ResourceV2PricingPlan)
+	assert.Equal(t, ResourceType("v2.billing.rate_card"), ResourceV2RateCard)
+	assert.Equal(t, ResourceType("v2.billing.metered_item"), ResourceV2MeteredItem)
+	assert.Equal(t, ResourceType("v2.billing.licensed_item"), ResourceV2LicensedItem)
+	assert.Equal(t, ResourceType("v2.billing.license_fee"), ResourceV2LicenseFee)
+	assert.Equal(t, ResourceType("v2.billing.pricing_plan_subscription"), ResourceV2PricingPlanSubscription)
 }
 
 func TestObserveExistenceCreationWindowAndReadOutcomes(t *testing.T) {
@@ -556,6 +600,140 @@ func TestCheckerConcurrentUse(t *testing.T) {
 		require.NoError(t, err)
 	}
 	assert.Len(t, reader.fetchRequests(), workers+1)
+}
+
+func TestCheckProductFeatureReportsAllOutcomes(t *testing.T) {
+	t.Parallel()
+
+	product := ResourceRef{Type: ResourceProduct, ID: "prod_test123"}
+	feature := ResourceRef{Type: ResourceEntitlementFeature, ID: "feat_test123"}
+	const productNode = "node.product"
+
+	tests := []struct {
+		name       string
+		capability bool
+		observed   ProductFeatureObservation
+		readErr    error
+		status     verification.Status
+		domain     verification.FailureDomain
+		detail     string
+	}{
+		{name: "attached feature passes", capability: true, observed: ProductFeatureObservation{Found: true}, status: verification.StatusPassed},
+		{name: "complete lookup without feature fails", capability: true, status: verification.StatusFailed, domain: verification.FailureDomainIntegration},
+		{name: "incomplete lookup is not observed", capability: true, observed: ProductFeatureObservation{HasMore: true}, status: verification.StatusNotObserved, domain: verification.FailureDomainCoverage},
+		{name: "reader without capability is unavailable", status: verification.StatusUnavailable, domain: verification.FailureDomainCollector, detail: "does not support product feature reads"},
+		{name: "unauthorized is safety domain", capability: true, readErr: ErrUnauthorized, status: verification.StatusUnavailable, domain: verification.FailureDomainSafety},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			base := &fakeReader{}
+			base.setResource(validResource(product))
+			var reader Reader = base
+			var capable *productFeatureFakeReader
+			if test.capability {
+				capable = &productFeatureFakeReader{fakeReader: base, productFeature: test.observed, productFeatureErr: test.readErr}
+				reader = capable
+			} else {
+				_, supports := reader.(ProductFeatureReader)
+				require.False(t, supports)
+			}
+			checker, err := NewChecker(reader, testAccount, testScope)
+			require.NoError(t, err)
+			observation, observedResult, err := checker.ObserveExistence(context.Background(), ExistenceCheck{
+				ResultID: "resource.exists:product", NodeID: productNode, Resource: product, Window: testWindow,
+			})
+			require.NoError(t, err)
+			require.Equal(t, verification.StatusPassed, observedResult.Status)
+
+			result, err := checker.CheckProductFeature(context.Background(), ProductFeatureCheck{
+				ResultID: "resource.product-feature:declared", Product: observation, Feature: feature,
+			})
+			require.NoError(t, err)
+			requireValidResult(t, result)
+			assert.Equal(t, CheckProductFeature, result.CheckID)
+			assert.Equal(t, test.status, result.Status)
+			assert.Equal(t, test.domain, result.FailureDomain)
+			if test.detail != "" {
+				assert.Contains(t, result.Detail, test.detail)
+			}
+			if test.capability {
+				requests := capable.productFeatureRequests()
+				require.Len(t, requests, 1)
+				assert.Equal(t, ProductFeatureRequest{Account: testAccount, Product: product, Feature: feature}, requests[0])
+			}
+		})
+	}
+
+	t.Run("provenance and typing guards stop before reader IO", func(t *testing.T) {
+		t.Parallel()
+		customer := ResourceRef{Type: ResourceCustomer, ID: "cus_test123"}
+		base := &fakeReader{}
+		base.setResource(validResource(product))
+		base.setResource(validResource(customer))
+		capable := &productFeatureFakeReader{fakeReader: base, productFeature: ProductFeatureObservation{Found: true}}
+		checker, err := NewChecker(capable, testAccount, testScope)
+		require.NoError(t, err)
+		customerObservation, customerResult, err := checker.ObserveExistence(context.Background(), ExistenceCheck{
+			ResultID: "resource.exists:customer", NodeID: "node.customer", Resource: customer, Window: testWindow,
+		})
+		require.NoError(t, err)
+		require.Equal(t, verification.StatusPassed, customerResult.Status)
+
+		otherReader := &fakeReader{}
+		otherReader.setResource(validResource(product))
+		otherObservation, otherResult, err := newTestChecker(t, otherReader).ObserveExistence(context.Background(), ExistenceCheck{
+			ResultID: "resource.exists:other-product", NodeID: productNode, Resource: product, Window: testWindow,
+		})
+		require.NoError(t, err)
+		require.Equal(t, verification.StatusPassed, otherResult.Status)
+
+		before := len(base.fetchRequests())
+		_, err = checker.CheckProductFeature(context.Background(), ProductFeatureCheck{
+			ResultID: "resource.product-feature:forged", Product: ObservedResource{}, Feature: feature,
+		})
+		assert.ErrorContains(t, err, "lacks a passed CLI observation")
+		_, err = checker.CheckProductFeature(context.Background(), ProductFeatureCheck{
+			ResultID: "resource.product-feature:other-checker", Product: otherObservation, Feature: feature,
+		})
+		assert.ErrorContains(t, err, "this checker")
+		_, err = checker.CheckProductFeature(context.Background(), ProductFeatureCheck{
+			ResultID: "resource.product-feature:customer", Product: customerObservation, Feature: feature,
+		})
+		assert.ErrorContains(t, err, "product observation")
+		assert.Len(t, base.fetchRequests(), before)
+		assert.Empty(t, capable.productFeatureRequests())
+	})
+}
+
+func TestWindowExemptTypesUseReferenceSemantics(t *testing.T) {
+	t.Parallel()
+	v2BillingTypes := []ResourceType{
+		ResourceV2PricingPlan,
+		ResourceV2RateCard,
+		ResourceV2MeteredItem,
+		ResourceV2LicensedItem,
+		ResourceV2LicenseFee,
+		ResourceV2PricingPlanSubscription,
+	}
+
+	assert.True(t, windowCheckable(ResourceProduct))
+	assert.False(t, windowCheckable(ResourceEntitlementFeature))
+	for _, resourceType := range v2BillingTypes {
+		assert.False(t, windowCheckable(resourceType), string(resourceType))
+	}
+
+	bestEffort := make(map[ResourceType]bool, len(v2BillingTypes))
+	for _, resourceType := range v2BillingTypes {
+		bestEffort[resourceType] = true
+	}
+	require.Len(t, bestEffort, 6)
+	for resourceType := range supportedResourceDescriptors {
+		assert.Equal(t, bestEffort[resourceType], BestEffortResourceType(resourceType), string(resourceType))
+	}
+	assert.False(t, BestEffortResourceType("future_resource"))
 }
 
 func evidenceValue(result verification.Result, key string) string {

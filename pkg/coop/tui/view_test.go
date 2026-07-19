@@ -418,6 +418,58 @@ func TestRenderReviewCardShowsAutomaticStripeResourceResults(t *testing.T) {
 	assertNotContainsPlain(t, card, "evidence")
 }
 
+func TestRenderDetailShowsDistinctStatusSymbols(t *testing.T) {
+	m := testModel()
+	results := verification.NewResultSet(
+		verification.Result{ID: "resource.exists:product", CheckID: "stripe.resource.exists", Source: verification.SourceCLI, Status: verification.StatusPassed, Detail: "product current state observed"},
+		verification.Result{ID: "resource.field.active:product", CheckID: "stripe.resource.field", Source: verification.SourceCLI, Status: verification.StatusFailed, FailureDomain: verification.FailureDomainIntegration, Detail: "field active does not match"},
+		verification.Result{ID: "resource.exists:meter", CheckID: "stripe.resource.exists", Source: verification.SourceCLI, Status: verification.StatusUnavailable, FailureDomain: verification.FailureDomainCollector, Detail: "the CLI cannot read this v2 resource"},
+		verification.Result{ID: "resource.linkage:checkout-product", CheckID: "stripe.resource.linkage", Source: verification.SourceCLI, Status: verification.StatusNotObserved, Detail: "linkage was not checked"},
+	)
+	m.session.Steps[0].Nodes[0].VerificationResults = &results
+	m.selectionCursor = 0
+	m.expanded = true
+	m.detailTab = 2 // Checks
+
+	detail := m.renderDetail()
+	// Collapse wrapping so assertions hold regardless of line breaks.
+	plain := strings.Join(strings.Fields(ansi.Strip(detail)), " ")
+
+	assert.Contains(t, plain, "✓ Stripe resource passed")
+	assert.Contains(t, plain, "✗ Stripe resource failed")
+	assert.Contains(t, plain, "! Stripe resource unavailable")
+	assert.Contains(t, plain, "· Stripe resource not observed")
+	// The unavailable line must surface its detail so the human can see which
+	// portion of the blueprint went unverified.
+	assert.Contains(t, plain, "cannot read this v2 resource")
+	assert.NotContains(t, plain, "advisory")
+}
+
+func TestRenderReviewCardShowsTruncationMarker(t *testing.T) {
+	m := testModel()
+	m.session.Steps[0].Nodes[0].State = coop.NodeReview
+	m.session.Steps[0].Nodes[1].State = coop.NodeDone
+	results := verification.NewResultSet(
+		verification.Result{ID: "resource.exists:product", CheckID: "stripe.resource.exists", Source: verification.SourceCLI, Status: verification.StatusPassed, Detail: "product current state observed"},
+		verification.Result{ID: "resource.coverage:truncated", CheckID: "stripe.resource.coverage", Source: verification.SourceCLI, Status: verification.StatusNotObserved, FailureDomain: verification.FailureDomainCoverage, Detail: "3 verification results were dropped by the per-node result cap; treat coverage as incomplete"},
+	)
+	m.session.Steps[0].Nodes[0].VerificationResults = &results
+	m.selectionCursor = 0
+
+	card := m.renderReviewCard()
+
+	assertContainsPlain(t, card, "Stripe resources:")
+	assertContainsPlain(t, card, "1 passed")
+	assertContainsPlain(t, card, "1 not observed")
+
+	m.expanded = true
+	m.detailTab = 2 // Checks
+	detail := m.renderDetail()
+	plain := strings.Join(strings.Fields(ansi.Strip(detail)), " ")
+
+	assert.Contains(t, plain, "treat coverage as incomplete")
+}
+
 func TestRenderReviewCardFallsBackToBlueprintConfirmation(t *testing.T) {
 	m := testModel()
 	m.session.Steps[0].Nodes[0].State = coop.NodeReview
