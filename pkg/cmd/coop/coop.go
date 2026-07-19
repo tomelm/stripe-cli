@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/stripe/stripe-cli/pkg/config"
+	"github.com/stripe/stripe-cli/pkg/stripe"
 )
 
 type Options struct {
@@ -14,6 +15,7 @@ type Options struct {
 	SandboxClaimURL          func() string
 	TestModeAPIKey           func() (string, error)
 	AccountID                func() (string, error)
+	StripeClient             stripe.RequestPerformer
 	AIAgentHelpAnnotationKey string
 }
 
@@ -50,7 +52,7 @@ The developer confirms each step before the agent moves on.`,
   1. stripe coop run <blueprint-id> — begin a session
   2. stripe coop agent start-work --session=<id> --step=<n> --note="..." — mark work active
   3. stripe coop agent report-check --session=<id> --step=<n> --check="..." --passed — add verification
-  4. stripe coop agent report-work --session=<id> --step=<n> --file=... --note="..." — report work complete
+  4. stripe coop agent report-work --session=<id> --step=<n> --file=... --note="..." [--stripe-resource <role>=<id> ...] — report work complete
   All commands output JSON with a "next" field suggesting the next command.
   Run "stripe coop recommend --query=..." to discover available blueprints.`,
 		},
@@ -64,7 +66,6 @@ The developer confirms each step before the agent moves on.`,
 	cc.cmd.AddCommand(newCoopStopCmd().cmd)
 	cc.cmd.AddCommand(newCoopRecommendCmd().cmd)
 	cc.cmd.AddCommand(newCoopDebugAgentCmd().cmd)
-	cc.cmd.AddCommand(newCoopVerificationCmd().cmd)
 
 	return cc
 }

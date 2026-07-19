@@ -2,7 +2,9 @@ package coop
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -38,6 +40,7 @@ type Blueprint struct {
 	Settings    []BlueprintSetting `json:"settings"`
 	Params      []BlueprintParam   `json:"params,omitempty"`
 	Steps       []BlueprintStep    `json:"steps"`
+	digest      string
 }
 
 // BlueprintSetting defines a configurable setting for a blueprint.
@@ -84,8 +87,19 @@ func LoadBlueprint(id string) (*Blueprint, error) {
 	if err := validateBlueprintReferences(&bp); err != nil {
 		return nil, fmt.Errorf("validating blueprint %q: %w", id, err)
 	}
+	digest := sha256.Sum256(data)
+	bp.digest = "sha256:" + hex.EncodeToString(digest[:])
 
 	return &bp, nil
+}
+
+// Digest returns the SHA-256 digest of the exact embedded canonical blueprint
+// bytes used to load this definition.
+func (bp *Blueprint) Digest() string {
+	if bp == nil {
+		return ""
+	}
+	return bp.digest
 }
 
 func validateBlueprintReferences(bp *Blueprint) error {
@@ -297,14 +311,15 @@ func NewSessionFromBlueprint(bp *Blueprint, sessionID string, settings, params m
 	}
 
 	return &Session{
-		SchemaVersion: CurrentSessionSchemaVersion,
-		ID:            sessionID,
-		Blueprint:     bp.ID,
-		Status:        SessionActive,
-		Settings:      settings,
-		Params:        params,
-		Steps:         steps,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		SchemaVersion:   CurrentSessionSchemaVersion,
+		ID:              sessionID,
+		Blueprint:       bp.ID,
+		BlueprintDigest: bp.Digest(),
+		Status:          SessionActive,
+		Settings:        settings,
+		Params:          params,
+		Steps:           steps,
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	}
 }

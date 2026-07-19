@@ -67,7 +67,7 @@ active ──→ completed    (all nodes done/skipped, or "stripe coop stop")
 |---------|---------|
 | `stripe coop run <blueprint>` | Create a session (outputs JSON with instructions) |
 | `stripe coop agent start-work --step <n>` | Mark a node as active |
-| `stripe coop agent report-work --step <n>` | Mark a node complete (→ review or → done if auto_confirm) |
+| `stripe coop agent report-work --step <n> [--stripe-resource <role>=<id> ...]` | Mark a node complete and automatically run advisory Stripe resource checks |
 | `stripe coop agent report-check --step <n>` | Add a verification check |
 | `stripe coop agent skip --step <n>` | Skip a node |
 | `stripe coop agent await-review --step <n>` | Block until developer confirms or requests changes |
@@ -75,6 +75,19 @@ active ──→ completed    (all nodes done/skipped, or "stripe coop stop")
 | `stripe coop agent start-followup` | Start an internal guided follow-up session selected from next actions |
 
 All agent commands output JSON with an `ok` field and a `next` field suggesting the next command. The `--step` flag name is retained for the CLI, but its value is the 1-based node number across the session.
+
+For supported blueprint stages, `agent start-work` also returns
+`stripe_resource_roles`. Each entry fixes the role's Stripe object type and
+whether the stage creates or reuses it. The agent reports only object IDs with
+repeatable `--stripe-resource role=id` flags. Identical role/ID pairs are
+deduplicated, multiple IDs under one role are supported, and references remain
+in the session for relevant later stages. `agent report-work` automatically
+performs bounded read-only checks with the configured test/sandbox key and
+returns concise `verification_results` in its normal JSON response. The same
+advisory results appear in the existing review screen. Missing IDs are
+`not_observed`; missing authentication or API support is `unavailable`; an
+observed contradiction is `failed`. None of these results gates progress or
+adds prompts, retries, or user actions.
 
 ## TUI Keybindings
 
@@ -123,7 +136,7 @@ $ stripe coop start one-time-payment --language=node
 #      stripe coop agent start-work --session=coop_abc123 --step=1 --note="Scanning project"
 #      stripe coop agent report-work --session=coop_abc123 --step=1 --note="Found Next.js app"
 #      stripe coop agent start-work --session=coop_abc123 --step=2 --note="Creating product"
-#      stripe coop agent report-work --session=coop_abc123 --step=2 --file=server.js --lines=5-20 --note="Created product"
+#      stripe coop agent report-work --session=coop_abc123 --step=2 --file=server.js --lines=5-20 --note="Created product" --stripe-resource product=prod_123
 #      stripe coop agent await-review --session=coop_abc123 --step=2   ← blocks until developer confirms
 # 6. Developer sees progress live, presses 'c' to confirm
 # 7. Agent continues to next step

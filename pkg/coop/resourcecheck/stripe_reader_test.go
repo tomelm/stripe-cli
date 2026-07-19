@@ -102,10 +102,11 @@ func TestStripeReaderCredentialModeAndAccountAreAuthoritative(t *testing.T) {
 		apiKey     string
 		observedID string
 		wantCalls  int
+		wantErr    error
 	}{
-		{name: "missing credential", observedID: readerAccountID, wantCalls: 0},
-		{name: "live credential in test context", apiKey: "sk_live_reader123", observedID: readerAccountID, wantCalls: 0},
-		{name: "wrong account", apiKey: readerAPIKey, observedID: "acct_other123", wantCalls: 1},
+		{name: "missing credential", observedID: readerAccountID, wantCalls: 0, wantErr: ErrUnavailable},
+		{name: "live credential in test context", apiKey: "sk_live_reader123", observedID: readerAccountID, wantCalls: 0, wantErr: ErrUnauthorized},
+		{name: "wrong account", apiKey: readerAPIKey, observedID: "acct_other123", wantCalls: 1, wantErr: ErrUnauthorized},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -120,7 +121,7 @@ func TestStripeReaderCredentialModeAndAccountAreAuthoritative(t *testing.T) {
 				Account:  AccountContext{Mode: ModeTest, AccountID: readerAccountID},
 				Resource: ResourceRef{Type: ResourcePaymentIntent, ID: "pi_reader123"},
 			})
-			assert.ErrorIs(t, err, ErrUnauthorized)
+			assert.ErrorIs(t, err, test.wantErr)
 			assert.Equal(t, test.wantCalls, calls)
 		})
 	}
@@ -203,6 +204,14 @@ func TestStripeReaderStringRepresentationsAreRedacted(t *testing.T) {
 	credential := NewStripeCredential("sk_test_super_secret")
 	assert.NotContains(t, fmt.Sprint(credential), "super_secret")
 	assert.Contains(t, fmt.Sprint(credential), "redacted")
+}
+
+func TestStripeCredentialModeSupportsTestAndSandboxKeyFamilies(t *testing.T) {
+	for _, key := range []string{"sk_test_reader123", "rk_test_reader123", "rkcs_test_reader123"} {
+		mode, ok := stripeCredentialMode(key)
+		assert.True(t, ok)
+		assert.Equal(t, ModeTest, mode)
+	}
 }
 
 func newLocalStripeReader(t *testing.T, serverURL, apiKey string, account AccountContext) *StripeReader {

@@ -93,6 +93,17 @@ func TestUpsertResultRejectsCredentialsInIdentifiers(t *testing.T) {
 	assert.Nil(t, set)
 }
 
+func TestSanitizerRedactsRestrictedSandboxKeys(t *testing.T) {
+	result := passedResult("sandbox-key-redaction", "credential rkcs_test_secret123 must not persist")
+	result.Evidence = []Evidence{{Key: "credential", Class: EvidenceSafe, Value: "rkcs_test_secret123"}}
+	var set *ResultSet
+	require.NoError(t, UpsertResult(&set, result, NewSanitizer()))
+	encoded, err := json.Marshal(set)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "rkcs_test_secret123")
+	assert.Contains(t, string(encoded), "[redacted]")
+}
+
 func TestAgentSummariesAreBoundedAndEvidenceFree(t *testing.T) {
 	t.Parallel()
 

@@ -29,6 +29,21 @@ func TestStartWorkTransitionsNodeAndReturnsTypedNextCommand(t *testing.T) {
 	assert.Equal(t, "Scanning", node.Activity)
 }
 
+func TestStartWorkReturnsDigestBoundStripeResourceRoles(t *testing.T) {
+	blueprint, err := coop.LoadBlueprint("one-time-payment")
+	require.NoError(t, err)
+	session := coop.NewSessionFromBlueprint(blueprint, "workflow_roles", nil, nil)
+	store, err := coop.NewStoreAt(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, store.Write(session))
+
+	response, err := NewService(store).StartWork(session.ID, 3, "Creating Checkout")
+	require.NoError(t, err)
+	require.Len(t, response.StripeResourceRoles, 2)
+	assert.Equal(t, coop.StripeResourceRole{Role: "checkout_session", Type: "checkout.session", Lifecycle: "created"}, response.StripeResourceRoles[0])
+	assert.Equal(t, coop.StripeResourceRole{Role: "product", Type: "product", Lifecycle: "reused"}, response.StripeResourceRoles[1])
+}
+
 func TestReportWorkContinuesStepBeforeReview(t *testing.T) {
 	store, session := workflowTestStore(t)
 	service := NewService(store)

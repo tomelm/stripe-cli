@@ -2,12 +2,14 @@
 package workflow
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
 	"github.com/stripe/stripe-cli/pkg/coop/helpers"
+	"github.com/stripe/stripe-cli/pkg/coop/resourcecheck"
 	"github.com/stripe/stripe-cli/pkg/coop/verification"
 )
 
@@ -21,11 +23,19 @@ type Store interface {
 }
 
 type Service struct {
-	store        Store
-	fetchSnippet func(path, method string, params interface{}, language string) (string, error)
-	now          func() time.Time
-	sleep        func(time.Duration)
-	awaitTimeout time.Duration
+	store                 Store
+	fetchSnippet          func(path, method string, params interface{}, language string) (string, error)
+	now                   func() time.Time
+	sleep                 func(time.Duration)
+	awaitTimeout          time.Duration
+	resourceVerifier      ResourceVerifier
+	verificationSanitizer verification.Sanitizer
+}
+
+// ResourceVerifier is the bounded, advisory provider surface used by
+// report-work. Implementations must keep credentials process-local.
+type ResourceVerifier interface {
+	Verify(context.Context, resourcecheck.ReportRequest) (verification.ResultSet, error)
 }
 
 type Option func(*Service)
@@ -53,13 +63,24 @@ func WithAwaitTimeout(timeout time.Duration) Option {
 	}
 }
 
+// WithResourceVerifier injects automatic Stripe verification and the exact
+// credential strings that must be removed before any result is persisted.
+func WithResourceVerifier(verifier ResourceVerifier, credentials ...string) Option {
+	credentialCopy := append([]string(nil), credentials...)
+	return func(s *Service) {
+		s.resourceVerifier = verifier
+		s.verificationSanitizer = verification.NewSanitizer(credentialCopy...)
+	}
+}
+
 func NewService(store Store, opts ...Option) *Service {
 	s := &Service{
-		store:        store,
-		fetchSnippet: coop.FetchSDKSnippet,
-		now:          time.Now,
-		sleep:        time.Sleep,
-		awaitTimeout: AwaitTimeout,
+		store:                 store,
+		fetchSnippet:          coop.FetchSDKSnippet,
+		now:                   time.Now,
+		sleep:                 time.Sleep,
+		awaitTimeout:          AwaitTimeout,
+		verificationSanitizer: verification.NewSanitizer(),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -68,10 +89,18 @@ func NewService(store Store, opts ...Option) *Service {
 }
 
 type ReportWorkInput struct {
-	File    string
-	Lines   string
-	Snippet string
-	Note    string
+	File            string
+	Lines           string
+	Snippet         string
+	Note            string
+	StripeResources []StripeResourceInput
+}
+
+// StripeResourceInput is the agent-supplied portion of a reference. Type and
+// lifecycle are resolved from the current stage overlay.
+type StripeResourceInput struct {
+	Role string
+	ID   string
 }
 
 func (s *Service) StartWork(sessionID string, nodeNumber int, note string) (coop.CommandResponse, error) {
@@ -99,6 +128,16 @@ func (s *Service) StartWork(sessionID string, nodeNumber int, note string) (coop
 		Message:   fmt.Sprintf("Started: %s", node.Title),
 		Next:      fmt.Sprintf("stripe coop agent report-work --session=%s --step=%d --file=<path> --note=\"<what you did>\"", session.ID, nodeNumber),
 	}
+	if step, _, _, err := session.StepByNodeNumber(nodeNumber); err == nil {
+		if declaration, ok := resourcecheck.StageForBlueprint(session.Blueprint, session.BlueprintDigest, step.Key+"."+node.Key); ok {
+			resp.StripeResourceRoles = make([]coop.StripeResourceRole, 0, len(declaration.Resources))
+			for _, resource := range declaration.Resources {
+				resp.StripeResourceRoles = append(resp.StripeResourceRoles, coop.StripeResourceRole{
+					Role: resource.Role, Type: string(resource.Type), Lifecycle: string(resource.Lifecycle),
+				})
+			}
+		}
+	}
 	if node.Type == coop.NodeAPIRequest && node.Request != nil {
 		resp.APIRequest = node.Request
 		if snippet, err := s.fetchSnippet(node.Request.Path, node.Request.Method, node.Request.Params, language(session)); err == nil {
@@ -109,13 +148,31 @@ func (s *Service) StartWork(sessionID string, nodeNumber int, note string) (coop
 }
 
 func (s *Service) ReportWork(sessionID string, nodeNumber int, input ReportWorkInput, autoConfirm bool) (coop.CommandResponse, error) {
+	return s.ReportWorkContext(context.Background(), sessionID, nodeNumber, input, autoConfirm)
+}
+
+// ReportWorkContext completes the node and then performs one advisory,
+// bounded resource pass for the node's digest-bound overlay.
+func (s *Service) ReportWorkContext(ctx context.Context, sessionID string, nodeNumber int, input ReportWorkInput, autoConfirm bool) (coop.CommandResponse, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var targetState coop.NodeState
+	var nodeID string
 	session, err := s.store.Update(sessionID, func(session *coop.Session) error {
 		if err := requireActiveSession(session); err != nil {
 			return err
 		}
 		node, err := session.NodeByNumber(nodeNumber)
 		if err != nil {
+			return err
+		}
+		step, _, _, err := session.StepByNodeNumber(nodeNumber)
+		if err != nil {
+			return err
+		}
+		nodeID = step.Key + "." + node.Key
+		if err := appendStripeResourceInputs(session, nodeNumber, nodeID, input.StripeResources); err != nil {
 			return err
 		}
 		targetState = coop.NodeReview
@@ -143,8 +200,101 @@ func (s *Service) ReportWork(sessionID string, nodeNumber int, input ReportWorkI
 	if err != nil {
 		return errorResponse(err, fmt.Sprintf("stripe coop agent start-work --session=%s --step=%d", sessionID, nodeNumber)), nil
 	}
+	if s.resourceVerifier != nil {
+		node, _ := session.NodeByNumber(nodeNumber)
+		resultSet, verifyErr := s.resourceVerifier.Verify(ctx, resourcecheck.ReportRequest{
+			SessionID:       session.ID,
+			BlueprintID:     session.Blueprint,
+			BlueprintDigest: session.BlueprintDigest,
+			NodeID:          nodeID,
+			NodeNumber:      nodeNumber,
+			StartedAt:       cloneTime(node.StartedAt),
+			CompletedAt:     cloneTime(node.CompletedAt),
+			References:      reportReferences(session.StripeResources),
+			Deadline:        s.now().Add(resourcecheck.DefaultReportDeadline),
+		})
+		if verifyErr != nil {
+			resultSet = verification.NewResultSet(verification.Result{
+				ID:            "resource.provider",
+				CheckID:       resourcecheck.CheckResourceExists,
+				Source:        verification.SourceCLI,
+				Status:        verification.StatusUnavailable,
+				FailureDomain: verification.FailureDomainCollector,
+				Detail:        "Stripe resource verification was unavailable",
+			})
+		}
+		if updated, updateErr := s.store.Update(sessionID, func(current *coop.Session) error {
+			currentNode, nodeErr := current.NodeByNumber(nodeNumber)
+			if nodeErr != nil {
+				return nodeErr
+			}
+			currentNode.VerificationResults = nil
+			for _, result := range resultSet.Results {
+				if err := verification.UpsertResult(&currentNode.VerificationResults, result, s.verificationSanitizer); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); updateErr == nil {
+			session = updated
+		}
+	}
 	node, _ := session.NodeByNumber(nodeNumber)
 	return s.reportWorkResponse(session, node, nodeNumber, targetState), nil
+}
+
+func appendStripeResourceInputs(session *coop.Session, nodeNumber int, nodeID string, inputs []StripeResourceInput) error {
+	if len(inputs) == 0 {
+		return nil
+	}
+	declaration, ok := resourcecheck.StageForBlueprint(session.Blueprint, session.BlueprintDigest, nodeID)
+	if !ok {
+		return fmt.Errorf("--stripe-resource is not supported for this blueprint stage or session digest")
+	}
+	roles := make(map[string]resourcecheck.ResourceType, len(declaration.Resources))
+	for _, resource := range declaration.Resources {
+		roles[resource.Role] = resource.Type
+	}
+	seen := make(map[string]struct{}, len(session.StripeResources)+len(inputs))
+	for _, existing := range session.StripeResources {
+		seen[existing.Role+"\x00"+existing.ID] = struct{}{}
+	}
+	for _, input := range inputs {
+		resourceType, exists := roles[input.Role]
+		if !exists {
+			return fmt.Errorf("Stripe resource role %q is not declared for this blueprint stage", input.Role)
+		}
+		if _, err := resourcecheck.NewResourceRef(resourceType, input.ID); err != nil {
+			return fmt.Errorf("Stripe resource ID for role %q is invalid", input.Role)
+		}
+		key := input.Role + "\x00" + input.ID
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		session.StripeResources = append(session.StripeResources, coop.StripeResourceReference{
+			Role: input.Role, Type: string(resourceType), ID: input.ID, ReportedNode: nodeNumber,
+		})
+	}
+	return nil
+}
+
+func reportReferences(references []coop.StripeResourceReference) []resourcecheck.ReportReference {
+	result := make([]resourcecheck.ReportReference, 0, len(references))
+	for _, reference := range references {
+		result = append(result, resourcecheck.ReportReference{
+			Role: reference.Role, Type: resourcecheck.ResourceType(reference.Type), ID: reference.ID, ReportedNode: reference.ReportedNode,
+		})
+	}
+	return result
+}
+
+func cloneTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 func (s *Service) ReportCheck(sessionID string, nodeNumber int, check string, passed bool) (coop.CommandResponse, error) {
@@ -255,6 +405,7 @@ func (s *Service) RequestChanges(sessionID string, nodeNumbers []int, note strin
 			node.RejectionNote = note
 			node.Implementation = nil
 			node.Verifications = nil
+			node.VerificationResults = nil
 		}
 		return nil
 	})

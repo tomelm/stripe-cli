@@ -3,12 +3,18 @@ package coopcmd
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
+	"github.com/stripe/stripe-cli/pkg/stripe"
 )
 
 func setupAgentCommandTest(t *testing.T) (*coop.Store, *coop.Session) {
@@ -90,6 +96,83 @@ func TestCoopAgentReportCheckCommand(t *testing.T) {
 	require.Len(t, node.Verifications, 1)
 	assert.Equal(t, "Manual checkout passed", node.Verifications[0].Check)
 	assert.True(t, node.Verifications[0].Passed)
+}
+
+func TestParseStripeResourceInputsSupportsMultipleRolesAndDeduplicatesPairs(t *testing.T) {
+	inputs, err := parseStripeResourceInputs([]string{
+		"product=prod_multi123",
+		"checkout_session=cs_multi123",
+		"product=prod_multi456",
+		"product=prod_multi123",
+	})
+	require.NoError(t, err)
+	require.Len(t, inputs, 3)
+	assert.Equal(t, "product", inputs[0].Role)
+	assert.Equal(t, "prod_multi123", inputs[0].ID)
+	assert.Equal(t, "checkout_session", inputs[1].Role)
+	assert.Equal(t, "product", inputs[2].Role)
+}
+
+func TestCoopAgentReportWorkAutomaticallyVerifiesMultipleResources(t *testing.T) {
+	previousOptions := options
+	t.Cleanup(func() { options = previousOptions })
+	configFolder := t.TempDir()
+	accountID := "acct_command123"
+	apiKey := "rkcs_test_command123"
+	created := time.Now().UTC().Truncate(time.Second)
+	productCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		require.Equal(t, "Bearer "+apiKey, request.Header.Get("Authorization"))
+		switch request.URL.Path {
+		case "/v1/account":
+			fmt.Fprintf(response, `{"id":%q,"object":"account"}`, accountID)
+		case "/v1/products/prod_command123", "/v1/products/prod_command456":
+			productCalls++
+			id := request.URL.Path[len("/v1/products/"):]
+			fmt.Fprintf(response, `{"id":%q,"object":"product","created":%d,"livemode":false,"active":true}`, id, created.Unix())
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+	baseURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	options = Options{
+		ConfigFolder:   func() string { return configFolder },
+		TestModeAPIKey: func() (string, error) { return apiKey, nil },
+		AccountID:      func() (string, error) { return accountID, nil },
+		StripeClient:   &stripe.Client{BaseURL: baseURL},
+	}
+
+	blueprint, err := coop.LoadBlueprint("one-time-payment")
+	require.NoError(t, err)
+	session := coop.NewSessionFromBlueprint(blueprint, "command_resources", nil, nil)
+	store, err := coop.NewStore(configFolder)
+	require.NoError(t, err)
+	require.NoError(t, store.Write(session))
+	_, err = store.Update(session.ID, func(current *coop.Session) error { return current.TransitionNode(2, coop.NodeActive) })
+	require.NoError(t, err)
+
+	command := newCoopAgentReportWorkCmd().cmd
+	command.SetArgs([]string{
+		"--session", session.ID, "--step", "2",
+		"--stripe-resource", "product=prod_command123",
+		"--stripe-resource", "product=prod_command456",
+		"--stripe-resource", "product=prod_command123",
+	})
+	output := captureStdout(t, func() { require.NoError(t, command.Execute()) })
+
+	var response coop.CommandResponse
+	require.NoError(t, json.Unmarshal([]byte(output), &response))
+	require.True(t, response.OK)
+	require.Len(t, response.VerificationResults, 4)
+	// Each unique product is fetched once for existence and once for its stable
+	// active-field expectation. The duplicate role/ID pair adds no calls.
+	assert.Equal(t, 4, productCalls)
+	loaded, err := store.Read(session.ID)
+	require.NoError(t, err)
+	require.Len(t, loaded.StripeResources, 2)
+	assert.NotContains(t, output, apiKey)
 }
 
 func TestCoopAgentNextActionReturnsStructuredErrorForHelperFailure(t *testing.T) {

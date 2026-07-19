@@ -3,13 +3,17 @@ package coopcmd
 import (
 	"errors"
 	"fmt"
+	"net/url"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
 	"github.com/stripe/stripe-cli/pkg/coop/followups"
 	"github.com/stripe/stripe-cli/pkg/coop/helpers"
+	"github.com/stripe/stripe-cli/pkg/coop/resourcecheck"
 	"github.com/stripe/stripe-cli/pkg/coop/workflow"
+	"github.com/stripe/stripe-cli/pkg/stripe"
 )
 
 type coopAgentCmd struct {
@@ -22,11 +26,12 @@ type coopAgentActionCmd struct {
 	step    int
 	note    string
 
-	file    string
-	lines   string
-	snippet string
-	check   string
-	passed  bool
+	file            string
+	lines           string
+	snippet         string
+	check           string
+	passed          bool
+	stripeResources []string
 
 	completed string
 	action    string
@@ -75,15 +80,20 @@ func newCoopAgentReportWorkCmd() *coopAgentActionCmd {
 		Use:   "report-work",
 		Short: "Report completed implementation work",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			service, err := newWorkflowService()
+			resources, err := parseStripeResourceInputs(c.stripeResources)
 			if err != nil {
 				return outputAgentError(err)
 			}
-			resp, err := service.ReportWork(c.session, c.step, workflow.ReportWorkInput{
-				File:    c.file,
-				Lines:   c.lines,
-				Snippet: c.snippet,
-				Note:    c.note,
+			service, err := newResourceWorkflowService()
+			if err != nil {
+				return outputAgentError(err)
+			}
+			resp, err := service.ReportWorkContext(cmd.Context(), c.session, c.step, workflow.ReportWorkInput{
+				File:            c.file,
+				Lines:           c.lines,
+				Snippet:         c.snippet,
+				Note:            c.note,
+				StripeResources: resources,
 			}, false)
 			return outputAgentResponse(resp, err)
 		},
@@ -93,6 +103,7 @@ func newCoopAgentReportWorkCmd() *coopAgentActionCmd {
 	c.cmd.Flags().StringVar(&c.lines, "lines", "", "Line range, e.g. 1-15")
 	c.cmd.Flags().StringVar(&c.snippet, "snippet", "", "Code snippet")
 	c.cmd.Flags().StringVar(&c.note, "note", "", "Implementation summary")
+	c.cmd.Flags().StringArrayVar(&c.stripeResources, "stripe-resource", nil, "Stripe resource as <role>=<id> (repeatable)")
 	return c
 }
 
@@ -198,6 +209,60 @@ func newWorkflowService() (*workflow.Service, error) {
 		return nil, fmt.Errorf("creating store: %w", err)
 	}
 	return workflow.NewService(store), nil
+}
+
+func newResourceWorkflowService() (*workflow.Service, error) {
+	store, err := coop.NewStore(coopConfigFolder())
+	if err != nil {
+		return nil, fmt.Errorf("creating store: %w", err)
+	}
+	apiKey := ""
+	if options.TestModeAPIKey != nil {
+		apiKey, _ = options.TestModeAPIKey()
+	}
+	accountID := ""
+	if options.AccountID != nil {
+		accountID, _ = options.AccountID()
+	}
+	account := resourcecheck.AccountContext{Mode: resourcecheck.ModeTest, AccountID: accountID}
+	client := options.StripeClient
+	if client == nil {
+		baseURL, parseErr := url.Parse(stripe.DefaultAPIBaseURL)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		client = &stripe.Client{BaseURL: baseURL}
+	}
+	var reader resourcecheck.Reader
+	stripeReader, readerErr := resourcecheck.NewStripeReader(resourcecheck.StripeReaderConfig{
+		Credential: resourcecheck.NewStripeCredential(apiKey),
+		Client:     client,
+		Account:    account,
+	})
+	if readerErr == nil {
+		reader = stripeReader
+	}
+	return workflow.NewService(store, workflow.WithResourceVerifier(resourcecheck.NewReportVerifier(reader, account), apiKey)), nil
+}
+
+func parseStripeResourceInputs(values []string) ([]workflow.StripeResourceInput, error) {
+	result := make([]workflow.StripeResourceInput, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		role, id, ok := strings.Cut(value, "=")
+		role = strings.TrimSpace(role)
+		id = strings.TrimSpace(id)
+		if !ok || role == "" || id == "" || strings.Contains(id, "=") {
+			return nil, fmt.Errorf("--stripe-resource %q must use <role>=<id>", value)
+		}
+		key := role + "\x00" + id
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, workflow.StripeResourceInput{Role: role, ID: id})
+	}
+	return result, nil
 }
 
 func runCoopNextAction(sessionID, completed string) error {

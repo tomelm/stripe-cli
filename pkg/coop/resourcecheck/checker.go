@@ -119,7 +119,7 @@ func (checker *Checker) ObserveExistence(ctx context.Context, check ExistenceChe
 		return ObservedResource{}, *result, nil
 	}
 	if !windowContains(window, resource.CreatedAt) {
-		result := notObservedResult(check.ResultID, CheckResourceExists, "resource creation time is outside the declared action window", evidence)
+		result := failedResult(check.ResultID, CheckResourceExists, "resource creation time contradicts the declared action window", evidence)
 		return ObservedResource{}, result, nil
 	}
 	resultValue := passedResult(check.ResultID, CheckResourceExists, "test-mode resource exists in the expected account and creation window", evidence)
@@ -293,10 +293,8 @@ func (checker *Checker) CheckLinkage(ctx context.Context, check LinkageCheck) (v
 	if err := checker.validateObservation(check.Target, check.ResultID); err != nil {
 		return verification.Result{}, err
 	}
-	if check.Source.resource == check.Target.resource ||
-		check.Source.nodeID == check.Target.nodeID ||
-		check.Source.resultID == check.Target.resultID {
-		return verification.Result{}, errors.New("resource linkage requires distinct nodes")
+	if check.Source.resource == check.Target.resource || check.Source.resultID == check.Target.resultID {
+		return verification.Result{}, errors.New("resource linkage requires distinct resource observations")
 	}
 	if err := validateFieldPath(check.Link); err != nil {
 		return verification.Result{}, err

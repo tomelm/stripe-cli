@@ -199,6 +199,8 @@ func TestNewSessionFromBlueprint(t *testing.T) {
 
 	assert.Equal(t, "coop_test123", session.ID)
 	assert.Equal(t, "one-time-payment", session.Blueprint)
+	assert.Equal(t, bp.Digest(), session.BlueprintDigest)
+	assert.Regexp(t, `^sha256:[a-f0-9]{64}$`, session.BlueprintDigest)
 	assert.Equal(t, SessionActive, session.Status)
 	assert.Equal(t, "node", session.Settings["language"])
 	assert.Equal(t, "Jenny Rosen", session.Params["account_name"])

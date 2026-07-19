@@ -262,7 +262,10 @@ func (reader *StripeReader) authorize(ctx context.Context, account AccountContex
 		return ErrUnauthorized
 	}
 	credentialMode, ok := stripeCredentialMode(reader.credential.apiKey)
-	if !ok || credentialMode != account.Mode {
+	if !ok {
+		return ErrUnavailable
+	}
+	if credentialMode != account.Mode {
 		return ErrUnauthorized
 	}
 	reader.accountMu.RLock()
@@ -290,7 +293,7 @@ func (reader *StripeReader) authorize(ctx context.Context, account AccountContex
 
 func stripeCredentialMode(apiKey string) (Mode, bool) {
 	switch {
-	case strings.HasPrefix(apiKey, "sk_test_"), strings.HasPrefix(apiKey, "rk_test_"):
+	case strings.HasPrefix(apiKey, "sk_test_"), strings.HasPrefix(apiKey, "rk_test_"), strings.HasPrefix(apiKey, "rkcs_test_"):
 		return ModeTest, true
 	case strings.HasPrefix(apiKey, "sk_live_"), strings.HasPrefix(apiKey, "rk_live_"):
 		return ModeLive, true
@@ -406,6 +409,7 @@ func (reader *StripeReader) normalize(payload map[string]any, resourceType Resou
 		addFields(payload, resource.Fields, "controller.fees.payer", "controller.losses.payments", "controller.requirement_collection", "controller.stripe_dashboard.type")
 	case ResourceBillingMeter:
 		addFields(payload, resource.Fields, "customer_mapping.event_payload_key", "customer_mapping.type", "default_aggregation.formula", "event_name", "status", "value_settings.event_payload_key")
+		addPresenceField(payload, resource.Fields, "event_name", "event_name_present")
 	case ResourceCheckoutSession:
 		addFields(payload, resource.Fields, "amount_total", "currency", "mode", "payment_status", "status")
 		addPresenceField(payload, resource.Fields, "url", "url_present")
@@ -427,6 +431,7 @@ func (reader *StripeReader) normalize(payload map[string]any, resourceType Resou
 		addLink(payload, resource.Links, "pricing.price_details.price", "price", ResourcePrice)
 	case ResourcePaymentIntent:
 		addFields(payload, resource.Fields, "amount", "application_fee_amount", "currency", "status")
+		addValuePresenceField(payload, resource.Fields, "application_fee_amount", "application_fee_amount_present")
 		addLink(payload, resource.Links, "customer", "customer", ResourceCustomer)
 		addLink(payload, resource.Links, "transfer_data.destination", "transfer_data.destination", ResourceAccount)
 	case ResourcePrice:
@@ -492,6 +497,11 @@ func addPresenceField(payload map[string]any, destination map[string]JSONScalar,
 		}
 	}
 	destination[targetPath] = NewBoolScalar(present)
+}
+
+func addValuePresenceField(payload map[string]any, destination map[string]JSONScalar, sourcePath, targetPath string) {
+	value, ok := rawAt(payload, sourcePath)
+	destination[targetPath] = NewBoolScalar(ok && value != nil)
 }
 
 func addMetadataFields(payload map[string]any, destination map[string]JSONScalar) {

@@ -12,7 +12,7 @@ import (
 type NodeState string
 
 const (
-	CurrentSessionSchemaVersion = 2
+	CurrentSessionSchemaVersion = 3
 )
 
 const (
@@ -113,22 +113,34 @@ type SessionStep struct {
 	Nodes []SessionNode `json:"nodes"`
 }
 
+// StripeResourceReference is a redacted, typed identity reported by the agent
+// for a role declared by the session's digest-bound verification overlay.
+// Credentials and API response bodies are never stored here.
+type StripeResourceReference struct {
+	Role         string `json:"role"`
+	Type         string `json:"type"`
+	ID           string `json:"id"`
+	ReportedNode int    `json:"reported_node"`
+}
+
 // Session is the shared state file between agent and TUI.
 type Session struct {
-	SchemaVersion   int               `json:"schema_version"`
-	ID              string            `json:"id"`
-	Blueprint       string            `json:"blueprint"`
-	Status          SessionStatus     `json:"status"`
-	Settings        map[string]string `json:"settings,omitempty"`
-	Params          map[string]string `json:"params,omitempty"`
-	Steps           []SessionStep     `json:"steps"`
-	UsedSandbox     bool              `json:"used_sandbox,omitempty"`
-	NextSteps       *NextStepsState   `json:"next_steps,omitempty"`
-	ParentSessionID string            `json:"parent_session_id,omitempty"`
-	ParentStepID    string            `json:"parent_step_id,omitempty"` // which next-step this session fulfills
-	CreatedAt       time.Time         `json:"created_at"`
-	UpdatedAt       time.Time         `json:"updated_at"`
-	Version         int               `json:"version"`
+	SchemaVersion   int                       `json:"schema_version"`
+	ID              string                    `json:"id"`
+	Blueprint       string                    `json:"blueprint"`
+	BlueprintDigest string                    `json:"blueprint_digest,omitempty"`
+	Status          SessionStatus             `json:"status"`
+	Settings        map[string]string         `json:"settings,omitempty"`
+	Params          map[string]string         `json:"params,omitempty"`
+	Steps           []SessionStep             `json:"steps"`
+	StripeResources []StripeResourceReference `json:"stripe_resources,omitempty"`
+	UsedSandbox     bool                      `json:"used_sandbox,omitempty"`
+	NextSteps       *NextStepsState           `json:"next_steps,omitempty"`
+	ParentSessionID string                    `json:"parent_session_id,omitempty"`
+	ParentStepID    string                    `json:"parent_step_id,omitempty"` // which next-step this session fulfills
+	CreatedAt       time.Time                 `json:"created_at"`
+	UpdatedAt       time.Time                 `json:"updated_at"`
+	Version         int                       `json:"version"`
 }
 
 // NextStepsState tracks post-completion suggestions and selection.
@@ -157,7 +169,17 @@ type CommandResponse struct {
 	AgentPrompt         string                 `json:"agent_prompt,omitempty"`
 	APIRequest          *APIRequest            `json:"api_request,omitempty"`
 	SDKExample          string                 `json:"sdk_example,omitempty"`
+	StripeResourceRoles []StripeResourceRole   `json:"stripe_resource_roles,omitempty"`
 	VerificationResults []verification.Summary `json:"verification_results,omitempty"`
 	Error               string                 `json:"error,omitempty"`
 	Hint                string                 `json:"hint,omitempty"`
+}
+
+// StripeResourceRole is the agent-facing projection of a digest-bound stage
+// overlay. The agent supplies an ID for a role; it cannot choose the type or
+// lifecycle semantics.
+type StripeResourceRole struct {
+	Role      string `json:"role"`
+	Type      string `json:"type"`
+	Lifecycle string `json:"lifecycle"`
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
+	"github.com/stripe/stripe-cli/pkg/coop/verification"
 )
 
 func assertContainsPlain(t *testing.T, s, substr string) {
@@ -394,6 +395,27 @@ func TestRenderReviewCardEvidence(t *testing.T) {
 	assertNotContainsPlain(t, card, "declined cards")
 	plain := ansi.Strip(card)
 	assert.Less(t, strings.Index(plain, "Confirmation steps"), strings.Index(plain, "Agent changed:"))
+}
+
+func TestRenderReviewCardShowsAutomaticStripeResourceResults(t *testing.T) {
+	m := testModel()
+	m.session.Steps[0].Nodes[0].State = coop.NodeReview
+	m.session.Steps[0].Nodes[1].State = coop.NodeDone
+	results := verification.NewResultSet(
+		verification.Result{ID: "resource.exists:product", CheckID: "stripe.resource.exists", Source: verification.SourceCLI, Status: verification.StatusPassed, Detail: "product current state observed"},
+		verification.Result{ID: "resource.linkage:checkout-product", CheckID: "stripe.resource.linkage", Source: verification.SourceCLI, Status: verification.StatusFailed, FailureDomain: verification.FailureDomainIntegration, Detail: "resource link does not match"},
+		verification.Result{ID: "resource.exists:price", CheckID: "stripe.resource.exists", Source: verification.SourceCLI, Status: verification.StatusUnavailable, FailureDomain: verification.FailureDomainCollector, Detail: "Stripe authentication is unavailable"},
+	)
+	m.session.Steps[0].Nodes[0].VerificationResults = &results
+	m.selectionCursor = 0
+
+	card := m.renderReviewCard()
+	assertContainsPlain(t, card, "Stripe resources:")
+	assertContainsPlain(t, card, "1 passed")
+	assertContainsPlain(t, card, "1 failed")
+	assertContainsPlain(t, card, "1 unavailable")
+	assertContainsPlain(t, card, "advisory")
+	assertNotContainsPlain(t, card, "evidence")
 }
 
 func TestRenderReviewCardFallsBackToBlueprintConfirmation(t *testing.T) {

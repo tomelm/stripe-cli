@@ -208,7 +208,7 @@ Agent lifecycle commands (use this session id: %s):
 1. stripe coop agent start-work --session=%s --step=<n> --note="<what you're about to do>"
 2. Write the code and run it to verify it works
 3. stripe coop agent report-check --session=%s --step=<n> --check="<what you verified>" --passed
-4. stripe coop agent report-work --session=%s --step=<n> --file=<main file> --lines=<range> --snippet="<key code>" --note="<summary>"
+4. stripe coop agent report-work --session=%s --step=<n> --file=<main file> --lines=<range> --snippet="<key code>" --note="<summary>" [--stripe-resource <role>=<id> ...]
 5. Follow the JSON response's next command. Most nodes continue to the next node in the same step.
 6. Only run stripe coop agent await-review --session=%s --step=<n> when the response says the step is ready for review. Await blocks until the human confirms the step or requests changes.
 7. If confirmed: move to next node. If rejected: redo the affected node (check the message for feedback).
@@ -224,6 +224,7 @@ Important:
 - The human is watching your progress live in a terminal UI.
 - Write working code, not stubs. Run it. Verify it actually works.
 - Report what you did concretely (file paths, line numbers, test results).
+- When start-work returns stripe_resource_roles, add one --stripe-resource <role>=<id> flag for each relevant Stripe object ID your application created or retained. Repeat the flag for multiple IDs under one role. The CLI owns the role's resource type and verification expectations; never put a type, API key, or response body in the flag. Previously reported references are retained automatically.
 - If a node doesn't apply to the user's setup, skip it: stripe coop agent skip --session=%s --step=<n> --note="<reason>"
 - Always install the LATEST version of the Stripe SDK for the language in use. Do not pin to old versions.
   Examples: "npm install stripe@latest", "pip install --upgrade stripe", "gem install stripe"

@@ -176,7 +176,7 @@ func TestObserveExistenceCreationWindowAndReadOutcomes(t *testing.T) {
 		observation bool
 	}{
 		{name: "exists in window", resource: resourcePointer(validResource(testPayment)), window: testWindow, status: verification.StatusPassed, observation: true},
-		{name: "outside creation window", resource: resourcePointer(validResource(testPayment)), window: CreationWindow{Start: testCreated.Add(time.Second), End: testCreated.Add(time.Minute)}, status: verification.StatusNotObserved, domain: verification.FailureDomainCoverage},
+		{name: "outside creation window", resource: resourcePointer(validResource(testPayment)), window: CreationWindow{Start: testCreated.Add(time.Second), End: testCreated.Add(time.Minute)}, status: verification.StatusFailed, domain: verification.FailureDomainIntegration},
 		{name: "unproven not found", err: ErrNotFound, window: testWindow, status: verification.StatusNotObserved, domain: verification.FailureDomainCoverage},
 		{name: "malformed response", resource: resourcePointer(Resource{Type: testPayment.Type, ID: testPayment.ID, CreatedAt: testCreated, Mode: ModeTest}), window: testWindow, status: verification.StatusUnavailable, domain: verification.FailureDomainCollector},
 		{name: "placeholder response account", resource: resourcePointer(placeholderAccount), window: testWindow, status: verification.StatusUnavailable, domain: verification.FailureDomainCollector},

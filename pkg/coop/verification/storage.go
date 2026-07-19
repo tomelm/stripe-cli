@@ -20,7 +20,7 @@ const (
 var (
 	ErrCredentialExposure = errors.New("verification result contains a credential in an identifier")
 	credentialPatterns    = []*regexp.Regexp{
-		regexp.MustCompile(`\b(?:sk|rk|pk)_(?:test|live)_[A-Za-z0-9_]+\b`),
+		regexp.MustCompile(`\b(?:sk|rk|rkcs|pk)_(?:test|live)_[A-Za-z0-9_]+\b`),
 		regexp.MustCompile(`\bwhsec_[A-Za-z0-9_]+\b`),
 		regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+`),
 	}

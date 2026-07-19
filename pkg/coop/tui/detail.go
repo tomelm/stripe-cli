@@ -253,6 +253,12 @@ func (m Model) writeStepChecksDetail(md *strings.Builder, ch *coop.SessionStep) 
 			md.WriteString("- " + prefix + " " + node.Title + ": " + verification.Check + "\n")
 			wrote = true
 		}
+		if node.VerificationResults != nil {
+			for _, result := range node.VerificationResults.Results {
+				md.WriteString("- " + resourceVerificationSymbol(string(result.Status)) + " " + node.Title + ": " + resourceVerificationLabel(string(result.Status), result.Detail) + "\n")
+				wrote = true
+			}
+		}
 		if command := reviewCommandForNode(&node); command != "" {
 			md.WriteString("- `" + strings.ReplaceAll(command, "`", "'") + "`\n")
 			wrote = true
@@ -411,7 +417,7 @@ func implementationFileLabel(imp *coop.Implementation) string {
 }
 
 func (m Model) writeVerificationDetail(md *strings.Builder, node *coop.SessionNode) {
-	if len(node.Verifications) == 0 {
+	if len(node.Verifications) == 0 && node.VerificationResults == nil {
 		return
 	}
 	for _, v := range node.Verifications {
@@ -421,7 +427,31 @@ func (m Model) writeVerificationDetail(md *strings.Builder, node *coop.SessionNo
 			md.WriteString("- ✗ " + v.Check + "\n")
 		}
 	}
+	if node.VerificationResults != nil {
+		for _, result := range node.VerificationResults.Results {
+			md.WriteString("- " + resourceVerificationSymbol(string(result.Status)) + " " + resourceVerificationLabel(string(result.Status), result.Detail) + "\n")
+		}
+	}
 	md.WriteString("\n")
+}
+
+func resourceVerificationSymbol(status string) string {
+	switch status {
+	case "passed":
+		return "✓"
+	case "failed":
+		return "✗"
+	default:
+		return "·"
+	}
+}
+
+func resourceVerificationLabel(status, detail string) string {
+	label := "Stripe resource " + strings.ReplaceAll(status, "_", " ")
+	if detail != "" {
+		label += ": " + detail
+	}
+	return label + " (advisory)"
 }
 
 func (m Model) renderDetailSuffix(node *coop.SessionNode, width int) string {

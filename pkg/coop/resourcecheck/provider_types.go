@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"sort"
 	"time"
 
 	"github.com/stripe/stripe-cli/pkg/coop/verification"
@@ -507,14 +506,4 @@ func declarationResultCount(declaration BlueprintDeclaration) int {
 		}
 	}
 	return count
-}
-
-// FrozenBlueprintIDs returns the six supported blueprint IDs in stable order.
-func FrozenBlueprintIDs() []string {
-	ids := make([]string, 0, len(frozenBlueprintDeclarations))
-	for id := range frozenBlueprintDeclarations {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	return ids
 }

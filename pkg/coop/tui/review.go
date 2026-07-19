@@ -103,6 +103,9 @@ func (m Model) renderReviewCardWithMaxHeight(maxHeight int) string {
 	if verified := m.reviewVerificationLabel(target.nodeNumbers); verified != "" {
 		lines = append(lines, m.theme.MutedStyle.Render("Agent verified: ")+verified)
 	}
+	if resources := m.reviewResourceVerificationLabel(target.nodeNumbers); resources != "" {
+		lines = append(lines, m.theme.MutedStyle.Render("Stripe resources: ")+resources)
+	}
 	if command := m.reviewCommandLabel(target.nodeNumbers); command != "" {
 		lines = append(lines, m.theme.MutedStyle.Render("Run: ")+command)
 	}
@@ -250,6 +253,31 @@ func (m Model) reviewVerificationLabel(nodeNumbers []int) string {
 		return fmt.Sprintf("%d check(s) passed", passed)
 	}
 	return fmt.Sprintf("%d/%d check(s) passed", passed, total)
+}
+
+func (m Model) reviewResourceVerificationLabel(nodeNumbers []int) string {
+	counts := map[string]int{}
+	for _, nodeNumber := range nodeNumbers {
+		node, err := m.session.NodeByNumber(nodeNumber)
+		if err != nil || node.VerificationResults == nil {
+			continue
+		}
+		for _, result := range node.VerificationResults.Results {
+			counts[string(result.Status)]++
+		}
+	}
+	var labels []string
+	for _, status := range []string{"passed", "failed", "not_observed", "unavailable"} {
+		if counts[status] == 0 {
+			continue
+		}
+		label := strings.ReplaceAll(status, "_", " ")
+		labels = append(labels, fmt.Sprintf("%d %s", counts[status], label))
+	}
+	if len(labels) == 0 {
+		return ""
+	}
+	return strings.Join(labels, " · ") + " (advisory)"
 }
 
 func (m Model) reviewNodeTitleLabel(nodeNumbers []int) string {
