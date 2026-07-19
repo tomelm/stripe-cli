@@ -51,7 +51,6 @@ const (
 	ResourceInvoiceItem        ResourceType = "invoice_item"
 	ResourceEntitlementFeature ResourceType = "entitlements.feature"
 	ResourcePaymentIntent      ResourceType = "payment_intent"
-	ResourcePrice              ResourceType = "price"
 	ResourceProduct            ResourceType = "product"
 	ResourceSubscription       ResourceType = "subscription"
 
@@ -152,18 +151,12 @@ type FetchRequest struct {
 	Resource ResourceRef
 }
 
-// Fetcher retrieves normalized resource metadata using read-only Stripe API
-// semantics. Implementations retain ownership of credentials and transport
-// and must honor context cancellation and deadlines.
-type Fetcher interface {
-	Fetch(context.Context, FetchRequest) (Resource, error)
-}
-
-// Reader is the injected read-only Stripe metadata boundary. Narrow optional
-// capabilities (entitlements, product features) are discovered by interface
-// assertion on the same value.
+// Reader is the injected read-only Stripe metadata boundary. Implementations
+// retain ownership of credentials and transport and must honor context
+// cancellation and deadlines. Narrow optional capabilities (entitlements,
+// product features) are discovered by interface assertion on the same value.
 type Reader interface {
-	Fetcher
+	Fetch(context.Context, FetchRequest) (Resource, error)
 }
 
 // ExistenceCheck verifies an exact resource and its creation time. A resource
@@ -270,26 +263,6 @@ type ObservedResource struct {
 	scope     VerificationScope
 	nodeID    string
 	owner     *provenanceKey
-}
-
-// Resource returns the previously observed resource identity.
-func (observation ObservedResource) Resource() ResourceRef {
-	return observation.resource
-}
-
-// ResultID returns the passed CLI result that established this observation.
-func (observation ObservedResource) ResultID() verification.ResultID {
-	return observation.resultID
-}
-
-// CreatedAt returns the normalized creation time observed with the resource.
-func (observation ObservedResource) CreatedAt() time.Time {
-	return observation.createdAt
-}
-
-// NodeID returns the blueprint node that produced the passed observation.
-func (observation ObservedResource) NodeID() string {
-	return observation.nodeID
 }
 
 // String deliberately omits resource identity and provenance details.

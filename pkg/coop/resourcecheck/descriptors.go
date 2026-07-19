@@ -15,7 +15,6 @@ var supportedResourceDescriptors = map[ResourceType]resourceDescriptor{
 	ResourceInvoiceItem:        {idPrefixes: []string{"ii_"}},
 	ResourceEntitlementFeature: {idPrefixes: []string{"feat_"}},
 	ResourcePaymentIntent:      {idPrefixes: []string{"pi_"}},
-	ResourcePrice:              {idPrefixes: []string{"price_"}},
 	ResourceProduct:            {idPrefixes: []string{"prod_"}},
 	ResourceSubscription:       {idPrefixes: []string{"sub_"}},
 

@@ -168,7 +168,7 @@ func TestStableCheckIDsAndTrustedTypes(t *testing.T) {
 func TestObserveExistenceCreationWindowAndReadOutcomes(t *testing.T) {
 	t.Parallel()
 	placeholderAccount := validResource(testPayment)
-	placeholderAccount.AccountID = "acct_none123"
+	placeholderAccount.AccountID = "acct_none"
 
 	tests := []struct {
 		name        string
@@ -215,12 +215,12 @@ func TestObserveExistenceCreationWindowAndReadOutcomes(t *testing.T) {
 			assert.Equal(t, test.status, result.Status)
 			assert.Equal(t, test.domain, result.FailureDomain)
 			assert.Equal(t, test.transient, result.Transient)
-			assert.Equal(t, test.observation, observation.ResultID() != "")
+			assert.Equal(t, test.observation, observation.resultID != "")
 			if test.observation {
-				assert.Equal(t, testPayment, observation.Resource())
-				assert.Equal(t, testCreated, observation.CreatedAt())
-				assert.Equal(t, result.ID, observation.ResultID())
-				assert.Equal(t, testPaymentNode, observation.NodeID())
+				assert.Equal(t, testPayment, observation.resource)
+				assert.Equal(t, testCreated, observation.createdAt)
+				assert.Equal(t, result.ID, observation.resultID)
+				assert.Equal(t, testPaymentNode, observation.nodeID)
 				assert.Equal(t, testScope.BlueprintDigest, evidenceValue(result, "blueprint_digest"))
 				assert.Equal(t, testPaymentNode, evidenceValue(result, "node_id"))
 			}
@@ -239,10 +239,7 @@ func TestSupportedDescriptorsAndPlaceholdersStopBeforeIO(t *testing.T) {
 		{Type: ResourcePaymentIntent, ID: "cus_wrong123"},
 		{Type: ResourcePaymentIntent, ID: "pi_example"},
 		{Type: ResourcePaymentIntent, ID: "pi_pending_123"},
-		{Type: ResourcePaymentIntent, ID: "pi_placeholder123"},
-		{Type: ResourcePaymentIntent, ID: "pi_placeholderabcdefghijklmnopqrstuvwxyz0123456789"},
 		{Type: ResourcePaymentIntent, ID: "pi_nil"},
-		{Type: ResourcePaymentIntent, ID: "pi_nullvalue123"},
 		{Type: ResourcePaymentIntent, ID: "pi_none_at_all"},
 		{Type: ResourcePaymentIntent, ID: "pi_"},
 		{Type: "future_resource", ID: "future_123"},
@@ -254,9 +251,26 @@ func TestSupportedDescriptorsAndPlaceholdersStopBeforeIO(t *testing.T) {
 	}
 	_, err := NewChecker(reader, AccountContext{Mode: ModeTest, AccountID: "acct_example"}, testScope)
 	assert.ErrorContains(t, err, "placeholder")
-	_, err = NewChecker(reader, AccountContext{Mode: ModeTest, AccountID: "acct_none123"}, testScope)
+	_, err = NewChecker(reader, AccountContext{Mode: ModeTest, AccountID: "acct_none"}, testScope)
 	assert.ErrorContains(t, err, "placeholder")
 	assert.Empty(t, reader.fetchRequests())
+}
+
+// TestHasPlaceholderIDRejectsExactSegmentsOnly pins hasPlaceholderID to exact
+// '_'/'-' delimited segment matches. A suffix that merely starts with a
+// placeholder token is a legitimate Stripe ID (real suffixes are random and
+// can coincidentally begin with a token like "nil" or "null"), so only an
+// exact segment match is rejected.
+func TestHasPlaceholderIDRejectsExactSegmentsOnly(t *testing.T) {
+	t.Parallel()
+	rejected := []string{"example", "nil", "none", "null", "pending", "placeholder", "sample", "todo", "pi_nil", "acct_none_at_all", "test-placeholder-here"}
+	for _, suffix := range rejected {
+		assert.True(t, hasPlaceholderID(suffix), suffix)
+	}
+	accepted := []string{"placeholder123", "nullvalue123", "none123", "nilsomething", "abcnilxyz"}
+	for _, suffix := range accepted {
+		assert.False(t, hasPlaceholderID(suffix), suffix)
+	}
 }
 
 func TestEveryReadHasPackageDeadlineAndCallerDeadlineIsBounded(t *testing.T) {
@@ -356,8 +370,8 @@ func TestLinkageRequiresPriorPassedCLIObservation(t *testing.T) {
 	require.NoError(t, err)
 	requireValidResult(t, result)
 	assert.Equal(t, verification.StatusPassed, result.Status)
-	assert.Equal(t, testPaymentNode, target.NodeID())
-	assert.Equal(t, testInvoiceNode, sourceObservation.NodeID())
+	assert.Equal(t, testPaymentNode, target.nodeID)
+	assert.Equal(t, testInvoiceNode, sourceObservation.nodeID)
 	assert.Equal(t, string(sourceResult.ID), evidenceValue(result, "source_observation_result"))
 	assert.Equal(t, string(observedResult.ID), evidenceValue(result, "target_observation_result"))
 	_, err = target.MarshalJSON()

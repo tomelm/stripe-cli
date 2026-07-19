@@ -110,20 +110,68 @@ func TestReportVerifierNewReferenceUsesNodeWindowAndContradictionsFail(t *testin
 	assert.Contains(t, set.Results[0].Detail, "action window")
 }
 
-func TestReportVerifierMissingIDAuthAndDigestAreAdvisory(t *testing.T) {
+// TestReportVerifierUnusableWindowStillChecksExistence covers a created role
+// reported at its own node whose action window is too wide to check creation
+// time (here, StartedAt is 25 hours before CompletedAt, past
+// MaxCreationWindow). The window check degrades to a reference check rather
+// than being skipped: a resource that exists still passes existence (with a
+// detail noting the window gap), and a resource that does not exist still
+// surfaces as a blocking not_observed existence result.
+func TestReportVerifierUnusableWindowStillChecksExistence(t *testing.T) {
+	started := time.Now().UTC().Add(-25 * time.Hour)
+	completed := time.Now().UTC()
+
+	ref := ResourceRef{Type: ResourceProduct, ID: "prod_windowgap123"}
+	resource := validReportResource(ref, started.Add(10*time.Minute))
+	resource.Fields["active"] = reportScalar("true")
+	reader := &fakeReader{resources: map[string]Resource{resourceKey(ref): resource}}
+	set, err := NewReportVerifier(reader, testAccount).Verify(context.Background(), ReportRequest{
+		SessionID: "session-window-gap", BlueprintID: "one-time-payment", BlueprintDigest: frozenBlueprintDigests["one-time-payment"],
+		NodeID: "setup-chapter.create-product", NodeNumber: 2, StartedAt: &started, CompletedAt: &completed,
+		References: []ReportReference{{Role: "product", Type: ref.Type, ID: ref.ID, ReportedNode: 2}},
+		Deadline:   time.Now().Add(time.Second),
+	})
+	require.NoError(t, err)
+	require.NoError(t, set.Validate())
+	exists := findReportResult(t, set, roleResultID("resource.exists", "product", ref.ID))
+	assert.Equal(t, verification.StatusPassed, exists.Status)
+	assert.Contains(t, exists.Detail, "action window was unavailable or too broad")
+
+	missingRef := ResourceRef{Type: ResourceProduct, ID: "prod_windowgapmissing123"}
+	missingReader := &fakeReader{resources: map[string]Resource{}}
+	missingSet, err := NewReportVerifier(missingReader, testAccount).Verify(context.Background(), ReportRequest{
+		SessionID: "session-window-gap", BlueprintID: "one-time-payment", BlueprintDigest: frozenBlueprintDigests["one-time-payment"],
+		NodeID: "setup-chapter.create-product", NodeNumber: 2, StartedAt: &started, CompletedAt: &completed,
+		References: []ReportReference{{Role: "product", Type: missingRef.Type, ID: missingRef.ID, ReportedNode: 2}},
+		Deadline:   time.Now().Add(time.Second),
+	})
+	require.NoError(t, err)
+	require.NoError(t, missingSet.Validate())
+	missingExists := findReportResult(t, missingSet, roleResultID("resource.exists", "product", missingRef.ID))
+	assert.Equal(t, verification.StatusNotObserved, missingExists.Status)
+	assert.Equal(t, CheckResourceExists, missingExists.CheckID)
+	assert.True(t, DeterministicContradiction(missingExists), "a not_observed existence result must still block upstream")
+}
+
+func TestReportVerifierMissingIDBlocksWhileAuthAndDigestGapsFailOpen(t *testing.T) {
 	started := time.Now().UTC().Add(-time.Minute)
 	completed := started.Add(20 * time.Second)
 	request := ReportRequest{
-		SessionID: "session-advisory", BlueprintID: "one-time-payment", BlueprintDigest: frozenBlueprintDigests["one-time-payment"],
+		SessionID: "session-gaps", BlueprintID: "one-time-payment", BlueprintDigest: frozenBlueprintDigests["one-time-payment"],
 		NodeID: "setup-chapter.create-product", NodeNumber: 2, StartedAt: &started, CompletedAt: &completed,
 		Deadline: time.Now().Add(time.Second),
 	}
 
+	// A missing reported ID is a not_observed existence result: per
+	// DeterministicContradiction this blocks the workflow gate, it is not
+	// advisory.
 	set, err := NewReportVerifier(&fakeReader{}, testAccount).Verify(context.Background(), request)
 	require.NoError(t, err)
 	require.Len(t, set.Results, 1)
 	assert.Equal(t, verification.StatusNotObserved, set.Results[0].Status)
 
+	// A missing reader is a collection gap, not a contradiction, so it fails
+	// open (unavailable) instead of blocking.
 	set, err = NewReportVerifier(nil, testAccount).Verify(context.Background(), request)
 	require.NoError(t, err)
 	assert.Equal(t, verification.StatusUnavailable, set.Results[0].Status)

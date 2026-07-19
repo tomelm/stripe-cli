@@ -71,7 +71,7 @@ type StripeReader struct {
 
 // NewStripeReader constructs a reader without consulting environment or
 // global profile state. Missing or wrong-mode credentials are retained as an
-// unavailable read condition so verification remains advisory.
+// unavailable read condition rather than a construction failure.
 func NewStripeReader(config StripeReaderConfig) (*StripeReader, error) {
 	if config.Client == nil {
 		return nil, errors.New("Stripe request client is required")
@@ -392,7 +392,6 @@ var stripeResourceDescriptors = map[ResourceType]stripeResourceDescriptor{
 	// Features resolve through fetchFeatureByList; no direct retrieve path.
 	ResourceEntitlementFeature: {object: "entitlements.feature"},
 	ResourcePaymentIntent:      {object: "payment_intent", retrievePath: "/v1/payment_intents/{id}"},
-	ResourcePrice:              {object: "price", retrievePath: "/v1/prices/{id}"},
 	ResourceProduct:            {object: "product", retrievePath: "/v1/products/{id}"},
 	ResourceSubscription:       {object: "subscription", retrievePath: "/v1/subscriptions/{id}"},
 
@@ -447,24 +446,18 @@ func (reader *StripeReader) normalize(payload map[string]any, resourceType Resou
 
 	switch resourceType {
 	case ResourceAccount:
-		addFields(payload, resource.Fields, "controller.fees.payer", "controller.losses.payments", "controller.requirement_collection", "controller.stripe_dashboard.type")
+		addFields(payload, resource.Fields, "controller.fees.payer", "controller.losses.payments", "controller.requirement_collection")
 	case ResourceBillingMeter:
-		addFields(payload, resource.Fields, "customer_mapping.event_payload_key", "customer_mapping.type", "default_aggregation.formula", "event_name", "status", "value_settings.event_payload_key")
+		addFields(payload, resource.Fields, "default_aggregation.formula")
 		addPresenceField(payload, resource.Fields, "event_name", "event_name_present")
 	case ResourceCheckoutSession:
 		addFields(payload, resource.Fields, "amount_total", "currency", "mode", "payment_status", "status")
-		addPresenceField(payload, resource.Fields, "url", "url_present")
 		addLink(payload, resource.Links, "customer", "customer", ResourceCustomer)
-		addLink(payload, resource.Links, "invoice", "invoice", ResourceInvoice)
 		addLink(payload, resource.Links, "payment_intent", "payment_intent", ResourcePaymentIntent)
-		addLink(payload, resource.Links, "subscription", "subscription", ResourceSubscription)
-	case ResourceCustomer:
-		addFields(payload, resource.Fields, "description")
 	case ResourceEntitlementFeature:
 		addFields(payload, resource.Fields, "active")
-		addPresenceField(payload, resource.Fields, "lookup_key", "lookup_key_present")
 	case ResourceInvoice:
-		addFields(payload, resource.Fields, "amount_due", "collection_method", "currency", "days_until_due", "status", "parent.type")
+		addFields(payload, resource.Fields, "collection_method", "days_until_due", "status")
 		addPresenceField(payload, resource.Fields, "hosted_invoice_url", "hosted_invoice_url_present")
 		addLink(payload, resource.Links, "customer", "customer", ResourceCustomer)
 		// Current API shape: subscription linkage lives under the typed invoice
@@ -480,36 +473,22 @@ func (reader *StripeReader) normalize(payload map[string]any, resourceType Resou
 		addFields(payload, resource.Fields, "amount", "currency")
 		addLink(payload, resource.Links, "customer", "customer", ResourceCustomer)
 		addLink(payload, resource.Links, "invoice", "invoice", ResourceInvoice)
-		addLink(payload, resource.Links, "pricing.price_details.price", "price", ResourcePrice)
 	case ResourcePaymentIntent:
 		addFields(payload, resource.Fields, "amount", "application_fee_amount", "currency", "status")
-		addValuePresenceField(payload, resource.Fields, "application_fee_amount", "application_fee_amount_present")
-		addLink(payload, resource.Links, "customer", "customer", ResourceCustomer)
 		addLink(payload, resource.Links, "transfer_data.destination", "transfer_data.destination", ResourceAccount)
-	case ResourcePrice:
-		addFields(payload, resource.Fields, "currency", "recurring.interval", "recurring.interval_count", "type", "unit_amount")
-		addLink(payload, resource.Links, "product", "product", ResourceProduct)
 	case ResourceProduct:
 		addFields(payload, resource.Fields, "active")
-		addLink(payload, resource.Links, "default_price", "default_price", ResourcePrice)
 	case ResourceSubscription:
 		addFields(payload, resource.Fields, "status")
 		addLink(payload, resource.Links, "customer", "customer", ResourceCustomer)
 		if items, ok := rawAt(payload, "items.data"); ok {
-			if values, ok := items.([]any); ok {
-				if scalar, err := NewNumberScalar(strconv.Itoa(len(values))); err == nil {
-					resource.Fields["items.count"] = scalar
-				}
-				if len(values) > 0 {
-					if first, ok := values[0].(map[string]any); ok {
-						addFieldsWithPrefix(first, resource.Fields, "items.first.", "price.currency", "price.recurring.interval", "price.recurring.interval_count", "price.unit_amount")
-						addLink(first, resource.Links, "price", "items.first.price", ResourcePrice)
-					}
+			if values, ok := items.([]any); ok && len(values) > 0 {
+				if first, ok := values[0].(map[string]any); ok {
+					addFieldsWithPrefix(first, resource.Fields, "items.first.", "price.currency", "price.recurring.interval", "price.recurring.interval_count", "price.unit_amount")
 				}
 			}
 		}
 	}
-	addMetadataFields(payload, resource.Fields)
 	if err := validateReturnedResource(resource, resourceType); err != nil {
 		return Resource{}, ErrMalformed
 	}
@@ -522,9 +501,9 @@ func (reader *StripeReader) normalize(payload map[string]any, resourceType Resou
 var createdUnavailableSentinel = time.Unix(1, 0).UTC()
 
 // normalizeV2 defensively normalizes a v2 billing payload. Shapes for this
-// preview API family are not spec-confirmed, so only identity, mode, and a
-// few stable scalar fields are read; anything unexpected is ErrMalformed and
-// degrades to unavailable at the Fetch boundary.
+// preview API family are not spec-confirmed, so only identity and mode are
+// read; v2 overlays declare no field expectations. Anything unexpected is
+// ErrMalformed and degrades to unavailable at the Fetch boundary.
 func (reader *StripeReader) normalizeV2(payload map[string]any, resourceType ResourceType, accountID string) (Resource, error) {
 	descriptor, ok := stripeResourceDescriptors[resourceType]
 	if !ok {
@@ -554,7 +533,6 @@ func (reader *StripeReader) normalizeV2(payload map[string]any, resourceType Res
 		Type: resourceType, ID: id, CreatedAt: created, Mode: mode, AccountID: accountID,
 		Fields: make(map[string]JSONScalar), Links: make(map[string]ResourceRef),
 	}
-	addFields(payload, resource.Fields, "currency", "display_name", "live_version", "service_interval", "service_interval_count", "status", "tax_behavior", "unit_amount")
 	if err := validateReturnedResource(resource, resourceType); err != nil {
 		return Resource{}, ErrMalformed
 	}
@@ -594,27 +572,6 @@ func addPresenceField(payload map[string]any, destination map[string]JSONScalar,
 		}
 	}
 	destination[targetPath] = NewBoolScalar(present)
-}
-
-func addValuePresenceField(payload map[string]any, destination map[string]JSONScalar, sourcePath, targetPath string) {
-	value, ok := rawAt(payload, sourcePath)
-	destination[targetPath] = NewBoolScalar(ok && value != nil)
-}
-
-func addMetadataFields(payload map[string]any, destination map[string]JSONScalar) {
-	metadata, ok := payload["metadata"].(map[string]any)
-	if !ok {
-		return
-	}
-	for key, value := range metadata {
-		path := "metadata." + key
-		if len(destination) >= maxNormalizedEntries || validateFieldPath(path) != nil {
-			continue
-		}
-		if scalar, ok := scalarFromValue(value); ok {
-			destination[path] = scalar
-		}
-	}
 }
 
 func addLink(payload map[string]any, destination map[string]ResourceRef, sourcePath, targetPath string, resourceType ResourceType) {

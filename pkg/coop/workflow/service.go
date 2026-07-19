@@ -334,12 +334,20 @@ func stripeResourceReplacements(session *coop.Session, nodeNumber int, nodeID st
 	seen := make(map[string]struct{}, len(inputs))
 	replacedRoles := make(map[string]struct{}, len(inputs))
 	replacements := make([]coop.StripeResourceReference, 0, len(inputs))
+	declaredRoles := make([]string, 0, len(declaration.Resources))
+	for _, resource := range declaration.Resources {
+		declaredRoles = append(declaredRoles, resource.Role)
+	}
+	sort.Strings(declaredRoles)
 	for _, input := range inputs {
 		resourceType, exists := roles[input.Role]
 		if !exists {
-			return nil, nil, fmt.Errorf("Stripe resource role %q is not declared for this blueprint stage", input.Role)
+			// Never echo the supplied role: a swapped flag can put a secret in
+			// the role position. The declared list comes from the overlay.
+			return nil, nil, fmt.Errorf("a reported --stripe-resource role is not declared for this blueprint stage (declared roles: %s)", strings.Join(declaredRoles, ", "))
 		}
 		if _, err := resourcecheck.NewResourceRef(resourceType, input.ID); err != nil {
+			// input.Role is safe to echo here: it matched a declared overlay role.
 			return nil, nil, fmt.Errorf("Stripe resource ID for role %q is invalid", input.Role)
 		}
 		key := input.Role + "\x00" + input.ID
@@ -396,25 +404,17 @@ func missingStageRoles(declaration resourcecheck.StageDeclaration, references []
 }
 
 // hasBlockingResult reports whether the verification pass produced a
-// deterministic contradiction. Failed results always block. A not_observed
-// existence result blocks because it means a reported ID could not be found
-// (agent-repairable); cascaded not_observed results on linkage/entitlement
-// checks and every unavailable result fail open.
+// deterministic contradiction (see resourcecheck.DeterministicContradiction):
+// failed results and not_observed existence results block for agent repair;
+// cascaded not_observed results on linkage/entitlement checks and every
+// unavailable result fail open.
 func hasBlockingResult(set verification.ResultSet) bool {
 	for _, result := range set.Results {
-		if result.Status == verification.StatusFailed {
-			return true
-		}
-		if result.Status == verification.StatusNotObserved && result.CheckID == resourcecheck.CheckResourceExists {
+		if resourcecheck.DeterministicContradiction(result) {
 			return true
 		}
 	}
 	return false
-}
-
-func isBlockingResult(result verification.Result) bool {
-	return result.Status == verification.StatusFailed ||
-		(result.Status == verification.StatusNotObserved && result.CheckID == resourcecheck.CheckResourceExists)
 }
 
 func blockedReportResponse(session *coop.Session, node *coop.SessionNode, nodeNumber int, missing []string) coop.CommandResponse {
@@ -430,7 +430,7 @@ func blockedReportResponse(session *coop.Session, node *coop.SessionNode, nodeNu
 			if len(lines) >= verification.MaxAgentFacingResults {
 				break
 			}
-			if isBlockingResult(result) && result.Detail != "" {
+			if resourcecheck.DeterministicContradiction(result) && result.Detail != "" {
 				lines = append(lines, result.Detail)
 			}
 		}
@@ -604,6 +604,13 @@ func (s *Service) RequestChanges(sessionID string, nodeNumbers []int, note strin
 					return err
 				}
 				node, _ = session.NodeByNumber(nodeNumber)
+			} else {
+				// Request-changes on an already-active node also begins a
+				// correction: reset the action window so an in-flight report's
+				// StartedAt guard supersedes it and the corrected attempt gets
+				// a fresh window.
+				now := time.Now().UTC()
+				node.StartedAt = &now
 			}
 			node.RejectionNote = note
 			node.Implementation = nil

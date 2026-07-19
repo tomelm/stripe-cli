@@ -50,8 +50,9 @@ type ReportVerifier struct {
 }
 
 // NewReportVerifier explicitly injects the reader and account context. A nil
-// reader is retained as advisory unavailability rather than construction
-// failure.
+// reader is retained as an unavailable read condition rather than a
+// construction failure; unavailable results still fail open at the workflow
+// gate, while a missing or contradicted resource still blocks it.
 func NewReportVerifier(reader Reader, account AccountContext) *ReportVerifier {
 	return &ReportVerifier{reader: reader, account: account}
 }
@@ -235,15 +236,48 @@ func (verifier *ReportVerifier) Verify(ctx context.Context, request ReportReques
 
 	sort.Slice(results, func(left, right int) bool { return results[left].ID < results[right].ID })
 	if len(results) > verification.MaxResultsPerNode {
-		dropped := len(results) - (verification.MaxResultsPerNode - 1)
-		results = results[:verification.MaxResultsPerNode-1]
-		results = append(results, notObservedProviderResult(
+		// Deterministic contradictions are never dropped by the cap: the
+		// truncated set must reach the workflow gate with every blocking
+		// result intact, or the cap itself would launder a failure.
+		kept := make([]verification.Result, 0, verification.MaxResultsPerNode-1)
+		var nonBlocking []verification.Result
+		for _, result := range results {
+			if DeterministicContradiction(result) {
+				kept = append(kept, result)
+			} else {
+				nonBlocking = append(nonBlocking, result)
+			}
+		}
+		if len(kept) > verification.MaxResultsPerNode-1 {
+			kept = kept[:verification.MaxResultsPerNode-1]
+		}
+		for _, result := range nonBlocking {
+			if len(kept) >= verification.MaxResultsPerNode-1 {
+				break
+			}
+			kept = append(kept, result)
+		}
+		dropped := len(results) - len(kept)
+		results = append(kept, notObservedProviderResult(
 			"resource.coverage:truncated", CheckCoverage,
 			fmt.Sprintf("%d verification results were dropped by the per-node result cap; treat coverage as incomplete", dropped),
 			request.BlueprintDigest,
 		))
+		sort.Slice(results, func(left, right int) bool { return results[left].ID < results[right].ID })
 	}
 	return verification.NewResultSet(results...), nil
+}
+
+// DeterministicContradiction reports whether a result must gate workflow
+// progress: any failed check, or a not_observed existence check (a reported
+// ID that could not be found). Both are agent-repairable contradictions;
+// everything else fails open. This single predicate is shared by the
+// verifier's cap handling and the report-work gate so they cannot diverge.
+func DeterministicContradiction(result verification.Result) bool {
+	if result.Status == verification.StatusFailed {
+		return true
+	}
+	return result.Status == verification.StatusNotObserved && result.CheckID == CheckResourceExists
 }
 
 func sortedRoleKeys(counts map[string]int) []string {
@@ -265,23 +299,30 @@ func (verifier *ReportVerifier) observeReference(ctx context.Context, checker *C
 	resultID := roleResultID("resource.exists", declaration.Role, reference.ID)
 	ref := ResourceRef{Type: declaration.Type, ID: reference.ID}
 	if declaration.Lifecycle == ResourceCreated && reference.ReportedNode == request.NodeNumber && windowCheckable(declaration.Type) {
-		window, ok := nodeActionWindow(request.StartedAt, request.CompletedAt)
-		if !ok {
-			// Unavailable (not not_observed): a missing or oversized window is
-			// not agent-repairable, so it must fail open rather than block.
-			return reportObservation{reference: reference, result: unavailableProviderResult(
-				resultID, CheckResourceExists, verification.FailureDomainCollector,
-				"resource creation could not be checked because the node action window is unavailable or too broad", request.BlueprintDigest,
-			)}
+		if window, ok := nodeActionWindow(request.StartedAt, request.CompletedAt); ok {
+			observation, result, err := checker.ObserveExistence(ctx, ExistenceCheck{
+				ResultID: resultID, NodeID: strings.ToLower(request.NodeID), Resource: ref, Window: window,
+			})
+			if err != nil {
+				return reportObservation{reference: reference, result: unavailableProviderResult(resultID, CheckResourceExists, verification.FailureDomainCollector, "Stripe resource observation could not be executed", request.BlueprintDigest)}
+			}
+			if result.Status == verification.StatusPassed {
+				result.Detail = declaration.Role + " creation was observed within this node's action window"
+			}
+			return reportObservation{reference: reference, observation: observation, result: result}
 		}
-		observation, result, err := checker.ObserveExistence(ctx, ExistenceCheck{
-			ResultID: resultID, NodeID: strings.ToLower(request.NodeID), Resource: ref, Window: window,
+		// A missing or oversized window only degrades the window check, never
+		// the existence read: a nonexistent reported ID must still surface as
+		// a blocking not_observed result. On a pass the detail states the
+		// window gap explicitly (fail-open for the window, not the identity).
+		observation, result, err := checker.ObserveReference(ctx, ReferenceCheck{
+			ResultID: resultID, NodeID: strings.ToLower(request.NodeID), Resource: ref,
 		})
 		if err != nil {
 			return reportObservation{reference: reference, result: unavailableProviderResult(resultID, CheckResourceExists, verification.FailureDomainCollector, "Stripe resource observation could not be executed", request.BlueprintDigest)}
 		}
 		if result.Status == verification.StatusPassed {
-			result.Detail = declaration.Role + " creation was observed within this node's action window"
+			result.Detail = declaration.Role + " exists in test mode and the expected account (the node action window was unavailable or too broad to check creation time)"
 		}
 		return reportObservation{reference: reference, observation: observation, result: result}
 	}

@@ -52,9 +52,9 @@ func TestStripeReaderFetchNormalizesAllowlistedMetadata(t *testing.T) {
 	assert.Equal(t, ModeTest, resource.Mode)
 	assert.Equal(t, readerAccountID, resource.AccountID)
 	assertScalarEqual(t, resource.Fields["amount_total"], "2000")
-	assertScalarEqual(t, resource.Fields["url_present"], "true")
-	assertScalarEqual(t, resource.Fields["metadata.application_record_id"], `"app-secret-123"`)
+	assert.NotContains(t, resource.Fields, "url_present")
 	assert.NotContains(t, resource.Fields, "client_secret")
+	assert.NotContains(t, resource.Fields, "metadata.application_record_id")
 	assert.Equal(t, ResourceRef{Type: ResourcePaymentIntent, ID: "pi_reader123"}, resource.Links["payment_intent"])
 }
 
@@ -402,7 +402,7 @@ func TestStripeReaderFetchesFeatureThroughBoundedList(t *testing.T) {
 			assert.False(t, resource.CreatedAt.IsZero())
 			assert.Equal(t, createdUnavailableSentinel, resource.CreatedAt)
 			assertScalarEqual(t, resource.Fields["active"], "true")
-			assertScalarEqual(t, resource.Fields["lookup_key_present"], "true")
+			assert.NotContains(t, resource.Fields, "lookup_key_present")
 		})
 	}
 }

@@ -138,11 +138,6 @@ func hasPlaceholderID(suffix string) bool {
 		if _, forbidden := placeholderTokens[segment]; forbidden {
 			return true
 		}
-		for token := range placeholderTokens {
-			if strings.HasPrefix(segment, token) {
-				return true
-			}
-		}
 	}
 	return false
 }
