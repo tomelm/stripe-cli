@@ -2,7 +2,6 @@ package resourcecheck
 
 import (
 	"errors"
-	"sort"
 	"strings"
 )
 
@@ -224,9 +223,9 @@ func linkRoles(sourceRole, path, targetRole string) StageLinkDeclaration {
 	return StageLinkDeclaration{SourceRole: sourceRole, Link: path, TargetRole: targetRole}
 }
 
-// OverlayForBlueprint returns a deep copy only when the caller supplies the
+// overlayForBlueprint returns a deep copy only when the caller supplies the
 // digest recorded by the session.
-func OverlayForBlueprint(id, digest string) (BlueprintOverlay, bool) {
+func overlayForBlueprint(id, digest string) (BlueprintOverlay, bool) {
 	overlay, ok := frozenBlueprintOverlays[id]
 	if !ok || digest == "" || overlay.BlueprintDigest != digest {
 		return BlueprintOverlay{}, false
@@ -236,7 +235,7 @@ func OverlayForBlueprint(id, digest string) (BlueprintOverlay, bool) {
 
 // StageForBlueprint returns the declaration for one canonical node.
 func StageForBlueprint(id, digest, nodeID string) (StageDeclaration, bool) {
-	overlay, ok := OverlayForBlueprint(id, digest)
+	overlay, ok := overlayForBlueprint(id, digest)
 	if !ok {
 		return StageDeclaration{}, false
 	}
@@ -248,19 +247,9 @@ func StageForBlueprint(id, digest, nodeID string) (StageDeclaration, bool) {
 	return StageDeclaration{}, false
 }
 
-// FrozenBlueprintIDs returns the six supported blueprint IDs in stable order.
-func FrozenBlueprintIDs() []string {
-	ids := make([]string, 0, len(frozenBlueprintOverlays))
-	for id := range frozenBlueprintOverlays {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	return ids
-}
-
-// ValidateBlueprintOverlay validates stage roles, types, links, stable scalar
+// validateBlueprintOverlay validates stage roles, types, links, stable scalar
 // values, and the frozen canonical digest binding.
-func ValidateBlueprintOverlay(value BlueprintOverlay) error {
+func validateBlueprintOverlay(value BlueprintOverlay) error {
 	digest, ok := frozenBlueprintDigests[value.BlueprintID]
 	if !ok || digest != value.BlueprintDigest {
 		return errors.New("resource overlay is not bound to a supported canonical blueprint digest")

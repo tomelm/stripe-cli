@@ -3,8 +3,7 @@ package verification
 // CurrentSchemaVersion identifies the ResultSet wire contract.
 const CurrentSchemaVersion = 1
 
-// Source identifies who produced a result. Only CLI-owned results can satisfy
-// the narrow FailsOpen predicate.
+// Source identifies who produced a result.
 type Source string
 
 const (
@@ -36,13 +35,6 @@ func (status Status) Valid() bool {
 	default:
 		return false
 	}
-}
-
-// Indeterminate reports whether status records an evidence gap rather than a
-// positive or negative conclusion. A skipped check is intentional non-
-// execution and is therefore not classified as indeterminate.
-func (status Status) Indeterminate() bool {
-	return status == StatusNotObserved || status == StatusUnavailable
 }
 
 // FailureDomain identifies the system that contradicted a requirement or
@@ -99,8 +91,8 @@ type Evidence struct {
 
 // Result is the policy-neutral outcome of one check execution.
 //
-// Transient is a factual producer classification used only by FailsOpen. It
-// does not prescribe whether or when a consumer should retry the check.
+// Transient is a factual producer classification. It does not prescribe
+// whether or when a consumer should retry the check.
 type Result struct {
 	ID            ResultID      `json:"id"`
 	CheckID       CheckID       `json:"check_id"`
@@ -110,21 +102,6 @@ type Result struct {
 	Transient     bool          `json:"transient,omitempty"`
 	Detail        string        `json:"detail,omitempty"`
 	Evidence      []Evidence    `json:"evidence,omitempty"`
-}
-
-// Indeterminate reports whether result represents an evidence gap.
-func (result Result) Indeterminate() bool {
-	return result.Status.Indeterminate()
-}
-
-// FailsOpen reports whether result is the exact CLI-owned, transient collector
-// outage recognized by the shared contract. The predicate does not itself
-// gate workflow progress and does not convert the result into a pass.
-func (result Result) FailsOpen() bool {
-	return result.Source == SourceCLI &&
-		result.Status == StatusUnavailable &&
-		result.FailureDomain == FailureDomainCollector &&
-		result.Transient
 }
 
 // ResultSet is the versioned deterministic wire envelope for results.

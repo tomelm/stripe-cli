@@ -1,3 +1,0 @@
-ALLOWLISTED_PATHS.txt
-HYPOTHESIS.md
-pkg/coop/resourcecheck/**

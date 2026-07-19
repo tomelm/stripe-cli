@@ -14,6 +14,7 @@ import (
 
 const (
 	DefaultReportDeadline = 10 * time.Second
+	MaxProviderRuntime    = 30 * time.Second
 	maxReferencesPerRole  = 8
 )
 
@@ -308,4 +309,18 @@ func appendResultBounded(results []verification.Result, result verification.Resu
 		return results
 	}
 	return append(results, result)
+}
+
+func notObservedProviderResult(id verification.ResultID, checkID verification.CheckID, detail, digest string) verification.Result {
+	return verification.Result{ID: id, CheckID: checkID, Source: verification.SourceCLI, Status: verification.StatusNotObserved,
+		FailureDomain: verification.FailureDomainCoverage, Detail: detail, Evidence: []verification.Evidence{
+			{Key: "blueprint_digest", Class: verification.EvidenceFingerprint, Value: digest},
+		}}
+}
+
+func unavailableProviderResult(id verification.ResultID, checkID verification.CheckID, domain verification.FailureDomain, detail, digest string) verification.Result {
+	return verification.Result{ID: id, CheckID: checkID, Source: verification.SourceCLI, Status: verification.StatusUnavailable,
+		FailureDomain: domain, Detail: detail, Evidence: []verification.Evidence{
+			{Key: "blueprint_digest", Class: verification.EvidenceFingerprint, Value: digest},
+		}}
 }

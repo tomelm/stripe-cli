@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"strconv"
 	"time"
 
 	"github.com/stripe/stripe-cli/pkg/coop/verification"
@@ -51,20 +50,6 @@ func NewCheckerWithReadTimeout(reader Reader, account AccountContext, scope Veri
 		readTimeout: readTimeout,
 		provenance:  &provenanceKey{marker: 1},
 	}, nil
-}
-
-// CheckExistence verifies one exact resource and discards the in-memory
-// provenance capability returned by ObserveExistence.
-func (checker *Checker) CheckExistence(ctx context.Context, check ExistenceCheck) (verification.Result, error) {
-	_, result, err := checker.ObserveExistence(ctx, check)
-	return result, err
-}
-
-// CheckReference verifies one exact caller-supplied resource and discards the
-// in-memory provenance capability returned by ObserveReference.
-func (checker *Checker) CheckReference(ctx context.Context, check ReferenceCheck) (verification.Result, error) {
-	_, result, err := checker.ObserveReference(ctx, check)
-	return result, err
 }
 
 // ObserveReference verifies one exact caller-supplied resource. Unlike an
@@ -126,96 +111,6 @@ func (checker *Checker) ObserveExistence(ctx context.Context, check ExistenceChe
 	return checker.observation(resource, check.NodeID, resultValue), resultValue, nil
 }
 
-// CheckCreationWindow searches a bounded page and discards the in-memory
-// provenance capability returned by ObserveCreationWindow.
-func (checker *Checker) CheckCreationWindow(ctx context.Context, check CreationWindowCheck) (verification.Result, error) {
-	_, result, err := checker.ObserveCreationWindow(ctx, check)
-	return result, err
-}
-
-// ObserveCreationWindow discovers a resource without an exact ID. Exactly one
-// complete, normalized, test-mode match is required to mint provenance. Zero,
-// multiple, or incomplete matches remain not_observed coverage gaps.
-func (checker *Checker) ObserveCreationWindow(ctx context.Context, check CreationWindowCheck) (ObservedResource, verification.Result, error) {
-	if err := validateResultID(check.ResultID); err != nil {
-		return ObservedResource{}, verification.Result{}, err
-	}
-	if err := validateResourceType(check.ResourceType); err != nil {
-		return ObservedResource{}, verification.Result{}, err
-	}
-	if err := validateCreationWindow(check.Window); err != nil {
-		return ObservedResource{}, verification.Result{}, err
-	}
-	if err := validateNodeID(check.NodeID); err != nil {
-		return ObservedResource{}, verification.Result{}, err
-	}
-	if err := validatePredicates(check.Predicates); err != nil {
-		return ObservedResource{}, verification.Result{}, err
-	}
-	if check.Limit < 1 || check.Limit > MaxListLimit {
-		return ObservedResource{}, verification.Result{}, errors.New("resource list limit is invalid")
-	}
-	if ctx == nil {
-		return ObservedResource{}, verification.Result{}, errors.New("resource check context is required")
-	}
-
-	window := normalizeWindow(check.Window)
-	predicates := clonePredicates(check.Predicates)
-	evidence := checker.windowSearchEvidence(check.ResourceType, window, check.NodeID, len(predicates))
-	page, result := checker.list(ctx, check.ResultID, ListRequest{
-		Account:      checker.account,
-		Scope:        checker.scope,
-		ResourceType: check.ResourceType,
-		Window:       window,
-		Predicates:   clonePredicates(predicates),
-		Limit:        check.Limit,
-	}, evidence)
-	if result != nil {
-		return ObservedResource{}, *result, nil
-	}
-	if len(page.Resources) > check.Limit {
-		result := malformedResult(check.ResultID, CheckResourceExists, evidence)
-		return ObservedResource{}, result, nil
-	}
-
-	for _, resource := range page.Resources {
-		if err := validateReturnedResource(resource, check.ResourceType); err != nil ||
-			!windowContains(window, resource.CreatedAt) ||
-			!resourceMatchesPredicates(resource, predicates) {
-			result := malformedResult(check.ResultID, CheckResourceExists, evidence)
-			return ObservedResource{}, result, nil
-		}
-		if resource.Mode == ModeLive {
-			result := safetyFailureResult(check.ResultID, CheckResourceExists, "resource is live mode; test mode is required", evidenceWith(evidence,
-				verification.Evidence{Key: "observed_mode", Class: verification.EvidenceSafe, Value: "live"},
-			))
-			return ObservedResource{}, result, nil
-		}
-		if resource.AccountID != checker.account.AccountID {
-			result := failedResult(check.ResultID, CheckResourceExists, "resource belongs to a different account context", evidenceWith(evidence,
-				verification.Evidence{Key: "observed_account_fingerprint", Class: verification.EvidenceFingerprint, Value: fingerprint(resource.AccountID)},
-			))
-			return ObservedResource{}, result, nil
-		}
-	}
-
-	evidence = evidenceWith(evidence,
-		verification.Evidence{Key: "has_more", Class: verification.EvidenceSafe, Value: strconv.FormatBool(page.HasMore)},
-		verification.Evidence{Key: "observed_count", Class: verification.EvidenceSafe, Value: strconv.Itoa(len(page.Resources))},
-	)
-	if page.HasMore || len(page.Resources) != 1 {
-		result := notObservedResult(check.ResultID, CheckResourceExists, "creation-window search did not establish exactly one resource", evidence)
-		return ObservedResource{}, result, nil
-	}
-
-	resource := page.Resources[0]
-	evidence = evidenceWith(evidence,
-		verification.Evidence{Key: "resource_fingerprint", Class: verification.EvidenceFingerprint, Value: fingerprint(string(resource.Type) + "\x00" + resource.ID)},
-	)
-	resultValue := passedResult(check.ResultID, CheckResourceExists, "exactly one test-mode resource was observed in the bounded creation window", evidence)
-	return checker.observation(resource, check.NodeID, resultValue), resultValue, nil
-}
-
 // CheckField verifies one normalized JSON scalar field.
 func (checker *Checker) CheckField(ctx context.Context, check FieldCheck) (verification.Result, error) {
 	if err := validateResultID(check.ResultID); err != nil {
@@ -259,26 +154,6 @@ func (checker *Checker) CheckField(ctx context.Context, check FieldCheck) (verif
 	return passedResult(check.ResultID, CheckResourceField, "resource field matches", evidenceWith(comparisonEvidence,
 		verification.Evidence{Key: "comparison", Class: verification.EvidenceSafe, Value: "match"},
 	)), nil
-}
-
-// CheckAccountContext verifies test-mode and account ownership metadata.
-func (checker *Checker) CheckAccountContext(ctx context.Context, check AccountCheck) (verification.Result, error) {
-	if err := validateResultID(check.ResultID); err != nil {
-		return verification.Result{}, err
-	}
-	if err := checker.validateObservation(check.Resource, check.ResultID); err != nil {
-		return verification.Result{}, err
-	}
-	if ctx == nil {
-		return verification.Result{}, errors.New("resource check context is required")
-	}
-
-	evidence := checker.resourceEvidence(check.Resource.resource, "fetch", check.Resource.nodeID)
-	_, result := checker.fetchObserved(ctx, check.ResultID, CheckResourceAccount, check.Resource, evidence, "resource")
-	if result != nil {
-		return *result, nil
-	}
-	return passedResult(check.ResultID, CheckResourceAccount, "resource is test mode and belongs to the expected account", evidence), nil
 }
 
 // CheckLinkage verifies one source link against a previously observed target
@@ -438,40 +313,6 @@ func (checker *Checker) fetch(
 	return resource, nil
 }
 
-func (checker *Checker) list(
-	ctx context.Context,
-	resultID verification.ResultID,
-	request ListRequest,
-	evidence []verification.Evidence,
-) (ListPage, *verification.Result) {
-	if err := ctx.Err(); err != nil {
-		result := callerContextResult(resultID, CheckResourceExists, evidenceWith(evidence,
-			verification.Evidence{Key: "lookup_stage", Class: verification.EvidenceSafe, Value: "list"},
-		))
-		return ListPage{}, &result
-	}
-	readContext, cancel := context.WithTimeout(ctx, checker.readTimeout)
-	defer cancel()
-	page, err := checker.reader.List(readContext, request)
-	if ctx.Err() != nil {
-		result := callerContextResult(resultID, CheckResourceExists, evidenceWith(evidence,
-			verification.Evidence{Key: "lookup_stage", Class: verification.EvidenceSafe, Value: "list"},
-		))
-		return ListPage{}, &result
-	}
-	if readContext.Err() != nil {
-		result := unavailableResult(resultID, CheckResourceExists, false, "resource source exceeded the bounded read window", evidenceWith(evidence,
-			verification.Evidence{Key: "lookup_stage", Class: verification.EvidenceSafe, Value: "list"},
-		))
-		return ListPage{}, &result
-	}
-	if err != nil {
-		result := checker.readErrorResult(resultID, CheckResourceExists, err, evidence, "list", false)
-		return ListPage{}, &result
-	}
-	return page, nil
-}
-
 func (checker *Checker) readErrorResult(
 	resultID verification.ResultID,
 	checkID verification.CheckID,
@@ -509,16 +350,6 @@ func (checker *Checker) resourceEvidence(ref ResourceRef, lookup, nodeID string)
 		{Key: "resource_fingerprint", Class: verification.EvidenceFingerprint, Value: fingerprint(string(ref.Type) + "\x00" + ref.ID)},
 		{Key: "resource_type", Class: verification.EvidenceSafe, Value: string(ref.Type)},
 	}, checker.scopeEvidence(nodeID)...)
-}
-
-func (checker *Checker) windowSearchEvidence(resourceType ResourceType, window CreationWindow, nodeID string, predicateCount int) []verification.Evidence {
-	return evidenceWith([]verification.Evidence{
-		{Key: "account_fingerprint", Class: verification.EvidenceFingerprint, Value: fingerprint(checker.account.AccountID)},
-		{Key: "lookup", Class: verification.EvidenceSafe, Value: "creation_window"},
-		{Key: "mode", Class: verification.EvidenceSafe, Value: string(checker.account.Mode)},
-		{Key: "predicate_count", Class: verification.EvidenceSafe, Value: strconv.Itoa(predicateCount)},
-		{Key: "resource_type", Class: verification.EvidenceSafe, Value: string(resourceType)},
-	}, evidenceWith(checker.scopeEvidence(nodeID), creationWindowEvidence(window)...)...)
 }
 
 func (checker *Checker) scopeEvidence(nodeID string) []verification.Evidence {

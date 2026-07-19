@@ -1,7 +1,6 @@
 package verification
 
 import (
-	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -20,12 +19,8 @@ func TestStableIDs(t *testing.T) {
 		value := value
 		t.Run("valid_"+value, func(t *testing.T) {
 			t.Parallel()
-			checkID, err := ParseCheckID(value)
-			require.NoError(t, err)
-			assert.Equal(t, CheckID(value), checkID)
-			resultID, err := ParseResultID(value)
-			require.NoError(t, err)
-			assert.Equal(t, ResultID(value), resultID)
+			assert.NoError(t, CheckID(value).Validate())
+			assert.NoError(t, ResultID(value).Validate())
 		})
 	}
 
@@ -37,56 +32,8 @@ func TestStableIDs(t *testing.T) {
 		value := value
 		t.Run("invalid_"+value, func(t *testing.T) {
 			t.Parallel()
-			_, checkErr := ParseCheckID(value)
-			assert.Error(t, checkErr)
-			_, resultErr := ParseResultID(value)
-			assert.Error(t, resultErr)
-		})
-	}
-}
-
-func TestStatusIndeterminate(t *testing.T) {
-	t.Parallel()
-
-	assert.False(t, StatusPassed.Indeterminate())
-	assert.False(t, StatusFailed.Indeterminate())
-	assert.True(t, StatusNotObserved.Indeterminate())
-	assert.True(t, StatusUnavailable.Indeterminate())
-	assert.False(t, StatusSkipped.Indeterminate())
-	assert.False(t, Status("future").Valid())
-}
-
-func TestResultFailsOpenOnlyForTransientCLICollectorOutage(t *testing.T) {
-	t.Parallel()
-
-	base := Result{
-		ID:            "observer.logs:1",
-		CheckID:       "observer.logs",
-		Source:        SourceCLI,
-		Status:        StatusUnavailable,
-		FailureDomain: FailureDomainCollector,
-		Transient:     true,
-	}
-	require.NoError(t, base.Validate())
-	assert.True(t, base.Indeterminate())
-	assert.True(t, base.FailsOpen())
-
-	tests := []struct {
-		name   string
-		mutate func(*Result)
-	}{
-		{name: "agent source", mutate: func(result *Result) { result.Source = SourceAgent }},
-		{name: "failed", mutate: func(result *Result) { result.Status = StatusFailed; result.Transient = false }},
-		{name: "application", mutate: func(result *Result) { result.FailureDomain = FailureDomainApplication }},
-		{name: "not transient", mutate: func(result *Result) { result.Transient = false }},
-	}
-	for _, test := range tests {
-		test := test
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			result := base
-			test.mutate(&result)
-			assert.False(t, result.FailsOpen())
+			assert.Error(t, CheckID(value).Validate())
+			assert.Error(t, ResultID(value).Validate())
 		})
 	}
 }
@@ -132,57 +79,6 @@ func TestResultValidation(t *testing.T) {
 	}
 }
 
-func TestMarshalDeterministic(t *testing.T) {
-	t.Parallel()
-
-	passed := Result{
-		ID:      "z-result",
-		CheckID: "z-check",
-		Source:  SourceCLI,
-		Status:  StatusPassed,
-		Evidence: []Evidence{
-			{Key: "zeta", Class: EvidenceSafe, Value: "last"},
-			{Key: "alpha", Class: EvidenceIdentifier, Value: "first"},
-		},
-	}
-	unavailable := Result{
-		ID:            "a-result",
-		CheckID:       "a-check",
-		Source:        SourceCLI,
-		Status:        StatusUnavailable,
-		FailureDomain: FailureDomainCollector,
-		Transient:     true,
-	}
-
-	first := NewResultSet(passed, unavailable)
-	secondPassed := passed
-	secondPassed.Evidence = append([]Evidence(nil), passed.Evidence...)
-	second := NewResultSet(unavailable, secondPassed)
-	second.Results[1].Evidence[0], second.Results[1].Evidence[1] = second.Results[1].Evidence[1], second.Results[1].Evidence[0]
-
-	firstJSON, err := first.MarshalDeterministic()
-	require.NoError(t, err)
-	secondJSON, err := second.MarshalDeterministic()
-	require.NoError(t, err)
-	assert.Equal(t, firstJSON, secondJSON)
-	assert.Equal(t, ResultID("z-result"), first.Results[0].ID, "serialization must not reorder caller-owned results")
-	assert.Equal(t, "zeta", first.Results[0].Evidence[0].Key, "serialization must not reorder caller-owned evidence")
-	assert.JSONEq(t, `{
-		"schema_version": 1,
-		"results": [
-			{"id":"a-result","check_id":"a-check","source":"cli","status":"unavailable","failure_domain":"collector","transient":true},
-			{"id":"z-result","check_id":"z-check","source":"cli","status":"passed","evidence":[
-				{"key":"alpha","class":"identifier","value":"first"},
-				{"key":"zeta","class":"safe","value":"last"}
-			]}
-		]
-	}`, string(firstJSON))
-
-	var decoded ResultSet
-	require.NoError(t, json.Unmarshal(firstJSON, &decoded))
-	require.NoError(t, decoded.Validate())
-}
-
 func TestResultSetValidation(t *testing.T) {
 	t.Parallel()
 
@@ -196,11 +92,8 @@ func TestResultSetValidation(t *testing.T) {
 	wrongVersion := set
 	wrongVersion.SchemaVersion++
 	assert.ErrorContains(t, wrongVersion.Validate(), "unsupported verification result schema version")
-	_, err := wrongVersion.MarshalDeterministic()
-	assert.Error(t, err)
 
 	empty := NewResultSet()
-	encoded, err := empty.MarshalDeterministic()
-	require.NoError(t, err)
-	assert.Equal(t, `{"schema_version":1,"results":[]}`, string(encoded))
+	require.NoError(t, empty.Validate())
+	assert.NotNil(t, empty.Results)
 }

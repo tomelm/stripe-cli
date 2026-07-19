@@ -1,8 +1,8 @@
-// Package verification defines the inert data contract shared by Co-op
-// verification producers.
+// Package verification defines the durable result contract for Co-op's
+// automatic Stripe resource verification, plus the sanitizer and bounded
+// storage helpers used to persist results on session nodes.
 //
-// The package deliberately does not execute checks, observe applications,
-// choose retries, or gate workflow progress. Consumers remain responsible for
-// those decisions. Existing Co-op sessions do not use these types until a
-// later feature explicitly adopts them.
+// The package does not execute checks or talk to Stripe; pkg/coop/resourcecheck
+// produces results and pkg/coop/workflow decides how they gate the node
+// lifecycle.
 package verification

@@ -15,15 +15,6 @@ var stableIDPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9._:-]{0,126}[a-z0-9
 // reuse them rather than deriving them from display text.
 type CheckID string
 
-// ParseCheckID validates value and returns it as a CheckID.
-func ParseCheckID(value string) (CheckID, error) {
-	id := CheckID(value)
-	if err := id.Validate(); err != nil {
-		return "", err
-	}
-	return id, nil
-}
-
 // Validate reports whether id satisfies the stable identifier grammar.
 func (id CheckID) Validate() error {
 	return validateStableID("check ID", string(id))
@@ -32,15 +23,6 @@ func (id CheckID) Validate() error {
 // ResultID is the stable, opaque identifier for one verification result.
 // A producer may emit multiple result IDs for the same CheckID.
 type ResultID string
-
-// ParseResultID validates value and returns it as a ResultID.
-func ParseResultID(value string) (ResultID, error) {
-	id := ResultID(value)
-	if err := id.Validate(); err != nil {
-		return "", err
-	}
-	return id, nil
-}
 
 // Validate reports whether id satisfies the stable identifier grammar.
 func (id ResultID) Validate() error {

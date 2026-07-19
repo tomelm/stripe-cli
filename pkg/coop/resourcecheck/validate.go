@@ -19,15 +19,13 @@ const (
 	DefaultReadTimeout = 5 * time.Second
 	// MaxReadTimeout bounds custom package-enforced read deadlines.
 	MaxReadTimeout = 30 * time.Second
-	// MaxWindowPredicates bounds structural equality filters on an ID-free
-	// creation-window search.
-	MaxWindowPredicates = 8
 
 	maxNormalizedEntries = 128
 	maxScalarBytes       = 4096
 )
 
 var (
+	declarationKeyPattern   = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 	accountIDPattern        = regexp.MustCompile(`^acct_[A-Za-z0-9]{1,64}$`)
 	resourceIDPattern       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_]{1,254}$`)
 	resourceIDSuffixPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_]{1,252}[A-Za-z0-9]$`)
@@ -147,40 +145,6 @@ func hasPlaceholderID(suffix string) bool {
 		}
 	}
 	return false
-}
-
-func validatePredicates(predicates []FieldPredicate) error {
-	if len(predicates) == 0 || len(predicates) > MaxWindowPredicates {
-		return errors.New("creation-window search requires bounded structural predicates")
-	}
-	seen := make(map[string]struct{}, len(predicates))
-	for _, predicate := range predicates {
-		if err := validateFieldPath(predicate.Field); err != nil {
-			return errors.New("creation-window predicate field is invalid")
-		}
-		if err := predicate.Expected.Validate(); err != nil {
-			return errors.New("creation-window predicate scalar is invalid")
-		}
-		if _, exists := seen[predicate.Field]; exists {
-			return errors.New("creation-window predicate field is duplicated")
-		}
-		seen[predicate.Field] = struct{}{}
-	}
-	return nil
-}
-
-func resourceMatchesPredicates(resource Resource, predicates []FieldPredicate) bool {
-	for _, predicate := range predicates {
-		observed, exists := resource.Fields[predicate.Field]
-		if !exists || !observed.Equal(predicate.Expected) {
-			return false
-		}
-	}
-	return true
-}
-
-func clonePredicates(predicates []FieldPredicate) []FieldPredicate {
-	return append([]FieldPredicate(nil), predicates...)
 }
 
 func validateCreationWindow(window CreationWindow) error {

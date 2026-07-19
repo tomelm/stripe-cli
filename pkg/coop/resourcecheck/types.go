@@ -14,19 +14,11 @@ const (
 	CheckResourceExists verification.CheckID = "stripe.resource.exists"
 	// CheckResourceField verifies one normalized JSON scalar field.
 	CheckResourceField verification.CheckID = "stripe.resource.field"
-	// CheckResourceAccount verifies test-mode and account ownership metadata.
-	CheckResourceAccount verification.CheckID = "stripe.resource.account-context"
 	// CheckResourceLinkage verifies a source reference against a previously
 	// observed target resource.
 	CheckResourceLinkage verification.CheckID = "stripe.resource.linkage"
-	// CheckApplicationCorrelation verifies that an exact Stripe resource
-	// reference supplied from an application record was corroborated by Stripe.
-	CheckApplicationCorrelation verification.CheckID = "stripe.resource.application-correlation"
 	// CheckActiveEntitlement verifies customer access to one declared feature.
 	CheckActiveEntitlement verification.CheckID = "stripe.resource.active-entitlement"
-	// CheckMeterUsage verifies that a customer has usage summarized by one
-	// declared billing meter during the bounded action window.
-	CheckMeterUsage verification.CheckID = "stripe.resource.meter-usage"
 )
 
 // Mode identifies the Stripe mode authorized for a check.
@@ -47,23 +39,15 @@ type ResourceType string
 const (
 	ResourceAccount            ResourceType = "account"
 	ResourceBillingMeter       ResourceType = "billing.meter"
-	ResourceCharge             ResourceType = "charge"
 	ResourceCheckoutSession    ResourceType = "checkout.session"
-	ResourceCreditNote         ResourceType = "credit_note"
 	ResourceCustomer           ResourceType = "customer"
 	ResourceInvoice            ResourceType = "invoice"
 	ResourceInvoiceItem        ResourceType = "invoice_item"
 	ResourceEntitlementFeature ResourceType = "entitlements.feature"
 	ResourcePaymentIntent      ResourceType = "payment_intent"
-	ResourcePaymentMethod      ResourceType = "payment_method"
 	ResourcePrice              ResourceType = "price"
 	ResourceProduct            ResourceType = "product"
-	ResourceQuote              ResourceType = "quote"
-	ResourceRefund             ResourceType = "refund"
-	ResourceSetupIntent        ResourceType = "setup_intent"
 	ResourceSubscription       ResourceType = "subscription"
-	ResourceSubscriptionItem   ResourceType = "subscription_item"
-	ResourceTaxRate            ResourceType = "tax_rate"
 )
 
 // AccountContext binds every read to one explicit test-mode Stripe account.
@@ -115,37 +99,10 @@ type Resource struct {
 	Links     map[string]ResourceRef
 }
 
-// FieldPredicate is one typed structural equality filter used by an ID-free
-// creation-window search.
-type FieldPredicate struct {
-	Field    string
-	Expected JSONScalar
-}
-
 // FetchRequest is the complete context for one read-only resource fetch.
 type FetchRequest struct {
 	Account  AccountContext
 	Resource ResourceRef
-}
-
-// ListRequest is the complete context for one bounded, read-only creation-
-// window search. Readers must apply the half-open window and all structural
-// predicates, preserve HasMore when completeness is unknown, and return no
-// more than Limit matching resources.
-type ListRequest struct {
-	Account      AccountContext
-	Scope        VerificationScope
-	ResourceType ResourceType
-	Window       CreationWindow
-	Predicates   []FieldPredicate
-	Limit        int
-}
-
-// ListPage is one bounded window-search response. Checker never paginates or
-// retries. HasMore makes the evidence incomplete even if one item is present.
-type ListPage struct {
-	Resources []Resource
-	HasMore   bool
 }
 
 // Fetcher retrieves normalized resource metadata using read-only Stripe API
@@ -155,16 +112,11 @@ type Fetcher interface {
 	Fetch(context.Context, FetchRequest) (Resource, error)
 }
 
-// Lister retrieves one bounded creation-window page using read-only Stripe
-// API semantics and must honor context cancellation and deadlines.
-type Lister interface {
-	List(context.Context, ListRequest) (ListPage, error)
-}
-
-// Reader is the injected read-only Stripe metadata boundary.
+// Reader is the injected read-only Stripe metadata boundary. Narrow optional
+// capabilities (entitlements, product features) are discovered by interface
+// assertion on the same value.
 type Reader interface {
 	Fetcher
-	Lister
 }
 
 // ExistenceCheck verifies an exact resource and its creation time. A resource
@@ -185,18 +137,6 @@ type ReferenceCheck struct {
 	Resource ResourceRef
 }
 
-// CreationWindowCheck searches one bounded page for exactly one resource of a
-// trusted type matching all structural predicates. It is the fallback when no
-// exact resource ID is available.
-type CreationWindowCheck struct {
-	ResultID     verification.ResultID
-	NodeID       string
-	ResourceType ResourceType
-	Window       CreationWindow
-	Predicates   []FieldPredicate
-	Limit        int
-}
-
 // FieldCheck verifies one normalized JSON scalar without retaining either the
 // expected or observed value in evidence.
 type FieldCheck struct {
@@ -204,13 +144,6 @@ type FieldCheck struct {
 	Resource ObservedResource
 	Field    string
 	Expected JSONScalar
-}
-
-// AccountCheck verifies that a fetched resource is test mode and belongs to
-// the configured account context.
-type AccountCheck struct {
-	ResultID verification.ResultID
-	Resource ObservedResource
 }
 
 // LinkageCheck verifies a named source link against a target minted by a prior
@@ -249,36 +182,6 @@ type ActiveEntitlementCheck struct {
 	ResultID verification.ResultID
 	Customer ObservedResource
 	Feature  ResourceRef
-}
-
-// MeterUsageRequest is the complete bounded query needed to corroborate
-// customer usage for one billing meter.
-type MeterUsageRequest struct {
-	Account  AccountContext
-	Meter    ResourceRef
-	Customer ResourceRef
-	Window   CreationWindow
-}
-
-// MeterUsageObservation reports whether Stripe returned at least one summary
-// for the exact meter/customer/window tuple.
-type MeterUsageObservation struct {
-	Found bool
-}
-
-// MeterUsageReader is an optional narrow capability implemented by readers
-// that support billing meter event summaries.
-type MeterUsageReader interface {
-	ReadMeterUsage(context.Context, MeterUsageRequest) (MeterUsageObservation, error)
-}
-
-// MeterUsageCheck links previously observed customer and billing-meter
-// resources through Stripe's read-only event-summary endpoint.
-type MeterUsageCheck struct {
-	ResultID verification.ResultID
-	Meter    ObservedResource
-	Customer ObservedResource
-	Window   CreationWindow
 }
 
 // ObservedResource is an in-memory capability minted only for a passed CLI

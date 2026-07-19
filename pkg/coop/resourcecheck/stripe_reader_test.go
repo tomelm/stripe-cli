@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strconv"
 	"testing"
 	"time"
 
@@ -57,43 +56,6 @@ func TestStripeReaderFetchNormalizesAllowlistedMetadata(t *testing.T) {
 	assertScalarEqual(t, resource.Fields["metadata.application_record_id"], `"app-secret-123"`)
 	assert.NotContains(t, resource.Fields, "client_secret")
 	assert.Equal(t, ResourceRef{Type: ResourcePaymentIntent, ID: "pi_reader123"}, resource.Links["payment_intent"])
-}
-
-func TestStripeReaderListIsBoundedAndAppliesPredicates(t *testing.T) {
-	created := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
-	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/v1/account":
-			fmt.Fprintf(response, `{"id":%q,"object":"account"}`, readerAccountID)
-		case "/v1/payment_intents":
-			require.Equal(t, "2", request.URL.Query().Get("limit"))
-			require.NotEmpty(t, request.URL.Query().Get("created[gte]"))
-			require.NotEmpty(t, request.URL.Query().Get("created[lte]"))
-			fmt.Fprintf(response, `{"object":"list","has_more":false,"data":[
-{"id":"pi_reader123","object":"payment_intent","created":%d,"livemode":false,"amount":2000,"currency":"usd","status":"succeeded"},
-{"id":"pi_reader456","object":"payment_intent","created":%d,"livemode":false,"amount":9999,"currency":"usd","status":"succeeded"}
-]}`, created.Unix(), created.Unix())
-		default:
-			http.NotFound(response, request)
-		}
-	}))
-	defer server.Close()
-
-	reader := newLocalStripeReader(t, server.URL, readerAPIKey, AccountContext{Mode: ModeTest, AccountID: readerAccountID})
-	amount, err := NewNumberScalar("2000")
-	require.NoError(t, err)
-	page, err := reader.List(context.Background(), ListRequest{
-		Account:      AccountContext{Mode: ModeTest, AccountID: readerAccountID},
-		Scope:        VerificationScope{SessionID: "session-reader", BlueprintDigest: frozenBlueprintDigests["accept-payment-with-payment-element"]},
-		ResourceType: ResourcePaymentIntent,
-		Window:       CreationWindow{Start: created.Add(-time.Minute), End: created.Add(time.Minute)},
-		Predicates:   []FieldPredicate{{Field: "amount", Expected: amount}},
-		Limit:        2,
-	})
-	require.NoError(t, err)
-	require.Len(t, page.Resources, 1)
-	assert.Equal(t, "pi_reader123", page.Resources[0].ID)
-	assert.False(t, page.HasMore)
 }
 
 func TestStripeReaderCredentialModeAndAccountAreAuthoritative(t *testing.T) {
@@ -159,8 +121,7 @@ func TestStripeReaderHonorsDeadline(t *testing.T) {
 	assert.ErrorIs(t, err, ErrUnavailable)
 }
 
-func TestStripeReaderNarrowEntitlementAndUsageReads(t *testing.T) {
-	created := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+func TestStripeReaderNarrowEntitlementReads(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/v1/account":
@@ -168,14 +129,6 @@ func TestStripeReaderNarrowEntitlementAndUsageReads(t *testing.T) {
 		case "/v1/entitlements/active_entitlements":
 			require.Equal(t, "cus_reader123", request.URL.Query().Get("customer"))
 			fmt.Fprint(response, `{"object":"list","has_more":false,"data":[{"id":"ent_reader123","feature":"feat_reader123"}]}`)
-		case "/v1/billing/meters/mtr_reader123/event_summaries":
-			require.Equal(t, "cus_reader123", request.URL.Query().Get("customer"))
-			start, err := strconv.ParseInt(request.URL.Query().Get("start_time"), 10, 64)
-			require.NoError(t, err)
-			end, err := strconv.ParseInt(request.URL.Query().Get("end_time"), 10, 64)
-			require.NoError(t, err)
-			assert.Less(t, start, end)
-			fmt.Fprint(response, `{"object":"list","has_more":false,"data":[{"aggregated_value":12}]}`)
 		default:
 			http.NotFound(response, request)
 		}
@@ -190,14 +143,6 @@ func TestStripeReaderNarrowEntitlementAndUsageReads(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.True(t, entitlement.Found)
-	usage, err := reader.ReadMeterUsage(context.Background(), MeterUsageRequest{
-		Account:  account,
-		Meter:    ResourceRef{Type: ResourceBillingMeter, ID: "mtr_reader123"},
-		Customer: ResourceRef{Type: ResourceCustomer, ID: "cus_reader123"},
-		Window:   CreationWindow{Start: created, End: created.Add(time.Minute)},
-	})
-	require.NoError(t, err)
-	assert.True(t, usage.Found)
 }
 
 func TestStripeReaderStringRepresentationsAreRedacted(t *testing.T) {

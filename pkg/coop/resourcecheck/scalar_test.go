@@ -146,7 +146,7 @@ func TestFieldResultsNeverRetainScalarValues(t *testing.T) {
 	})
 	require.NoError(t, err)
 	requireValidResult(t, result)
-	encoded, err := verification.NewResultSet(result).MarshalDeterministic()
+	encoded, err := json.Marshal(verification.NewResultSet(result))
 	require.NoError(t, err)
 	assert.NotContains(t, string(encoded), "expected-sensitive-field-value")
 	assert.NotContains(t, string(encoded), "observed-sensitive-field-value")

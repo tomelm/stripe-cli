@@ -48,7 +48,7 @@ type StripeReaderConfig struct {
 }
 
 // StripeReader is a concrete, read-only Stripe implementation of Reader plus
-// the two narrow entitlement and meter-usage capabilities.
+// the narrow entitlement capability.
 type StripeReader struct {
 	credential    StripeCredential
 	client        stripe.RequestPerformer
@@ -114,59 +114,6 @@ func (reader *StripeReader) Fetch(ctx context.Context, request FetchRequest) (Re
 	return reader.normalize(payload, request.Resource.Type, request.Account.AccountID)
 }
 
-// List retrieves one bounded page and applies every structural predicate in
-// memory. It never paginates or retries.
-func (reader *StripeReader) List(ctx context.Context, request ListRequest) (ListPage, error) {
-	if err := reader.authorize(ctx, request.Account); err != nil {
-		return ListPage{}, err
-	}
-	if request.Limit < 1 || request.Limit > MaxListLimit {
-		return ListPage{}, ErrMalformed
-	}
-	if err := validateCreationWindow(request.Window); err != nil {
-		return ListPage{}, ErrMalformed
-	}
-	descriptor, ok := stripeResourceDescriptors[request.ResourceType]
-	if !ok || descriptor.listPath == "" {
-		return ListPage{}, ErrUnavailable
-	}
-
-	params := url.Values{"limit": {strconv.Itoa(request.Limit)}}
-	if descriptor.createdFilter {
-		// Integer API filters form a safe superset. The checker re-applies the
-		// exact half-open, nanosecond-aware window after normalization.
-		params.Set("created[gte]", strconv.FormatInt(request.Window.Start.Unix(), 10))
-		params.Set("created[lte]", strconv.FormatInt(request.Window.End.Unix(), 10))
-	}
-	payload, err := reader.getObject(ctx, descriptor.listPath, params)
-	if err != nil {
-		return ListPage{}, err
-	}
-	data, ok := payload["data"].([]any)
-	if !ok || len(data) > request.Limit {
-		return ListPage{}, ErrMalformed
-	}
-	hasMore, ok := payload["has_more"].(bool)
-	if !ok {
-		return ListPage{}, ErrMalformed
-	}
-	page := ListPage{HasMore: hasMore}
-	for _, item := range data {
-		object, ok := item.(map[string]any)
-		if !ok {
-			return ListPage{}, ErrMalformed
-		}
-		resource, err := reader.normalize(object, request.ResourceType, request.Account.AccountID)
-		if err != nil {
-			return ListPage{}, err
-		}
-		if windowContains(request.Window, resource.CreatedAt) && resourceMatchesPredicates(resource, request.Predicates) {
-			page.Resources = append(page.Resources, resource)
-		}
-	}
-	return page, nil
-}
-
 // ReadActiveEntitlement performs one bounded customer-filtered list request.
 func (reader *StripeReader) ReadActiveEntitlement(ctx context.Context, request ActiveEntitlementRequest) (ActiveEntitlementObservation, error) {
 	if err := reader.authorize(ctx, request.Account); err != nil {
@@ -207,48 +154,6 @@ func (reader *StripeReader) ReadActiveEntitlement(ctx context.Context, request A
 		}
 	}
 	return ActiveEntitlementObservation{HasMore: hasMore}, nil
-}
-
-// ReadMeterUsage performs one bounded meter/customer event-summary request.
-func (reader *StripeReader) ReadMeterUsage(ctx context.Context, request MeterUsageRequest) (MeterUsageObservation, error) {
-	if err := reader.authorize(ctx, request.Account); err != nil {
-		return MeterUsageObservation{}, err
-	}
-	if err := validateResourceRef(request.Meter); err != nil || request.Meter.Type != ResourceBillingMeter {
-		return MeterUsageObservation{}, ErrMalformed
-	}
-	if err := validateResourceRef(request.Customer); err != nil || request.Customer.Type != ResourceCustomer {
-		return MeterUsageObservation{}, ErrMalformed
-	}
-	if err := validateCreationWindow(request.Window); err != nil {
-		return MeterUsageObservation{}, ErrMalformed
-	}
-	start := request.Window.Start.UTC().Truncate(time.Minute)
-	end := request.Window.End.UTC().Truncate(time.Minute)
-	if end.Before(request.Window.End.UTC()) {
-		end = end.Add(time.Minute)
-	}
-	if !end.After(start) {
-		end = start.Add(time.Minute)
-	}
-	path := "/v1/billing/meters/" + url.PathEscape(request.Meter.ID) + "/event_summaries"
-	payload, err := reader.getObject(ctx, path, url.Values{
-		"customer":   {request.Customer.ID},
-		"end_time":   {strconv.FormatInt(end.Unix(), 10)},
-		"limit":      {"1"},
-		"start_time": {strconv.FormatInt(start.Unix(), 10)},
-	})
-	if err != nil {
-		return MeterUsageObservation{}, err
-	}
-	data, ok := payload["data"].([]any)
-	if !ok || len(data) > 1 {
-		return MeterUsageObservation{}, ErrMalformed
-	}
-	if _, ok := payload["has_more"].(bool); !ok {
-		return MeterUsageObservation{}, ErrMalformed
-	}
-	return MeterUsageObservation{Found: len(data) == 1}, nil
 }
 
 func (reader *StripeReader) authorize(ctx context.Context, account AccountContext) error {
@@ -349,23 +254,21 @@ func (reader *StripeReader) getObject(ctx context.Context, path string, params u
 }
 
 type stripeResourceDescriptor struct {
-	object        string
-	retrievePath  string
-	listPath      string
-	createdFilter bool
+	object       string
+	retrievePath string
 }
 
 var stripeResourceDescriptors = map[ResourceType]stripeResourceDescriptor{
-	ResourceAccount:         {object: "account", retrievePath: "/v1/accounts/{id}", listPath: "/v1/accounts", createdFilter: true},
-	ResourceBillingMeter:    {object: "billing.meter", retrievePath: "/v1/billing/meters/{id}", listPath: "/v1/billing/meters"},
-	ResourceCheckoutSession: {object: "checkout.session", retrievePath: "/v1/checkout/sessions/{id}", listPath: "/v1/checkout/sessions", createdFilter: true},
-	ResourceCustomer:        {object: "customer", retrievePath: "/v1/customers/{id}", listPath: "/v1/customers", createdFilter: true},
-	ResourceInvoice:         {object: "invoice", retrievePath: "/v1/invoices/{id}", listPath: "/v1/invoices", createdFilter: true},
-	ResourceInvoiceItem:     {object: "invoiceitem", retrievePath: "/v1/invoiceitems/{id}", listPath: "/v1/invoiceitems"},
-	ResourcePaymentIntent:   {object: "payment_intent", retrievePath: "/v1/payment_intents/{id}", listPath: "/v1/payment_intents", createdFilter: true},
-	ResourcePrice:           {object: "price", retrievePath: "/v1/prices/{id}", listPath: "/v1/prices", createdFilter: true},
-	ResourceProduct:         {object: "product", retrievePath: "/v1/products/{id}", listPath: "/v1/products", createdFilter: true},
-	ResourceSubscription:    {object: "subscription", retrievePath: "/v1/subscriptions/{id}", listPath: "/v1/subscriptions", createdFilter: true},
+	ResourceAccount:         {object: "account", retrievePath: "/v1/accounts/{id}"},
+	ResourceBillingMeter:    {object: "billing.meter", retrievePath: "/v1/billing/meters/{id}"},
+	ResourceCheckoutSession: {object: "checkout.session", retrievePath: "/v1/checkout/sessions/{id}"},
+	ResourceCustomer:        {object: "customer", retrievePath: "/v1/customers/{id}"},
+	ResourceInvoice:         {object: "invoice", retrievePath: "/v1/invoices/{id}"},
+	ResourceInvoiceItem:     {object: "invoiceitem", retrievePath: "/v1/invoiceitems/{id}"},
+	ResourcePaymentIntent:   {object: "payment_intent", retrievePath: "/v1/payment_intents/{id}"},
+	ResourcePrice:           {object: "price", retrievePath: "/v1/prices/{id}"},
+	ResourceProduct:         {object: "product", retrievePath: "/v1/products/{id}"},
+	ResourceSubscription:    {object: "subscription", retrievePath: "/v1/subscriptions/{id}"},
 }
 
 func (reader *StripeReader) normalize(payload map[string]any, resourceType ResourceType, accountID string) (Resource, error) {
@@ -592,5 +495,4 @@ func unixTime(value any) (time.Time, bool) {
 var (
 	_ Reader                  = (*StripeReader)(nil)
 	_ ActiveEntitlementReader = (*StripeReader)(nil)
-	_ MeterUsageReader        = (*StripeReader)(nil)
 )
