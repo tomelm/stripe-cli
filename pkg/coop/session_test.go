@@ -2,6 +2,7 @@ package coop
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -196,19 +197,23 @@ func TestTransitionNodeSetsTimestamps(t *testing.T) {
 	assert.NotNil(t, node.CompletedAt)
 }
 
-func TestTransitionNodePreservesOriginalStartedAt(t *testing.T) {
+func TestTransitionNodeReopenResetsActionWindow(t *testing.T) {
 	s := newTestSession()
 
 	require.NoError(t, s.TransitionNode(1, NodeActive))
 	node, _ := s.NodeByNumber(1)
 	firstStartedAt := node.StartedAt
 	require.NotNil(t, firstStartedAt)
+	earlier := firstStartedAt.Add(-time.Hour)
+	node.StartedAt = &earlier
 
+	// Reopening from review begins a correction attempt: StartedAt must move
+	// forward so resource verification measures the new attempt's window.
 	require.NoError(t, s.TransitionNode(1, NodeReview))
 	require.NoError(t, s.TransitionNode(1, NodeActive))
 	node, _ = s.NodeByNumber(1)
 	require.NotNil(t, node.StartedAt)
-	assert.True(t, node.StartedAt.Equal(*firstStartedAt))
+	assert.True(t, node.StartedAt.After(earlier))
 	assert.Nil(t, node.CompletedAt)
 }
 

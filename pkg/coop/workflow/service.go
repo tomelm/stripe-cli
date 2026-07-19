@@ -3,7 +3,9 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -32,11 +34,18 @@ type Service struct {
 	verificationSanitizer verification.Sanitizer
 }
 
-// ResourceVerifier is the bounded, advisory provider surface used by
-// report-work. Implementations must keep credentials process-local.
+// ResourceVerifier is the bounded, read-only provider surface used by
+// report-work. Its results gate the node transition: deterministic
+// contradictions keep the node active for agent repair, while unavailable
+// evidence fails open to normal review. Implementations must keep credentials
+// process-local.
 type ResourceVerifier interface {
 	Verify(context.Context, resourcecheck.ReportRequest) (verification.ResultSet, error)
 }
+
+// errReportSuperseded aborts the report-work update when the node changed
+// while the (lock-free) Stripe verification pass was running.
+var errReportSuperseded = errors.New("node changed while Stripe verification was running")
 
 type Option func(*Service)
 
@@ -108,10 +117,18 @@ func (s *Service) StartWork(sessionID string, nodeNumber int, note string) (coop
 		if err := requireActiveSession(session); err != nil {
 			return err
 		}
-		if err := session.TransitionNode(nodeNumber, coop.NodeActive); err != nil {
+		node, err := session.NodeByNumber(nodeNumber)
+		if err != nil {
 			return err
 		}
-		node, _ := session.NodeByNumber(nodeNumber)
+		// Idempotent on already-active nodes so an agent redoing rejected or
+		// verification-blocked work can safely re-run start-work.
+		if node.State != coop.NodeActive {
+			if err := session.TransitionNode(nodeNumber, coop.NodeActive); err != nil {
+				return err
+			}
+			node, _ = session.NodeByNumber(nodeNumber)
+		}
 		node.Activity = note
 		return nil
 	})
@@ -151,70 +168,69 @@ func (s *Service) ReportWork(sessionID string, nodeNumber int, input ReportWorkI
 	return s.ReportWorkContext(context.Background(), sessionID, nodeNumber, input, autoConfirm)
 }
 
-// ReportWorkContext completes the node and then performs one advisory,
-// bounded resource pass for the node's digest-bound overlay.
+// ReportWorkContext verifies reported Stripe resources for the node's
+// digest-bound overlay before any state transition, then persists references,
+// results, and the outcome in one guarded update. Deterministic contradictions
+// and missing declared roles keep the node active with repair guidance for the
+// agent; unavailable evidence fails open to normal review.
 func (s *Service) ReportWorkContext(ctx context.Context, sessionID string, nodeNumber int, input ReportWorkInput, autoConfirm bool) (coop.CommandResponse, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	var targetState coop.NodeState
-	var nodeID string
-	session, err := s.store.Update(sessionID, func(session *coop.Session) error {
-		if err := requireActiveSession(session); err != nil {
-			return err
-		}
-		node, err := session.NodeByNumber(nodeNumber)
-		if err != nil {
-			return err
-		}
-		step, _, _, err := session.StepByNodeNumber(nodeNumber)
-		if err != nil {
-			return err
-		}
-		nodeID = step.Key + "." + node.Key
-		if err := appendStripeResourceInputs(session, nodeNumber, nodeID, input.StripeResources); err != nil {
-			return err
-		}
-		targetState = coop.NodeReview
-		if autoConfirm || node.AutoConfirm {
-			targetState = coop.NodeDone
-		}
-		if err := session.TransitionNode(nodeNumber, targetState); err != nil {
-			return err
-		}
-		node, _ = session.NodeByNumber(nodeNumber)
-		if input.File != "" || input.Snippet != "" || input.Note != "" {
-			node.Implementation = &coop.Implementation{
-				File:    input.File,
-				Lines:   input.Lines,
-				Snippet: input.Snippet,
-				Note:    input.Note,
-			}
-		}
-		node.Activity = ""
-		if session.IsComplete() {
-			session.Status = coop.SessionCompleted
-		}
-		return nil
-	})
+	startWorkHint := fmt.Sprintf("stripe coop agent start-work --session=%s --step=%d", sessionID, nodeNumber)
+	snapshot, err := s.store.Read(sessionID)
 	if err != nil {
-		return errorResponse(err, fmt.Sprintf("stripe coop agent start-work --session=%s --step=%d", sessionID, nodeNumber)), nil
+		return errorResponse(err, startWorkHint), nil
 	}
-	if s.resourceVerifier != nil {
-		node, _ := session.NodeByNumber(nodeNumber)
-		resultSet, verifyErr := s.resourceVerifier.Verify(ctx, resourcecheck.ReportRequest{
-			SessionID:       session.ID,
-			BlueprintID:     session.Blueprint,
-			BlueprintDigest: session.BlueprintDigest,
+	if err := requireActiveSession(snapshot); err != nil {
+		return errorResponse(err, startWorkHint), nil
+	}
+	node, err := snapshot.NodeByNumber(nodeNumber)
+	if err != nil {
+		return errorResponse(err, startWorkHint), nil
+	}
+	step, _, _, err := snapshot.StepByNodeNumber(nodeNumber)
+	if err != nil {
+		return errorResponse(err, startWorkHint), nil
+	}
+	prospectiveTarget := coop.NodeReview
+	if autoConfirm || node.AutoConfirm {
+		prospectiveTarget = coop.NodeDone
+	}
+	if node.State != coop.NodeActive {
+		return errorResponse(reportTransitionError(node.State, nodeNumber, prospectiveTarget), startWorkHint), nil
+	}
+	nodeID := step.Key + "." + node.Key
+	replacedRoles, replacements, err := stripeResourceReplacements(snapshot, nodeNumber, nodeID, input.StripeResources)
+	if err != nil {
+		return errorResponse(err, startWorkHint), nil
+	}
+	prospective := supersedeStripeResources(snapshot.StripeResources, replacedRoles, replacements)
+	startedAtSnapshot := cloneTime(node.StartedAt)
+
+	// Run the bounded, read-only Stripe pass before any state change and
+	// outside the store lock (Store.Read is lock-free).
+	var resultSet verification.ResultSet
+	var missing []string
+	verifierRan := s.resourceVerifier != nil
+	if verifierRan {
+		if declaration, ok := resourcecheck.StageForBlueprint(snapshot.Blueprint, snapshot.BlueprintDigest, nodeID); ok {
+			missing = missingStageRoles(declaration, prospective)
+		}
+		completedAt := s.now()
+		set, verifyErr := s.resourceVerifier.Verify(ctx, resourcecheck.ReportRequest{
+			SessionID:       snapshot.ID,
+			BlueprintID:     snapshot.Blueprint,
+			BlueprintDigest: snapshot.BlueprintDigest,
 			NodeID:          nodeID,
 			NodeNumber:      nodeNumber,
-			StartedAt:       cloneTime(node.StartedAt),
-			CompletedAt:     cloneTime(node.CompletedAt),
-			References:      reportReferences(session.StripeResources),
+			StartedAt:       startedAtSnapshot,
+			CompletedAt:     &completedAt,
+			References:      reportReferences(prospective),
 			Deadline:        s.now().Add(resourcecheck.DefaultReportDeadline),
 		})
 		if verifyErr != nil {
-			resultSet = verification.NewResultSet(verification.Result{
+			set = verification.NewResultSet(verification.Result{
 				ID:            "resource.provider",
 				CheckID:       resourcecheck.CheckResourceExists,
 				Source:        verification.SourceCLI,
@@ -223,60 +239,242 @@ func (s *Service) ReportWorkContext(ctx context.Context, sessionID string, nodeN
 				Detail:        "Stripe resource verification was unavailable",
 			})
 		}
-		if updated, updateErr := s.store.Update(sessionID, func(current *coop.Session) error {
-			currentNode, nodeErr := current.NodeByNumber(nodeNumber)
-			if nodeErr != nil {
-				return nodeErr
-			}
+		resultSet = set
+	}
+	blocked := verifierRan && (len(missing) > 0 || hasBlockingResult(resultSet))
+
+	var targetState coop.NodeState
+	session, err := s.store.Update(sessionID, func(current *coop.Session) error {
+		if err := requireActiveSession(current); err != nil {
+			return err
+		}
+		currentNode, nodeErr := current.NodeByNumber(nodeNumber)
+		if nodeErr != nil {
+			return nodeErr
+		}
+		if currentNode.State != coop.NodeActive || !timesEqual(currentNode.StartedAt, startedAtSnapshot) {
+			return errReportSuperseded
+		}
+		current.StripeResources = supersedeStripeResources(current.StripeResources, replacedRoles, replacements)
+		if verifierRan {
 			currentNode.VerificationResults = nil
 			for _, result := range resultSet.Results {
 				if err := verification.UpsertResult(&currentNode.VerificationResults, result, s.verificationSanitizer); err != nil {
 					return err
 				}
 			}
-			return nil
-		}); updateErr == nil {
-			session = updated
 		}
+		if blocked {
+			// Keep the node active for agent repair. References and results
+			// are persisted so the TUI and the corrected report see them.
+			return nil
+		}
+		targetState = coop.NodeReview
+		if autoConfirm || currentNode.AutoConfirm {
+			targetState = coop.NodeDone
+		}
+		if err := current.TransitionNode(nodeNumber, targetState); err != nil {
+			return err
+		}
+		currentNode, _ = current.NodeByNumber(nodeNumber)
+		if input.File != "" || input.Snippet != "" || input.Note != "" {
+			currentNode.Implementation = &coop.Implementation{
+				File:    input.File,
+				Lines:   input.Lines,
+				Snippet: input.Snippet,
+				Note:    input.Note,
+			}
+		}
+		currentNode.Activity = ""
+		if current.IsComplete() {
+			current.Status = coop.SessionCompleted
+		}
+		return nil
+	})
+	if errors.Is(err, errReportSuperseded) {
+		return s.supersededReportResponse(sessionID, nodeNumber), nil
 	}
-	node, _ := session.NodeByNumber(nodeNumber)
+	if err != nil {
+		return errorResponse(err, startWorkHint), nil
+	}
+	node, _ = session.NodeByNumber(nodeNumber)
+	if blocked {
+		return blockedReportResponse(session, node, nodeNumber, missing), nil
+	}
 	return s.reportWorkResponse(session, node, nodeNumber, targetState), nil
 }
 
-func appendStripeResourceInputs(session *coop.Session, nodeNumber int, nodeID string, inputs []StripeResourceInput) error {
+// reportTransitionError mirrors Session.TransitionNode's validation errors for
+// the pre-verification state check, so report-work rejects non-active nodes
+// with the same message family without running a wasted Stripe pass.
+func reportTransitionError(state coop.NodeState, nodeNumber int, target coop.NodeState) error {
+	if state == coop.NodeDone || state == coop.NodeSkipped {
+		return fmt.Errorf("node %d is in terminal state %q, cannot transition", nodeNumber, state)
+	}
+	return fmt.Errorf("invalid transition: node %d is %q, cannot move to %q", nodeNumber, state, target)
+}
+
+// stripeResourceReplacements validates the agent-supplied inputs against the
+// stage overlay and returns the set of roles being (re-)reported plus their
+// replacement references. A corrected report supersedes every earlier
+// reference for a re-reported role, so stale IDs from prior attempts cannot
+// keep feeding verification.
+func stripeResourceReplacements(session *coop.Session, nodeNumber int, nodeID string, inputs []StripeResourceInput) (map[string]struct{}, []coop.StripeResourceReference, error) {
 	if len(inputs) == 0 {
-		return nil
+		return nil, nil, nil
 	}
 	declaration, ok := resourcecheck.StageForBlueprint(session.Blueprint, session.BlueprintDigest, nodeID)
 	if !ok {
-		return fmt.Errorf("--stripe-resource is not supported for this blueprint stage or session digest")
+		return nil, nil, fmt.Errorf("--stripe-resource is not supported for this blueprint stage or session digest")
 	}
 	roles := make(map[string]resourcecheck.ResourceType, len(declaration.Resources))
 	for _, resource := range declaration.Resources {
 		roles[resource.Role] = resource.Type
 	}
-	seen := make(map[string]struct{}, len(session.StripeResources)+len(inputs))
-	for _, existing := range session.StripeResources {
-		seen[existing.Role+"\x00"+existing.ID] = struct{}{}
-	}
+	seen := make(map[string]struct{}, len(inputs))
+	replacedRoles := make(map[string]struct{}, len(inputs))
+	replacements := make([]coop.StripeResourceReference, 0, len(inputs))
 	for _, input := range inputs {
 		resourceType, exists := roles[input.Role]
 		if !exists {
-			return fmt.Errorf("Stripe resource role %q is not declared for this blueprint stage", input.Role)
+			return nil, nil, fmt.Errorf("Stripe resource role %q is not declared for this blueprint stage", input.Role)
 		}
 		if _, err := resourcecheck.NewResourceRef(resourceType, input.ID); err != nil {
-			return fmt.Errorf("Stripe resource ID for role %q is invalid", input.Role)
+			return nil, nil, fmt.Errorf("Stripe resource ID for role %q is invalid", input.Role)
 		}
 		key := input.Role + "\x00" + input.ID
 		if _, duplicate := seen[key]; duplicate {
 			continue
 		}
 		seen[key] = struct{}{}
-		session.StripeResources = append(session.StripeResources, coop.StripeResourceReference{
+		replacedRoles[input.Role] = struct{}{}
+		replacements = append(replacements, coop.StripeResourceReference{
 			Role: input.Role, Type: string(resourceType), ID: input.ID, ReportedNode: nodeNumber,
 		})
 	}
-	return nil
+	return replacedRoles, replacements, nil
+}
+
+// supersedeStripeResources drops every existing reference whose role is being
+// re-reported and appends the replacements. References for roles not present
+// in this report are retained for reuse by later stages.
+func supersedeStripeResources(existing []coop.StripeResourceReference, replacedRoles map[string]struct{}, replacements []coop.StripeResourceReference) []coop.StripeResourceReference {
+	if len(replacedRoles) == 0 {
+		return existing
+	}
+	merged := make([]coop.StripeResourceReference, 0, len(existing)+len(replacements))
+	for _, reference := range existing {
+		if _, replaced := replacedRoles[reference.Role]; replaced {
+			continue
+		}
+		merged = append(merged, reference)
+	}
+	return append(merged, replacements...)
+}
+
+// missingStageRoles returns every overlay-declared role with no reference in
+// the prospective session set. It needs no Stripe access, so missing required
+// IDs block even when credentials are unavailable.
+func missingStageRoles(declaration resourcecheck.StageDeclaration, references []coop.StripeResourceReference) []string {
+	present := make(map[string]bool, len(references))
+	for _, reference := range references {
+		present[reference.Role] = true
+	}
+	var missing []string
+	for _, resource := range declaration.Resources {
+		if !present[resource.Role] {
+			missing = append(missing, resource.Role)
+		}
+	}
+	sort.Strings(missing)
+	return missing
+}
+
+// hasBlockingResult reports whether the verification pass produced a
+// deterministic contradiction. Failed results always block. A not_observed
+// existence result blocks because it means a reported ID could not be found
+// (agent-repairable); cascaded not_observed results on linkage/entitlement
+// checks and every unavailable result fail open.
+func hasBlockingResult(set verification.ResultSet) bool {
+	for _, result := range set.Results {
+		if result.Status == verification.StatusFailed {
+			return true
+		}
+		if result.Status == verification.StatusNotObserved && result.CheckID == resourcecheck.CheckResourceExists {
+			return true
+		}
+	}
+	return false
+}
+
+func isBlockingResult(result verification.Result) bool {
+	return result.Status == verification.StatusFailed ||
+		(result.Status == verification.StatusNotObserved && result.CheckID == resourcecheck.CheckResourceExists)
+}
+
+func blockedReportResponse(session *coop.Session, node *coop.SessionNode, nodeNumber int, missing []string) coop.CommandResponse {
+	lines := make([]string, 0, verification.MaxAgentFacingResults)
+	for _, role := range missing {
+		if len(lines) >= verification.MaxAgentFacingResults {
+			break
+		}
+		lines = append(lines, fmt.Sprintf("missing --stripe-resource %s=<id>: no Stripe resource ID was reported for role %q", role, role))
+	}
+	if node != nil && node.VerificationResults != nil {
+		for _, result := range node.VerificationResults.Results {
+			if len(lines) >= verification.MaxAgentFacingResults {
+				break
+			}
+			if isBlockingResult(result) && result.Detail != "" {
+				lines = append(lines, result.Detail)
+			}
+		}
+	}
+	message := "Stripe resource verification failed; the node stays active. Fix the integration or the reported IDs, then re-run report-work with the corrected --stripe-resource flags."
+	if len(lines) > 0 {
+		message += "\n- " + strings.Join(lines, "\n- ")
+	}
+	return nodeVerificationResponse(coop.CommandResponse{
+		OK:        false,
+		SessionID: session.ID,
+		Node:      nodeNumber,
+		State:     string(coop.NodeActive),
+		Error:     "Stripe resource verification failed; work was not accepted for review",
+		Message:   message,
+		Next:      fmt.Sprintf("stripe coop agent report-work --session=%s --step=%d --file=<path> --note=%s --stripe-resource <role>=<id>", session.ID, nodeNumber, quoteArg("<what you fixed>")),
+	}, node)
+}
+
+// supersededReportResponse re-reads the session after the guarded update
+// detected a concurrent change and explains the actual node state.
+func (s *Service) supersededReportResponse(sessionID string, nodeNumber int) coop.CommandResponse {
+	session, err := s.store.Read(sessionID)
+	if err != nil {
+		return errorResponse(err, "stripe coop status")
+	}
+	node, err := session.NodeByNumber(nodeNumber)
+	if err != nil {
+		return errorResponse(err, "stripe coop status")
+	}
+	if node.State != coop.NodeActive {
+		return alreadyMovedResponse(session, nodeNumber, node.State)
+	}
+	return coop.CommandResponse{
+		OK:        false,
+		SessionID: session.ID,
+		Node:      nodeNumber,
+		State:     string(coop.NodeActive),
+		Error:     "node was reopened while Stripe verification was running; verification results were discarded",
+		Message:   "Re-run report-work so the corrected attempt is verified.",
+		Next:      fmt.Sprintf("stripe coop agent report-work --session=%s --step=%d --file=<path> --note=%s", session.ID, nodeNumber, quoteArg("<what you did>")),
+	}
+}
+
+func timesEqual(left, right *time.Time) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return left.Equal(*right)
 }
 
 func reportReferences(references []coop.StripeResourceReference) []resourcecheck.ReportReference {
@@ -406,9 +604,24 @@ func (s *Service) RequestChanges(sessionID string, nodeNumbers []int, note strin
 			node.Implementation = nil
 			node.Verifications = nil
 			node.VerificationResults = nil
+			// Remove the rejected attempt's resource references so they cannot
+			// keep feeding verification. References reported by other (done)
+			// nodes are retained for reuse.
+			session.StripeResources = withoutReportedNode(session.StripeResources, nodeNumber)
 		}
 		return nil
 	})
+}
+
+func withoutReportedNode(references []coop.StripeResourceReference, nodeNumber int) []coop.StripeResourceReference {
+	filtered := make([]coop.StripeResourceReference, 0, len(references))
+	for _, reference := range references {
+		if reference.ReportedNode == nodeNumber {
+			continue
+		}
+		filtered = append(filtered, reference)
+	}
+	return filtered
 }
 
 func (s *Service) AwaitReview(sessionID string, nodeNumber int) (coop.CommandResponse, error) {

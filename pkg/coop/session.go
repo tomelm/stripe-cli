@@ -161,12 +161,16 @@ func (s *Session) TransitionNode(n int, to NodeState) error {
 		return fmt.Errorf("invalid transition: node %d is %q, cannot move to %q", n, node.State, to)
 	}
 
+	previous := node.State
 	node.State = to
 	now := time.Now().UTC()
 
 	switch to {
 	case NodeActive:
-		if node.StartedAt == nil {
+		// Reopening from review begins a correction: reset the action window
+		// so resource verification measures the corrected attempt, not the
+		// rejected one.
+		if node.StartedAt == nil || previous == NodeReview {
 			node.StartedAt = &now
 		}
 		node.CompletedAt = nil

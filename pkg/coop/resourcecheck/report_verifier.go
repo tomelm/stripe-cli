@@ -201,8 +201,11 @@ func (verifier *ReportVerifier) observeReference(ctx context.Context, checker *C
 	if declaration.Lifecycle == ResourceCreated && reference.ReportedNode == request.NodeNumber {
 		window, ok := nodeActionWindow(request.StartedAt, request.CompletedAt)
 		if !ok {
-			return reportObservation{reference: reference, result: notObservedProviderResult(
-				resultID, CheckResourceExists, "resource creation could not be checked because the node action window is unavailable or too broad", request.BlueprintDigest,
+			// Unavailable (not not_observed): a missing or oversized window is
+			// not agent-repairable, so it must fail open rather than block.
+			return reportObservation{reference: reference, result: unavailableProviderResult(
+				resultID, CheckResourceExists, verification.FailureDomainCollector,
+				"resource creation could not be checked because the node action window is unavailable or too broad", request.BlueprintDigest,
 			)}
 		}
 		observation, result, err := checker.ObserveExistence(ctx, ExistenceCheck{
