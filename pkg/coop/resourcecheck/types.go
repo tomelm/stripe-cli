@@ -19,6 +19,12 @@ const (
 	CheckResourceLinkage verification.CheckID = "stripe.resource.linkage"
 	// CheckActiveEntitlement verifies customer access to one declared feature.
 	CheckActiveEntitlement verification.CheckID = "stripe.resource.active-entitlement"
+	// CheckProductFeature verifies that a feature is attached to a previously
+	// observed product.
+	CheckProductFeature verification.CheckID = "stripe.resource.product-feature"
+	// CheckCoverage marks an explicit coverage limit (per-role reference cap or
+	// per-node result cap). Coverage markers never gate workflow progress.
+	CheckCoverage verification.CheckID = "stripe.resource.coverage"
 )
 
 // Mode identifies the Stripe mode authorized for a check.
@@ -48,7 +54,48 @@ const (
 	ResourcePrice              ResourceType = "price"
 	ResourceProduct            ResourceType = "product"
 	ResourceSubscription       ResourceType = "subscription"
+
+	// v2 billing types for the flat-fee-and-overages blueprint. Reads are
+	// attempted with the preview API version and degrade to explicit
+	// unavailable results; they never block and are never silently passed.
+	ResourceV2PricingPlan             ResourceType = "v2.billing.pricing_plan"
+	ResourceV2RateCard                ResourceType = "v2.billing.rate_card"
+	ResourceV2MeteredItem             ResourceType = "v2.billing.metered_item"
+	ResourceV2LicensedItem            ResourceType = "v2.billing.licensed_item"
+	ResourceV2LicenseFee              ResourceType = "v2.billing.license_fee"
+	ResourceV2PricingPlanSubscription ResourceType = "v2.billing.pricing_plan_subscription"
 )
+
+// limitedVerificationTypes cannot be fully verified by this CLI: feature
+// objects expose no creation timestamp, and v2 billing objects may be
+// unreadable with the available credentials or API version. They are exempt
+// from creation-window checks; the v2 set is additionally exempt from
+// missing-role blocking and reads pass or degrade to unavailable, never fail.
+var limitedVerificationTypes = map[ResourceType]struct {
+	window   bool // creation-window checks are meaningful
+	readable bool // reads are expected to succeed with standard credentials
+}{
+	ResourceEntitlementFeature:        {window: false, readable: true},
+	ResourceV2PricingPlan:             {window: false, readable: false},
+	ResourceV2RateCard:                {window: false, readable: false},
+	ResourceV2MeteredItem:             {window: false, readable: false},
+	ResourceV2LicensedItem:            {window: false, readable: false},
+	ResourceV2LicenseFee:              {window: false, readable: false},
+	ResourceV2PricingPlanSubscription: {window: false, readable: false},
+}
+
+func windowCheckable(resourceType ResourceType) bool {
+	limited, ok := limitedVerificationTypes[resourceType]
+	return !ok || limited.window
+}
+
+// BestEffortResourceType reports whether reads for this type may be
+// unsupported by the account's credentials or API version. The workflow layer
+// must not treat a missing reference for such a role as an agent error.
+func BestEffortResourceType(resourceType ResourceType) bool {
+	limited, ok := limitedVerificationTypes[resourceType]
+	return ok && !limited.readable
+}
 
 // AccountContext binds every read to one explicit test-mode Stripe account.
 // It deliberately contains no API key or other credential material.
@@ -181,6 +228,35 @@ type ActiveEntitlementReader interface {
 type ActiveEntitlementCheck struct {
 	ResultID verification.ResultID
 	Customer ObservedResource
+	Feature  ResourceRef
+}
+
+// ProductFeatureRequest is the complete read-only query needed to corroborate
+// that a feature is attached to a product.
+type ProductFeatureRequest struct {
+	Account AccountContext
+	Product ResourceRef
+	Feature ResourceRef
+}
+
+// ProductFeatureObservation reports a bounded list lookup. HasMore matters
+// only when Found is false.
+type ProductFeatureObservation struct {
+	Found   bool
+	HasMore bool
+}
+
+// ProductFeatureReader is an optional narrow capability implemented by
+// readers that support product-feature attachment lookups.
+type ProductFeatureReader interface {
+	ReadProductFeature(context.Context, ProductFeatureRequest) (ProductFeatureObservation, error)
+}
+
+// ProductFeatureCheck links a previously observed product to a declared
+// entitlement feature.
+type ProductFeatureCheck struct {
+	ResultID verification.ResultID
+	Product  ObservedResource
 	Feature  ResourceRef
 }
 

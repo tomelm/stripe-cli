@@ -414,7 +414,7 @@ func TestRenderReviewCardShowsAutomaticStripeResourceResults(t *testing.T) {
 	assertContainsPlain(t, card, "1 passed")
 	assertContainsPlain(t, card, "1 failed")
 	assertContainsPlain(t, card, "1 unavailable")
-	assertContainsPlain(t, card, "advisory")
+	assertNotContainsPlain(t, card, "advisory")
 	assertNotContainsPlain(t, card, "evidence")
 }
 

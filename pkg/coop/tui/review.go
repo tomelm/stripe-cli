@@ -277,7 +277,7 @@ func (m Model) reviewResourceVerificationLabel(nodeNumbers []int) string {
 	if len(labels) == 0 {
 		return ""
 	}
-	return strings.Join(labels, " · ") + " (advisory)"
+	return strings.Join(labels, " · ")
 }
 
 func (m Model) reviewNodeTitleLabel(nodeNumbers []int) string {

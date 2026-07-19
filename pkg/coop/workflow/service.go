@@ -374,7 +374,9 @@ func supersedeStripeResources(existing []coop.StripeResourceReference, replacedR
 
 // missingStageRoles returns every overlay-declared role with no reference in
 // the prospective session set. It needs no Stripe access, so missing required
-// IDs block even when credentials are unavailable.
+// IDs block even when credentials are unavailable. Best-effort v2 roles are
+// exempt: the account may not even be able to create those objects, so their
+// absence surfaces as an explicit unavailable result instead of a block.
 func missingStageRoles(declaration resourcecheck.StageDeclaration, references []coop.StripeResourceReference) []string {
 	present := make(map[string]bool, len(references))
 	for _, reference := range references {
@@ -382,6 +384,9 @@ func missingStageRoles(declaration resourcecheck.StageDeclaration, references []
 	}
 	var missing []string
 	for _, resource := range declaration.Resources {
+		if resourcecheck.BestEffortResourceType(resource.Type) {
+			continue
+		}
 		if !present[resource.Role] {
 			missing = append(missing, resource.Role)
 		}

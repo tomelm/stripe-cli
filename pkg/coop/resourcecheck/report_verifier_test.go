@@ -68,6 +68,7 @@ func TestReportVerifierChecksMultipleRolesAndStableLinkage(t *testing.T) {
 	customer := validReportResource(customerRef, started.Add(-time.Hour))
 	invoice := validReportResource(invoiceRef, started.Add(10*time.Second))
 	invoice.Fields["collection_method"], _ = NewStringScalar("send_invoice")
+	invoice.Fields["days_until_due"], _ = NewNumberScalar("30")
 	invoice.Links["customer"] = customerRef
 	reader := &fakeReader{resources: map[string]Resource{
 		resourceKey(customerRef): customer,
@@ -83,7 +84,7 @@ func TestReportVerifierChecksMultipleRolesAndStableLinkage(t *testing.T) {
 		Deadline: time.Now().Add(time.Second),
 	})
 	require.NoError(t, err)
-	require.Len(t, set.Results, 4)
+	require.Len(t, set.Results, 5)
 	for _, result := range set.Results {
 		assert.Equal(t, verification.StatusPassed, result.Status, result.Detail)
 	}

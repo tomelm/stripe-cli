@@ -67,7 +67,7 @@ active ──→ completed    (all nodes done/skipped, or "stripe coop stop")
 |---------|---------|
 | `stripe coop run <blueprint>` | Create a session (outputs JSON with instructions) |
 | `stripe coop agent start-work --step <n>` | Mark a node as active |
-| `stripe coop agent report-work --step <n> [--stripe-resource <role>=<id> ...]` | Mark a node complete and automatically run advisory Stripe resource checks |
+| `stripe coop agent report-work --step <n> [--stripe-resource <role>=<id> ...]` | Verify reported Stripe resources, then mark the node complete |
 | `stripe coop agent report-check --step <n>` | Add a verification check |
 | `stripe coop agent skip --step <n>` | Skip a node |
 | `stripe coop agent await-review --step <n>` | Block until developer confirms or requests changes |
@@ -79,15 +79,21 @@ All agent commands output JSON with an `ok` field and a `next` field suggesting 
 For supported blueprint stages, `agent start-work` also returns
 `stripe_resource_roles`. Each entry fixes the role's Stripe object type and
 whether the stage creates or reuses it. The agent reports only object IDs with
-repeatable `--stripe-resource role=id` flags. Identical role/ID pairs are
-deduplicated, multiple IDs under one role are supported, and references remain
-in the session for relevant later stages. `agent report-work` automatically
-performs bounded read-only checks with the configured test/sandbox key and
-returns concise `verification_results` in its normal JSON response. The same
-advisory results appear in the existing review screen. Missing IDs are
-`not_observed`; missing authentication or API support is `unavailable`; an
-observed contradiction is `failed`. None of these results gates progress or
-adds prompts, retries, or user actions.
+repeatable `--stripe-resource role=id` flags. Multiple IDs under one role are
+supported and every accepted ID is checked; references remain in the session
+for relevant later stages, and re-reporting a role supersedes its earlier IDs.
+
+`agent report-work` performs bounded read-only checks with the configured
+test-mode key **before** the node transitions, and persists the results with
+the outcome in one update. A deterministic contradiction (`failed`) or a
+missing required role keeps the node active: the response is `ok:false` with
+concise repair guidance, and the agent fixes the integration and re-runs
+report-work — no human action is needed. Missing authentication, unsupported
+API access, or rate limits are `unavailable`, which fails open to normal
+review and is always distinct from a pass. Rejecting a step removes the
+rejected attempt's references and resets its action window. The persisted
+results appear in the review screen and in the `verification_results` field of
+the JSON response.
 
 ## TUI Keybindings
 

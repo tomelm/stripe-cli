@@ -253,7 +253,8 @@ func parseStripeResourceInputs(values []string) ([]workflow.StripeResourceInput,
 		role = strings.TrimSpace(role)
 		id = strings.TrimSpace(id)
 		if !ok || role == "" || id == "" || strings.Contains(id, "=") {
-			return nil, fmt.Errorf("--stripe-resource %q must use <role>=<id>", value)
+			// Never echo the value: a malformed flag may carry a pasted secret.
+			return nil, fmt.Errorf("--stripe-resource for role %q must use <role>=<id>", redactResourceRole(value))
 		}
 		key := role + "\x00" + id
 		if _, duplicate := seen[key]; duplicate {
@@ -263,6 +264,27 @@ func parseStripeResourceInputs(values []string) ([]workflow.StripeResourceInput,
 		result = append(result, workflow.StripeResourceInput{Role: role, ID: id})
 	}
 	return result, nil
+}
+
+// redactResourceRole extracts only the role segment (text before the first
+// '=') from a malformed --stripe-resource value so error output never
+// round-trips the ID portion, which may contain a pasted secret.
+func redactResourceRole(value string) string {
+	role, _, found := strings.Cut(value, "=")
+	role = strings.TrimSpace(role)
+	if !found || role == "" {
+		return "<unset>"
+	}
+	for _, credentialPrefix := range []string{"sk_", "rk_", "rkcs_", "pk_", "whsec_"} {
+		if strings.HasPrefix(role, credentialPrefix) {
+			return "<redacted>"
+		}
+	}
+	const maxRoleEcho = 64
+	if len(role) > maxRoleEcho {
+		role = role[:maxRoleEcho]
+	}
+	return role
 }
 
 func runCoopNextAction(sessionID, completed string) error {

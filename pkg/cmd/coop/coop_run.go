@@ -224,7 +224,8 @@ Important:
 - The human is watching your progress live in a terminal UI.
 - Write working code, not stubs. Run it. Verify it actually works.
 - Report what you did concretely (file paths, line numbers, test results).
-- When start-work returns stripe_resource_roles, add one --stripe-resource <role>=<id> flag for each relevant Stripe object ID your application created or retained. Repeat the flag for multiple IDs under one role. The CLI owns the role's resource type and verification expectations; never put a type, API key, or response body in the flag. Previously reported references are retained automatically.
+- When start-work returns stripe_resource_roles, add one --stripe-resource <role>=<id> flag for each relevant Stripe object ID your application created or retained. Repeat the flag for multiple IDs under one role. The CLI owns the role's resource type and verification expectations; never put a type, API key, or response body in the flag. Previously reported references are retained automatically; re-reporting a role replaces its earlier IDs.
+- report-work automatically verifies the reported Stripe resources. If it returns ok:false with verification feedback, the node stays active: fix the integration or the reported IDs, exercise the app again if needed, then re-run report-work. Do not wait for the human on a verification failure.
 - If a node doesn't apply to the user's setup, skip it: stripe coop agent skip --session=%s --step=<n> --note="<reason>"
 - Always install the LATEST version of the Stripe SDK for the language in use. Do not pin to old versions.
   Examples: "npm install stripe@latest", "pip install --upgrade stripe", "gem install stripe"

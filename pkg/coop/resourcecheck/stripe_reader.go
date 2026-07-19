@@ -18,6 +18,16 @@ import (
 
 const maxStripeResourceResponseBytes = 1 << 20
 
+// stripeReaderAPIVersion deliberately pins every v1 read so verification does
+// not depend on the account's default API version. It must stay equal to the
+// generated pkg/requests.StripeVersionHeaderValue (drift-tested).
+const stripeReaderAPIVersion = "2026-06-24.dahlia"
+
+// stripeReaderPreviewAPIVersion is sent for /v2/ reads, matching how the CLI
+// routes preview APIs. It must stay equal to the generated
+// pkg/requests.StripePreviewVersionHeaderValue (drift-tested).
+const stripeReaderPreviewAPIVersion = "2026-06-24.preview"
+
 // StripeCredential keeps an injected Stripe key process-local. Its string
 // representation is always redacted.
 type StripeCredential struct {
@@ -94,24 +104,133 @@ func (reader *StripeReader) String() string {
 	return "StripeReader{credential=[redacted] account=[redacted]}"
 }
 
-// Fetch retrieves and normalizes one allowlisted Stripe resource.
+// Fetch retrieves and normalizes one allowlisted Stripe resource. Features
+// are resolved through one bounded list page (Stripe exposes no reliable
+// direct retrieve for this use); v2 billing reads are best-effort and degrade
+// to ErrUnavailable on any failure.
 func (reader *StripeReader) Fetch(ctx context.Context, request FetchRequest) (Resource, error) {
 	if err := reader.authorize(ctx, request.Account); err != nil {
 		return Resource{}, err
+	}
+	if err := validateResourceRef(request.Resource); err != nil {
+		return Resource{}, ErrMalformed
+	}
+	if request.Resource.Type == ResourceEntitlementFeature {
+		return reader.fetchFeatureByList(ctx, request)
 	}
 	descriptor, ok := stripeResourceDescriptors[request.Resource.Type]
 	if !ok || descriptor.retrievePath == "" {
 		return Resource{}, ErrUnavailable
 	}
-	if err := validateResourceRef(request.Resource); err != nil {
-		return Resource{}, ErrMalformed
-	}
 	path := strings.ReplaceAll(descriptor.retrievePath, "{id}", url.PathEscape(request.Resource.ID))
+	if BestEffortResourceType(request.Resource.Type) {
+		// A v2 404 cannot be distinguished from an ungated API method, so
+		// every v2 read failure degrades to unavailable rather than becoming
+		// a deterministic contradiction.
+		resource, err := reader.fetchV2(ctx, path, request)
+		if err != nil {
+			return Resource{}, ErrUnavailable
+		}
+		return resource, nil
+	}
 	payload, err := reader.getObject(ctx, path, nil)
 	if err != nil {
 		return Resource{}, err
 	}
 	return reader.normalize(payload, request.Resource.Type, request.Account.AccountID)
+}
+
+// fetchFeatureByList resolves one entitlement feature through a single
+// bounded list page. An incomplete page without a match is unavailable
+// evidence, not a contradiction.
+func (reader *StripeReader) fetchFeatureByList(ctx context.Context, request FetchRequest) (Resource, error) {
+	payload, err := reader.getObject(ctx, "/v1/entitlements/features", url.Values{
+		"limit": {strconv.Itoa(MaxListLimit)},
+	})
+	if err != nil {
+		return Resource{}, err
+	}
+	data, ok := payload["data"].([]any)
+	if !ok || len(data) > MaxListLimit {
+		return Resource{}, ErrMalformed
+	}
+	hasMore, ok := payload["has_more"].(bool)
+	if !ok {
+		return Resource{}, ErrMalformed
+	}
+	for _, item := range data {
+		object, ok := item.(map[string]any)
+		if !ok {
+			return Resource{}, ErrMalformed
+		}
+		if id, _ := object["id"].(string); id != request.Resource.ID {
+			continue
+		}
+		return reader.normalize(object, ResourceEntitlementFeature, request.Account.AccountID)
+	}
+	if hasMore {
+		return Resource{}, ErrUnavailable
+	}
+	return Resource{}, ErrNotFound
+}
+
+func (reader *StripeReader) fetchV2(ctx context.Context, path string, request FetchRequest) (Resource, error) {
+	payload, err := reader.getObject(ctx, path, nil)
+	if err != nil {
+		return Resource{}, err
+	}
+	resource, err := reader.normalizeV2(payload, request.Resource.Type, request.Account.AccountID)
+	if err != nil {
+		return Resource{}, err
+	}
+	if resource.ID != request.Resource.ID {
+		return Resource{}, ErrMalformed
+	}
+	return resource, nil
+}
+
+// ReadProductFeature performs one bounded product-features list request.
+func (reader *StripeReader) ReadProductFeature(ctx context.Context, request ProductFeatureRequest) (ProductFeatureObservation, error) {
+	if err := reader.authorize(ctx, request.Account); err != nil {
+		return ProductFeatureObservation{}, err
+	}
+	if err := validateResourceRef(request.Product); err != nil || request.Product.Type != ResourceProduct {
+		return ProductFeatureObservation{}, ErrMalformed
+	}
+	if err := validateResourceRef(request.Feature); err != nil || request.Feature.Type != ResourceEntitlementFeature {
+		return ProductFeatureObservation{}, ErrMalformed
+	}
+	payload, err := reader.getObject(ctx, "/v1/products/"+url.PathEscape(request.Product.ID)+"/features", url.Values{
+		"limit": {strconv.Itoa(MaxListLimit)},
+	})
+	if err != nil {
+		return ProductFeatureObservation{}, err
+	}
+	data, ok := payload["data"].([]any)
+	if !ok || len(data) > MaxListLimit {
+		return ProductFeatureObservation{}, ErrMalformed
+	}
+	hasMore, ok := payload["has_more"].(bool)
+	if !ok {
+		return ProductFeatureObservation{}, ErrMalformed
+	}
+	for _, item := range data {
+		object, ok := item.(map[string]any)
+		if !ok {
+			return ProductFeatureObservation{}, ErrMalformed
+		}
+		if objectName, ok := object["object"].(string); !ok || objectName != "product_feature" {
+			return ProductFeatureObservation{}, ErrMalformed
+		}
+		featureID, ok := expandableID(object["entitlement_feature"])
+		if !ok {
+			return ProductFeatureObservation{}, ErrMalformed
+		}
+		if featureID == request.Feature.ID {
+			return ProductFeatureObservation{Found: true, HasMore: hasMore}, nil
+		}
+	}
+	return ProductFeatureObservation{HasMore: hasMore}, nil
 }
 
 // ReadActiveEntitlement performs one bounded customer-filtered list request.
@@ -208,8 +327,13 @@ func stripeCredentialMode(apiKey string) (Mode, bool) {
 }
 
 func (reader *StripeReader) getObject(ctx context.Context, path string, params url.Values) (map[string]any, error) {
+	version := stripeReaderAPIVersion
+	if stripe.IsV2Path(path) {
+		version = stripeReaderPreviewAPIVersion
+	}
 	response, err := reader.client.PerformRequest(ctx, http.MethodGet, path, params.Encode(), func(request *http.Request) error {
 		request.Header.Set("Authorization", "Bearer "+reader.credential.apiKey)
+		request.Header.Set("Stripe-Version", version)
 		if reader.stripeAccount != "" {
 			request.Header.Set("Stripe-Account", reader.stripeAccount)
 		}
@@ -265,10 +389,19 @@ var stripeResourceDescriptors = map[ResourceType]stripeResourceDescriptor{
 	ResourceCustomer:        {object: "customer", retrievePath: "/v1/customers/{id}"},
 	ResourceInvoice:         {object: "invoice", retrievePath: "/v1/invoices/{id}"},
 	ResourceInvoiceItem:     {object: "invoiceitem", retrievePath: "/v1/invoiceitems/{id}"},
-	ResourcePaymentIntent:   {object: "payment_intent", retrievePath: "/v1/payment_intents/{id}"},
-	ResourcePrice:           {object: "price", retrievePath: "/v1/prices/{id}"},
-	ResourceProduct:         {object: "product", retrievePath: "/v1/products/{id}"},
-	ResourceSubscription:    {object: "subscription", retrievePath: "/v1/subscriptions/{id}"},
+	// Features resolve through fetchFeatureByList; no direct retrieve path.
+	ResourceEntitlementFeature: {object: "entitlements.feature"},
+	ResourcePaymentIntent:      {object: "payment_intent", retrievePath: "/v1/payment_intents/{id}"},
+	ResourcePrice:              {object: "price", retrievePath: "/v1/prices/{id}"},
+	ResourceProduct:            {object: "product", retrievePath: "/v1/products/{id}"},
+	ResourceSubscription:       {object: "subscription", retrievePath: "/v1/subscriptions/{id}"},
+
+	ResourceV2PricingPlan:             {object: "v2.billing.pricing_plan", retrievePath: "/v2/billing/pricing_plans/{id}"},
+	ResourceV2RateCard:                {object: "v2.billing.rate_card", retrievePath: "/v2/billing/rate_cards/{id}"},
+	ResourceV2MeteredItem:             {object: "v2.billing.metered_item", retrievePath: "/v2/billing/metered_items/{id}"},
+	ResourceV2LicensedItem:            {object: "v2.billing.licensed_item", retrievePath: "/v2/billing/licensed_items/{id}"},
+	ResourceV2LicenseFee:              {object: "v2.billing.license_fee", retrievePath: "/v2/billing/license_fees/{id}"},
+	ResourceV2PricingPlanSubscription: {object: "v2.billing.pricing_plan_subscription", retrievePath: "/v2/billing/pricing_plan_subscriptions/{id}"},
 }
 
 func (reader *StripeReader) normalize(payload map[string]any, resourceType ResourceType, accountID string) (Resource, error) {
@@ -287,6 +420,11 @@ func (reader *StripeReader) normalize(payload map[string]any, resourceType Resou
 	created, ok := unixTime(payload["created"])
 	if !ok && resourceType == ResourceInvoiceItem {
 		created, ok = unixTime(payload["date"])
+	}
+	if !ok && resourceType == ResourceEntitlementFeature {
+		// Features expose no creation timestamp; the sentinel keeps identity
+		// validation intact and windowCheckable excludes them from window checks.
+		created, ok = createdUnavailableSentinel, true
 	}
 	if !ok {
 		return Resource{}, ErrMalformed
@@ -322,11 +460,22 @@ func (reader *StripeReader) normalize(payload map[string]any, resourceType Resou
 		addLink(payload, resource.Links, "subscription", "subscription", ResourceSubscription)
 	case ResourceCustomer:
 		addFields(payload, resource.Fields, "description")
+	case ResourceEntitlementFeature:
+		addFields(payload, resource.Fields, "active")
+		addPresenceField(payload, resource.Fields, "lookup_key", "lookup_key_present")
 	case ResourceInvoice:
-		addFields(payload, resource.Fields, "amount_due", "collection_method", "currency", "days_until_due", "status")
+		addFields(payload, resource.Fields, "amount_due", "collection_method", "currency", "days_until_due", "status", "parent.type")
 		addPresenceField(payload, resource.Fields, "hosted_invoice_url", "hosted_invoice_url_present")
 		addLink(payload, resource.Links, "customer", "customer", ResourceCustomer)
-		addLink(payload, resource.Links, "subscription", "subscription", ResourceSubscription)
+		// Current API shape: subscription linkage lives under the typed invoice
+		// parent. The legacy top-level field remains a fallback only when the
+		// parent shape produced no link; the parent shape wins on conflict.
+		if parentType, ok := rawAt(payload, "parent.type"); ok && parentType == "subscription_details" {
+			addLink(payload, resource.Links, "parent.subscription_details.subscription", "subscription", ResourceSubscription)
+		}
+		if _, linked := resource.Links["subscription"]; !linked {
+			addLink(payload, resource.Links, "subscription", "subscription", ResourceSubscription)
+		}
 	case ResourceInvoiceItem:
 		addFields(payload, resource.Fields, "amount", "currency")
 		addLink(payload, resource.Links, "customer", "customer", ResourceCustomer)
@@ -361,6 +510,51 @@ func (reader *StripeReader) normalize(payload map[string]any, resourceType Resou
 		}
 	}
 	addMetadataFields(payload, resource.Fields)
+	if err := validateReturnedResource(resource, resourceType); err != nil {
+		return Resource{}, ErrMalformed
+	}
+	return resource, nil
+}
+
+// createdUnavailableSentinel marks resources whose API exposes no creation
+// timestamp (features, some v2 billing objects). Window checks never run for
+// these types, so the sentinel only keeps validation invariants satisfied.
+var createdUnavailableSentinel = time.Unix(1, 0).UTC()
+
+// normalizeV2 defensively normalizes a v2 billing payload. Shapes for this
+// preview API family are not spec-confirmed, so only identity, mode, and a
+// few stable scalar fields are read; anything unexpected is ErrMalformed and
+// degrades to unavailable at the Fetch boundary.
+func (reader *StripeReader) normalizeV2(payload map[string]any, resourceType ResourceType, accountID string) (Resource, error) {
+	descriptor, ok := stripeResourceDescriptors[resourceType]
+	if !ok {
+		return Resource{}, ErrUnavailable
+	}
+	if object, present := payload["object"].(string); present && object != descriptor.object {
+		return Resource{}, ErrMalformed
+	}
+	id, ok := payload["id"].(string)
+	if !ok {
+		return Resource{}, ErrMalformed
+	}
+	created := createdUnavailableSentinel
+	if raw, present := payload["created"].(string); present {
+		if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+			created = parsed.UTC()
+		}
+	}
+	mode := reader.account.Mode
+	if livemode, present := payload["livemode"].(bool); present {
+		mode = ModeTest
+		if livemode {
+			mode = ModeLive
+		}
+	}
+	resource := Resource{
+		Type: resourceType, ID: id, CreatedAt: created, Mode: mode, AccountID: accountID,
+		Fields: make(map[string]JSONScalar), Links: make(map[string]ResourceRef),
+	}
+	addFields(payload, resource.Fields, "currency", "display_name", "live_version", "service_interval", "service_interval_count", "status", "tax_behavior", "unit_amount")
 	if err := validateReturnedResource(resource, resourceType); err != nil {
 		return Resource{}, ErrMalformed
 	}
@@ -495,4 +689,5 @@ func unixTime(value any) (time.Time, bool) {
 var (
 	_ Reader                  = (*StripeReader)(nil)
 	_ ActiveEntitlementReader = (*StripeReader)(nil)
+	_ ProductFeatureReader    = (*StripeReader)(nil)
 )

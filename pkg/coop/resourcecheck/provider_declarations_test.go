@@ -33,11 +33,26 @@ func TestFrozenOverlaysBindActualSessionDigestsAndCanonicalStages(t *testing.T) 
 					canonicalNodes[step.Key+"."+node.Key] = true
 				}
 			}
+			finalStages := map[string]bool{
+				"webhook-chapter.handle-checkout-completed":            true, // one-time-payment
+				"payment-chapter.wait-for-invoice-paid":                true, // invoice-payments
+				"accept-payment-chapter.handle-payment-succeeded":      true, // payment-element
+				"subscribe-chapter.track-subscription-creation":        true, // flat-subscription (webhook-confirmed)
+				"subscribe-customer-chapter.waitForServicingActivated": true, // flat-fee
+				"accept-embedded-payments-chapter.wait-for-checkout":   true, // marketplace
+			}
 			for _, stage := range overlay.Stages {
 				assert.Truef(t, canonicalNodes[stage.NodeID], "overlay stage %s must be canonical", stage.NodeID)
 				for _, resource := range stage.Resources {
 					for _, field := range resource.Fields {
-						assert.NotContains(t, []string{"amount", "amount_total", "currency", "description", "status", "application_fee_amount"}, field.Field)
+						// Terminal payment states may only be asserted on the
+						// designated final stages: mid-flow they are still
+						// legitimately in progress, and a blocking check there
+						// would spuriously fail agent reports.
+						if field.Field == "status" || field.Field == "payment_status" {
+							assert.Truef(t, finalStages[stage.NodeID],
+								"terminal-state expectation %s on non-final stage %s", field.Field, stage.NodeID)
+						}
 					}
 				}
 			}

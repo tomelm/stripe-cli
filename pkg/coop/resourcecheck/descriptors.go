@@ -18,4 +18,13 @@ var supportedResourceDescriptors = map[ResourceType]resourceDescriptor{
 	ResourcePrice:              {idPrefixes: []string{"price_"}},
 	ResourceProduct:            {idPrefixes: []string{"prod_"}},
 	ResourceSubscription:       {idPrefixes: []string{"sub_"}},
+
+	// v2 billing IDs have no spec-confirmed prefixes; the empty prefix keeps
+	// charset and placeholder validation without asserting a family marker.
+	ResourceV2PricingPlan:             {idPrefixes: []string{""}},
+	ResourceV2RateCard:                {idPrefixes: []string{""}},
+	ResourceV2MeteredItem:             {idPrefixes: []string{""}},
+	ResourceV2LicensedItem:            {idPrefixes: []string{""}},
+	ResourceV2LicenseFee:              {idPrefixes: []string{""}},
+	ResourceV2PricingPlanSubscription: {idPrefixes: []string{""}},
 }

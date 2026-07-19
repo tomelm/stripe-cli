@@ -441,6 +441,10 @@ func resourceVerificationSymbol(status string) string {
 		return "✓"
 	case "failed":
 		return "✗"
+	case "unavailable":
+		// Distinct from a coverage dot: the check could not run at all and
+		// fails open to human review — it must never read as a pass.
+		return "!"
 	default:
 		return "·"
 	}
@@ -451,7 +455,7 @@ func resourceVerificationLabel(status, detail string) string {
 	if detail != "" {
 		label += ": " + detail
 	}
-	return label + " (advisory)"
+	return label
 }
 
 func (m Model) renderDetailSuffix(node *coop.SessionNode, width int) string {

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -94,13 +95,29 @@ func (verifier *ReportVerifier) Verify(ctx context.Context, request ReportReques
 		return stageUnavailable(stage, knownOverlay.BlueprintDigest, "Stripe authentication or account context is unavailable"), nil
 	}
 
-	references := groupedStageReferences(stage, request.References)
+	references, overflow := groupedStageReferences(stage, request.References)
 	results := make([]verification.Result, 0, verification.MaxResultsPerNode)
+	for _, role := range sortedRoleKeys(overflow) {
+		results = append(results, notObservedProviderResult(
+			roleResultID("resource.coverage", role+"-overflow", ""), CheckCoverage,
+			fmt.Sprintf("%d Stripe resource IDs were reported for role %s; only the %d lowest-sorted IDs were checked", overflow[role], role, maxReferencesPerRole),
+			request.BlueprintDigest,
+		))
+	}
 	observed := make(map[string][]reportObservation, len(stage.Resources))
 	for _, declaration := range stage.Resources {
 		roleReferences := references[declaration.Role]
 		if len(roleReferences) == 0 {
-			results = appendResultBounded(results, notObservedProviderResult(
+			if BestEffortResourceType(declaration.Type) {
+				// Best-effort v2 roles never block: an unreported ID is an
+				// explicit verification gap, not an agent error.
+				results = append(results, unavailableProviderResult(
+					roleResultID("resource.exists", declaration.Role, ""), CheckResourceExists, verification.FailureDomainCollector,
+					"no Stripe resource ID was reported for role "+declaration.Role+"; this portion of the blueprint is unavailable, not verified", request.BlueprintDigest,
+				))
+				continue
+			}
+			results = append(results, notObservedProviderResult(
 				roleResultID("resource.exists", declaration.Role, ""), CheckResourceExists,
 				"no Stripe resource ID was reported for role "+declaration.Role, request.BlueprintDigest,
 			))
@@ -108,7 +125,7 @@ func (verifier *ReportVerifier) Verify(ctx context.Context, request ReportReques
 		}
 		for _, reference := range roleReferences {
 			entry := verifier.observeReference(runContext, checker, request, declaration, reference)
-			results = appendResultBounded(results, entry.result)
+			results = append(results, entry.result)
 			if entry.result.Status == verification.StatusPassed {
 				observed[declaration.Role] = append(observed[declaration.Role], entry)
 				for _, expectation := range declaration.Fields {
@@ -125,7 +142,7 @@ func (verifier *ReportVerifier) Verify(ctx context.Context, request ReportReques
 					if checkErr != nil {
 						return verification.ResultSet{}, checkErr
 					}
-					results = appendResultBounded(results, fieldResult)
+					results = append(results, fieldResult)
 				}
 			}
 		}
@@ -135,7 +152,7 @@ func (verifier *ReportVerifier) Verify(ctx context.Context, request ReportReques
 		sources := observed[declaration.SourceRole]
 		targets := observed[declaration.TargetRole]
 		if len(sources) == 0 || len(targets) == 0 {
-			results = appendResultBounded(results, notObservedProviderResult(
+			results = append(results, notObservedProviderResult(
 				roleResultID("resource.linkage", declaration.SourceRole+"-"+declaration.TargetRole, ""), CheckResourceLinkage,
 				"resource linkage could not be checked because a required role was not observed", request.BlueprintDigest,
 			))
@@ -156,7 +173,7 @@ func (verifier *ReportVerifier) Verify(ctx context.Context, request ReportReques
 					break
 				}
 			}
-			results = appendResultBounded(results, selected)
+			results = append(results, selected)
 		}
 	}
 
@@ -164,7 +181,7 @@ func (verifier *ReportVerifier) Verify(ctx context.Context, request ReportReques
 		customers := observed[stage.Entitlement.CustomerRole]
 		features := references[stage.Entitlement.FeatureRole]
 		if len(customers) == 0 || len(features) == 0 {
-			results = appendResultBounded(results, notObservedProviderResult(
+			results = append(results, notObservedProviderResult(
 				"resource.entitlement:customer-feature", CheckActiveEntitlement,
 				"active entitlement could not be checked because a required role was not observed", request.BlueprintDigest,
 			))
@@ -179,14 +196,63 @@ func (verifier *ReportVerifier) Verify(ctx context.Context, request ReportReques
 					if checkErr != nil {
 						return verification.ResultSet{}, checkErr
 					}
-					results = appendResultBounded(results, result)
+					results = append(results, result)
 				}
 			}
 		}
 	}
 
+	if stage.ProductFeature != nil {
+		products := observed[stage.ProductFeature.ProductRole]
+		features := references[stage.ProductFeature.FeatureRole]
+		if len(products) == 0 || len(features) == 0 {
+			results = append(results, notObservedProviderResult(
+				"resource.product-feature:product-feature", CheckProductFeature,
+				"product feature attachment could not be checked because a required role was not observed", request.BlueprintDigest,
+			))
+		} else {
+			for _, product := range products {
+				for _, feature := range features {
+					result, checkErr := checker.CheckProductFeature(runContext, ProductFeatureCheck{
+						ResultID: roleResultID("resource.product-feature", "product-feature", product.reference.ID+"\x00"+feature.ID),
+						Product:  product.observation,
+						Feature:  ResourceRef{Type: feature.Type, ID: feature.ID},
+					})
+					if checkErr != nil {
+						return verification.ResultSet{}, checkErr
+					}
+					results = append(results, result)
+				}
+			}
+		}
+	}
+
+	for _, capability := range stage.Unverifiable {
+		results = append(results, unavailableProviderResult(
+			capability.ResultID, capability.CheckID, verification.FailureDomainCollector, capability.Detail, request.BlueprintDigest,
+		))
+	}
+
 	sort.Slice(results, func(left, right int) bool { return results[left].ID < results[right].ID })
+	if len(results) > verification.MaxResultsPerNode {
+		dropped := len(results) - (verification.MaxResultsPerNode - 1)
+		results = results[:verification.MaxResultsPerNode-1]
+		results = append(results, notObservedProviderResult(
+			"resource.coverage:truncated", CheckCoverage,
+			fmt.Sprintf("%d verification results were dropped by the per-node result cap; treat coverage as incomplete", dropped),
+			request.BlueprintDigest,
+		))
+	}
 	return verification.NewResultSet(results...), nil
+}
+
+func sortedRoleKeys(counts map[string]int) []string {
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 type reportObservation struct {
@@ -198,7 +264,7 @@ type reportObservation struct {
 func (verifier *ReportVerifier) observeReference(ctx context.Context, checker *Checker, request ReportRequest, declaration StageResourceDeclaration, reference ReportReference) reportObservation {
 	resultID := roleResultID("resource.exists", declaration.Role, reference.ID)
 	ref := ResourceRef{Type: declaration.Type, ID: reference.ID}
-	if declaration.Lifecycle == ResourceCreated && reference.ReportedNode == request.NodeNumber {
+	if declaration.Lifecycle == ResourceCreated && reference.ReportedNode == request.NodeNumber && windowCheckable(declaration.Type) {
 		window, ok := nodeActionWindow(request.StartedAt, request.CompletedAt)
 		if !ok {
 			// Unavailable (not not_observed): a missing or oversized window is
@@ -227,12 +293,21 @@ func (verifier *ReportVerifier) observeReference(ctx context.Context, checker *C
 		return reportObservation{reference: reference, result: unavailableProviderResult(resultID, CheckResourceExists, verification.FailureDomainCollector, "Stripe resource observation could not be executed", request.BlueprintDigest)}
 	}
 	if result.Status == verification.StatusPassed {
-		result.Detail = declaration.Role + " current state was observed in test mode and the expected account"
+		switch {
+		case declaration.Lifecycle == ResourceCreated && !windowCheckable(declaration.Type):
+			result.Detail = declaration.Role + " exists in test mode and the expected account (this resource type exposes no creation time, so the node action window was not checked)"
+		default:
+			result.Detail = declaration.Role + " current state was observed in test mode and the expected account"
+		}
 	}
 	return reportObservation{reference: reference, observation: observation, result: result}
 }
 
-func groupedStageReferences(stage StageDeclaration, references []ReportReference) map[string][]ReportReference {
+// groupedStageReferences groups the session references relevant to this
+// stage. The per-role cap is never silent: the returned overflow map records
+// how many IDs were reported for each capped role so Verify can emit an
+// explicit coverage marker.
+func groupedStageReferences(stage StageDeclaration, references []ReportReference) (map[string][]ReportReference, map[string]int) {
 	types := make(map[string]ResourceType, len(stage.Resources))
 	for _, declaration := range stage.Resources {
 		types[declaration.Role] = declaration.Type
@@ -251,13 +326,15 @@ func groupedStageReferences(stage StageDeclaration, references []ReportReference
 		seen[key] = struct{}{}
 		grouped[reference.Role] = append(grouped[reference.Role], reference)
 	}
+	overflow := map[string]int{}
 	for role := range grouped {
 		sort.Slice(grouped[role], func(left, right int) bool { return grouped[role][left].ID < grouped[role][right].ID })
 		if len(grouped[role]) > maxReferencesPerRole {
+			overflow[role] = len(grouped[role])
 			grouped[role] = grouped[role][:maxReferencesPerRole]
 		}
 	}
-	return grouped
+	return grouped, overflow
 }
 
 func nodeActionWindow(startedAt, completedAt *time.Time) (CreationWindow, bool) {
@@ -305,13 +382,6 @@ func roleResultID(prefix, role, resourceID string) verification.ResultID {
 
 func fieldToken(field string) string {
 	return strings.NewReplacer(".", "-", "_", "-").Replace(field)
-}
-
-func appendResultBounded(results []verification.Result, result verification.Result) []verification.Result {
-	if len(results) >= verification.MaxResultsPerNode {
-		return results
-	}
-	return append(results, result)
 }
 
 func notObservedProviderResult(id verification.ResultID, checkID verification.CheckID, detail, digest string) verification.Result {
