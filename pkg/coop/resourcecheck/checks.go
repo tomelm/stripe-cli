@@ -27,8 +27,7 @@ var stageChecks = map[string]map[string]func(*stageCtx){
 		"checkout-chapter.create-checkout-session": func(c *stageCtx) {
 			for _, session := range c.created("checkout_session") {
 				c.expectString(session, "mode", "payment")
-				c.expectNumber(session, "amount_total", 2000)
-				c.expectString(session, "currency", "usd")
+				c.expectPositive(session, "amount_total")
 			}
 			c.reused("product")
 		},
@@ -36,15 +35,20 @@ var stageChecks = map[string]map[string]func(*stageCtx){
 			c.reused("checkout_session")
 		},
 		"webhook-chapter.handle-checkout-completed": func(c *stageCtx) {
-			for _, session := range c.reused("checkout_session") {
+			sessions := c.reused("checkout_session")
+			intents := c.reused("payment_intent")
+			for _, session := range sessions {
 				c.expectString(session, "status", "complete")
 				c.expectString(session, "payment_status", "paid")
 				c.expectLink(session, "payment_intent", "payment_intent")
+				if intent, linked := linkedObserved(session, "payment_intent", intents); linked {
+					c.expectAgreement(session, "amount_total", intent, "amount", "the paid amount")
+					c.expectAgreement(session, "currency", intent, "currency", "the currency")
+				}
 			}
-			for _, intent := range c.reused("payment_intent") {
+			for _, intent := range intents {
 				c.expectString(intent, "status", "succeeded")
-				c.expectNumber(intent, "amount", 2000)
-				c.expectString(intent, "currency", "usd")
+				c.expectPositive(intent, "amount")
 			}
 		},
 	},
@@ -60,15 +64,13 @@ var stageChecks = map[string]map[string]func(*stageCtx){
 		"create-invoice-chapter.create-invoice": func(c *stageCtx) {
 			for _, invoice := range c.created("invoice") {
 				c.expectString(invoice, "collection_method", "send_invoice")
-				c.expectNumber(invoice, "days_until_due", 30)
 				c.expectLink(invoice, "customer", "customer")
 			}
 			c.reused("customer")
 		},
 		"create-invoice-chapter.add-invoice-item": func(c *stageCtx) {
 			for _, item := range c.created("invoice_item") {
-				c.expectNumber(item, "amount", 10000)
-				c.expectString(item, "currency", "usd")
+				c.expectPositive(item, "amount")
 				c.expectLink(item, "invoice", "invoice")
 				c.expectLink(item, "customer", "customer")
 			}
@@ -78,7 +80,6 @@ var stageChecks = map[string]map[string]func(*stageCtx){
 		"create-invoice-chapter.send-invoice": func(c *stageCtx) {
 			for _, invoice := range c.reused("invoice") {
 				c.expectString(invoice, "collection_method", "send_invoice")
-				c.expectNumber(invoice, "days_until_due", 30)
 				c.expectPresent(invoice, "hosted_invoice_url")
 				c.expectLink(invoice, "customer", "customer")
 			}
@@ -97,11 +98,9 @@ var stageChecks = map[string]map[string]func(*stageCtx){
 		},
 	},
 	"accept-payment-with-payment-element": {
-		// The blueprint's currency is an unresolved ${env:currency}
-		// placeholder, so only the literal amount is asserted.
 		"accept-payment-chapter.create-payment-intent": func(c *stageCtx) {
 			for _, intent := range c.created("payment_intent") {
-				c.expectNumber(intent, "amount", 2000)
+				c.expectPositive(intent, "amount")
 			}
 		},
 		"accept-payment-chapter.mount-payment-element": func(c *stageCtx) {
@@ -110,7 +109,7 @@ var stageChecks = map[string]map[string]func(*stageCtx){
 		"accept-payment-chapter.handle-payment-succeeded": func(c *stageCtx) {
 			for _, intent := range c.reused("payment_intent") {
 				c.expectString(intent, "status", "succeeded")
-				c.expectNumber(intent, "amount", 2000)
+				c.expectPositive(intent, "amount")
 			}
 		},
 	},
@@ -136,8 +135,7 @@ var stageChecks = map[string]map[string]func(*stageCtx){
 		"subscribe-chapter.create-checkout-session": func(c *stageCtx) {
 			for _, session := range c.created("checkout_session") {
 				c.expectString(session, "mode", "subscription")
-				c.expectNumber(session, "amount_total", 10000)
-				c.expectString(session, "currency", "usd")
+				c.expectPositive(session, "amount_total")
 				c.expectLink(session, "customer", "customer")
 			}
 			c.reused("customer")
@@ -148,7 +146,7 @@ var stageChecks = map[string]map[string]func(*stageCtx){
 		"subscribe-chapter.track-subscription-creation": func(c *stageCtx) {
 			for _, subscription := range c.reused("subscription") {
 				c.expectString(subscription, "status", "active")
-				c.expectSubscriptionPrice(subscription, "month", 1, 10000, "usd")
+				c.expectRecurringPrice(subscription)
 				c.expectLink(subscription, "customer", "customer")
 			}
 			// The checkout terminal state is asserted here (webhook-confirmed)
@@ -191,7 +189,6 @@ var stageChecks = map[string]map[string]func(*stageCtx){
 		},
 		"create-pricing-plan-chapter.createMeter": func(c *stageCtx) {
 			for _, meter := range c.created("meter") {
-				c.expectString(meter, "default_aggregation.formula", "sum")
 				c.expectPresent(meter, "event_name")
 			}
 		},
@@ -262,7 +259,7 @@ var stageChecks = map[string]map[string]func(*stageCtx){
 		"accept-embedded-payments-chapter.create-checkout-session": func(c *stageCtx) {
 			for _, session := range c.created("checkout_session") {
 				c.expectString(session, "mode", "payment")
-				c.expectNumber(session, "amount_total", 100000)
+				c.expectPositive(session, "amount_total")
 			}
 			c.reused("connected_account")
 		},
@@ -270,17 +267,23 @@ var stageChecks = map[string]map[string]func(*stageCtx){
 			c.reused("checkout_session")
 		},
 		"accept-embedded-payments-chapter.wait-for-checkout": func(c *stageCtx) {
-			for _, session := range c.reused("checkout_session") {
+			sessions := c.reused("checkout_session")
+			intents := c.reused("payment_intent")
+			for _, session := range sessions {
 				c.expectString(session, "status", "complete")
 				c.expectString(session, "payment_status", "paid")
 				c.expectLink(session, "payment_intent", "payment_intent")
+				if intent, linked := linkedObserved(session, "payment_intent", intents); linked {
+					c.expectAgreement(session, "amount_total", intent, "amount", "the paid amount")
+					c.expectAgreement(session, "currency", intent, "currency", "the currency")
+				}
 			}
-			for _, intent := range c.reused("payment_intent") {
+			for _, intent := range intents {
 				c.expectString(intent, "status", "succeeded")
-				c.expectNumber(intent, "amount", 100000)
-				// The application fee is a blueprint literal, so it is matched
-				// exactly (which also implies presence).
-				c.expectNumber(intent, "application_fee_amount", 123)
+				c.expectPositive(intent, "amount")
+				// The commission is chosen by the application; verification
+				// requires it to exist and be positive.
+				c.expectPositive(intent, "application_fee_amount")
 				c.expectLink(intent, "transfer_data.destination", "connected_account")
 			}
 			c.reused("connected_account")
@@ -545,6 +548,79 @@ func (c *stageCtx) expectBool(entry observed, path string, want bool) {
 	}
 }
 
+// expectPositive asserts a numeric field is present and greater than zero.
+// Amounts and fees are chosen by the application, not the blueprint, so
+// verification only rejects the unambiguous contradiction: zero or missing.
+func (c *stageCtx) expectPositive(entry observed, path string) {
+	if entry.payload == nil {
+		return
+	}
+	resultID := "field:" + roleToken(entry.role) + "." + pathToken(path) + ":" + fingerprint(entry.id)
+	value, present := rawAt(entry.payload, path)
+	number, isNumber := value.(json.Number)
+	if !present || !isNumber {
+		c.failedResult(resultID, entry.role+" has no "+path+" value; expected a positive amount")
+		return
+	}
+	if parsed, err := number.Int64(); err == nil && parsed > 0 {
+		c.passedResult(resultID, entry.role+" "+path+" is positive")
+		return
+	}
+	c.failedResult(resultID, entry.role+" "+path+" is not a positive amount")
+}
+
+// expectAgreement asserts that two linked objects report the same value for a
+// pair of fields (for example a Checkout Session's amount_total and its
+// PaymentIntent's amount). The application chooses the value; verification
+// only requires the reported objects to agree with each other.
+func (c *stageCtx) expectAgreement(left observed, leftPath string, right observed, rightPath, label string) {
+	if left.payload == nil || right.payload == nil {
+		return
+	}
+	resultID := "consistency:" + roleToken(left.role) + "-" + roleToken(right.role) + "." + pathToken(leftPath) + ":" + fingerprint(left.id, right.id)
+	leftValue, leftPresent := rawAt(left.payload, leftPath)
+	rightValue, rightPresent := rawAt(right.payload, rightPath)
+	if !leftPresent || !rightPresent {
+		c.failedResult(resultID, label+" could not be compared because "+left.role+" or "+right.role+" is missing the value")
+		return
+	}
+	if scalarEquals(leftValue, rightValue) {
+		c.passedResult(resultID, label+" agrees between "+left.role+" and "+right.role)
+		return
+	}
+	c.failedResult(resultID, label+" does not agree between "+left.role+" and "+right.role)
+}
+
+// linkedObserved resolves the object the source links to among the fetched
+// targets, so agreement checks compare the actual pair.
+func linkedObserved(source observed, path string, targets []observed) (observed, bool) {
+	if source.payload == nil {
+		return observed{}, false
+	}
+	value, present := rawAt(source.payload, path)
+	linked, hasID := expandableID(value)
+	if !present || !hasID {
+		return observed{}, false
+	}
+	for _, target := range targets {
+		if target.id == linked && target.payload != nil {
+			return target, true
+		}
+	}
+	return observed{}, false
+}
+
+func scalarEquals(left, right any) bool {
+	leftNumber, leftIsNumber := left.(json.Number)
+	rightNumber, rightIsNumber := right.(json.Number)
+	if leftIsNumber && rightIsNumber {
+		leftValue, leftErr := leftNumber.Int64()
+		rightValue, rightErr := rightNumber.Int64()
+		return leftErr == nil && rightErr == nil && leftValue == rightValue
+	}
+	return left == right
+}
+
 // expectPresent asserts a non-empty string field without asserting its value
 // (used for values that vary per run, like hosted URLs and suffixed names).
 func (c *stageCtx) expectPresent(entry observed, path string) {
@@ -624,9 +700,11 @@ func (c *stageCtx) expectInvoiceSubscriptionLink(entry observed, targetRole stri
 	c.failedResult(resultID, entry.role+" subscription linkage does not match any reported "+targetRole)
 }
 
-// expectSubscriptionPrice asserts the first subscription item's recurring
-// configuration and price against the blueprint literals.
-func (c *stageCtx) expectSubscriptionPrice(entry observed, interval string, intervalCount, unitAmount int64, currency string) {
+// expectRecurringPrice asserts the first subscription item carries a real
+// recurring price: a non-empty interval, a positive interval count, and a
+// positive unit amount. The specific cadence and amount are chosen by the
+// application, so only their existence is required.
+func (c *stageCtx) expectRecurringPrice(entry observed) {
 	if entry.payload == nil {
 		return
 	}
@@ -642,20 +720,24 @@ func (c *stageCtx) expectSubscriptionPrice(entry observed, interval string, inte
 		c.failedResult(resultID, entry.role+" subscription items are malformed")
 		return
 	}
-	priceInterval, _ := rawAt(first, "price.recurring.interval")
-	priceCount, _ := rawAt(first, "price.recurring.interval_count")
-	priceAmount, _ := rawAt(first, "price.unit_amount")
-	priceCurrency, _ := rawAt(first, "price.currency")
-	if priceInterval != interval ||
-		!numberEquals(priceCount, intervalCount) ||
-		!numberEquals(priceAmount, unitAmount) ||
-		priceCurrency != currency {
-		c.failedResult(resultID, entry.role+" recurring price does not match the expected "+
-			strconv.FormatInt(unitAmount, 10)+" "+currency+" per "+strconv.FormatInt(intervalCount, 10)+" "+interval)
+	interval, _ := rawAt(first, "price.recurring.interval")
+	count, _ := rawAt(first, "price.recurring.interval_count")
+	amount, _ := rawAt(first, "price.unit_amount")
+	intervalText, isText := interval.(string)
+	if !isText || intervalText == "" || !numberPositive(count) || !numberPositive(amount) {
+		c.failedResult(resultID, entry.role+" has no positive recurring price configuration")
 		return
 	}
-	c.passedResult(resultID, entry.role+" recurring price matches the expected "+
-		strconv.FormatInt(unitAmount, 10)+" "+currency+" per "+strconv.FormatInt(intervalCount, 10)+" "+interval)
+	c.passedResult(resultID, entry.role+" has a recurring price with a positive amount")
+}
+
+func numberPositive(value any) bool {
+	number, ok := value.(json.Number)
+	if !ok {
+		return false
+	}
+	parsed, err := number.Int64()
+	return err == nil && parsed > 0
 }
 
 // checkActiveEntitlement verifies through one bounded page that each reported

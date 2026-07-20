@@ -148,8 +148,11 @@ func oneTimePaymentFixture(salt string, mutateIntent func(map[string]any)) ([]Re
 		mutateIntent(intent)
 	}
 	objects := map[string]map[string]any{
-		"/v1/checkout/sessions/" + csID: {"id": csID, "status": "complete", "payment_status": "paid", "payment_intent": piID},
-		"/v1/payment_intents/" + piID:   intent,
+		"/v1/checkout/sessions/" + csID: {
+			"id": csID, "status": "complete", "payment_status": "paid", "payment_intent": piID,
+			"amount_total": num(2000), "currency": "usd",
+		},
+		"/v1/payment_intents/" + piID: intent,
 	}
 	refs := []ReportReference{
 		ref("checkout_session", ResourceCheckoutSession, csID, 1),
@@ -206,9 +209,12 @@ func marketplaceFixture(salt string, mutateIntent, mutateSession func(map[string
 	csID := checkoutSessionResourceID("mkt" + salt)
 	piID := paymentIntentResourceID("mkt" + salt)
 	acctID := accountResourceID("mkt" + salt)
-	session := map[string]any{"id": csID, "status": "complete", "payment_status": "paid", "payment_intent": piID}
+	session := map[string]any{
+		"id": csID, "status": "complete", "payment_status": "paid", "payment_intent": piID,
+		"amount_total": num(100000), "currency": "usd",
+	}
 	intent := map[string]any{
-		"id": piID, "status": "succeeded", "amount": num(100000),
+		"id": piID, "status": "succeeded", "amount": num(100000), "currency": "usd",
 		"application_fee_amount": num(123),
 		"transfer_data":          map[string]any{"destination": acctID},
 	}
@@ -353,12 +359,16 @@ func TestInvoiceOpenAtFinalStageFails(t *testing.T) {
 	assert.Equal(t, verification.StatusFailed, byID[fieldID("invoice", "status", invID)].Status)
 }
 
-func TestInvoiceWrongDaysUntilDueFails(t *testing.T) {
-	invID := invoiceResourceID("wrongdue0001")
-	custID := customerResourceID("wrongdue0001")
+// Wrong collection method is a genuine structural contradiction: the
+// blueprint's flow is hosted invoicing, so charge_automatically can never be
+// a correct integration of it. App-chosen values (amounts, payment terms) are
+// deliberately NOT asserted; see the consistency and positivity tests below.
+func TestInvoiceWrongCollectionMethodFails(t *testing.T) {
+	invID := invoiceResourceID("wrongmethod0001")
+	custID := customerResourceID("wrongmethod0001")
 	reader := &fakeReader{objects: map[string]map[string]any{
 		"/v1/invoices/" + invID: {
-			"id": invID, "collection_method": "send_invoice", "days_until_due": num(45), "customer": custID,
+			"id": invID, "collection_method": "charge_automatically", "customer": custID,
 		},
 		"/v1/customers/" + custID: {"id": custID},
 	}}
@@ -369,15 +379,14 @@ func TestInvoiceWrongDaysUntilDueFails(t *testing.T) {
 	request := buildRequest("invoice-payments", "create-invoice-chapter.create-invoice", 10, refs)
 	set := runVerify(t, reader, request)
 	byID := resultsByID(t, set)
-	assert.Equal(t, verification.StatusFailed, byID[fieldID("invoice", "days_until_due", invID)].Status)
-	assert.Equal(t, verification.StatusPassed, byID[fieldID("invoice", "collection_method", invID)].Status)
+	assert.Equal(t, verification.StatusFailed, byID[fieldID("invoice", "collection_method", invID)].Status)
 	assert.Equal(t, verification.StatusPassed, byID[linkID("invoice", "customer", invID)].Status)
 }
 
-func TestPaymentElementAmountMismatchFails(t *testing.T) {
+func TestPaymentElementZeroAmountFails(t *testing.T) {
 	piID := paymentIntentResourceID("peamt0001")
 	reader := &fakeReader{objects: map[string]map[string]any{
-		"/v1/payment_intents/" + piID: {"id": piID, "amount": num(1500)},
+		"/v1/payment_intents/" + piID: {"id": piID, "amount": num(0)},
 	}}
 	refs := []ReportReference{ref("payment_intent", ResourcePaymentIntent, piID, 1)}
 	request := buildRequest("accept-payment-with-payment-element", "accept-payment-chapter.create-payment-intent", 10, refs)
@@ -386,14 +395,41 @@ func TestPaymentElementAmountMismatchFails(t *testing.T) {
 	assert.Equal(t, verification.StatusFailed, byID[fieldID("payment_intent", "amount", piID)].Status)
 }
 
-func TestMarketplaceFeeMismatchFails(t *testing.T) {
-	refs, objects, _, piID, _ := marketplaceFixture("fee0001", func(intent map[string]any) {
+// The commission is chosen by the application, so any positive fee passes and
+// a missing or zero fee is the contradiction.
+func TestMarketplaceFeeBehavior(t *testing.T) {
+	appChosen, objects, _, piID, _ := marketplaceFixture("fee0001", func(intent map[string]any) {
 		intent["application_fee_amount"] = num(999)
 	}, nil)
-	request := buildRequest("learn-accounts-v1-marketplace", "accept-embedded-payments-chapter.wait-for-checkout", 10, refs)
+	request := buildRequest("learn-accounts-v1-marketplace", "accept-embedded-payments-chapter.wait-for-checkout", 10, appChosen)
 	set := runVerify(t, &fakeReader{objects: objects}, request)
 	byID := resultsByID(t, set)
-	assert.Equal(t, verification.StatusFailed, byID[fieldID("payment_intent", "application_fee_amount", piID)].Status)
+	assert.Equal(t, verification.StatusPassed, byID[fieldID("payment_intent", "application_fee_amount", piID)].Status,
+		"an app-chosen positive fee must pass")
+
+	missingFee, objects, _, piID, _ := marketplaceFixture("fee0002", func(intent map[string]any) {
+		delete(intent, "application_fee_amount")
+	}, nil)
+	request = buildRequest("learn-accounts-v1-marketplace", "accept-embedded-payments-chapter.wait-for-checkout", 10, missingFee)
+	set = runVerify(t, &fakeReader{objects: objects}, request)
+	byID = resultsByID(t, set)
+	assert.Equal(t, verification.StatusFailed, byID[fieldID("payment_intent", "application_fee_amount", piID)].Status,
+		"a missing fee is the contradiction")
+}
+
+// Linked objects must agree on the amount even though the app chooses it: a
+// Checkout Session whose PaymentIntent shows a different amount is broken
+// regardless of what either value is.
+func TestCheckoutPaymentIntentAmountDisagreementFails(t *testing.T) {
+	refs, objects, csID, piID := oneTimePaymentFixture("agree0001", func(intent map[string]any) {
+		intent["amount"] = num(4200)
+	})
+	request := buildRequest("one-time-payment", "webhook-chapter.handle-checkout-completed", 10, refs)
+	set := runVerify(t, &fakeReader{objects: objects}, request)
+	byID := resultsByID(t, set)
+	agreement := byID["consistency:checkout-session-payment-intent.amount-total:"+fingerprint(csID, piID)]
+	assert.Equal(t, verification.StatusFailed, agreement.Status)
+	assert.Contains(t, agreement.Detail, "does not agree")
 }
 
 func TestMarketplaceTransferDestinationMismatchFails(t *testing.T) {
@@ -828,12 +864,13 @@ func TestResultCapRetainsAllFailedResultsAndAddsTruncationMarker(t *testing.T) {
 		}
 		objects["/v1/checkout/sessions/"+id] = map[string]any{
 			"id": id, "status": status, "payment_status": "paid", "payment_intent": piIDs[0],
+			"amount_total": num(100000), "currency": "usd",
 		}
 		refs = append(refs, ref("checkout_session", ResourceCheckoutSession, id, 1))
 	}
 	for _, id := range piIDs {
 		objects["/v1/payment_intents/"+id] = map[string]any{
-			"id": id, "status": "succeeded", "amount": num(100000),
+			"id": id, "status": "succeeded", "amount": num(100000), "currency": "usd",
 			"application_fee_amount": num(123),
 			"transfer_data":          map[string]any{"destination": acctIDs[0]},
 		}
