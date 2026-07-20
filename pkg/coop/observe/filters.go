@@ -1,6 +1,7 @@
 package observe
 
 import (
+	"fmt"
 	"regexp"
 	"sort"
 	"strings"
@@ -9,10 +10,22 @@ import (
 )
 
 // RequestFilter associates one canonical request shape with a session node.
+// ParamKeys are the blueprint-declared top-level parameter names (names only,
+// never example values) used for advisory presence checks.
 type RequestFilter struct {
-	NodeNumber int    `json:"node"`
-	Method     string `json:"method"`
-	Path       string `json:"path"`
+	NodeNumber int      `json:"node"`
+	Method     string   `json:"method"`
+	Path       string   `json:"path"`
+	ParamKeys  []string `json:"param_keys,omitempty"`
+
+	// pattern caches the compiled path template; compile() populates it once
+	// when targets are built so matching stays off the hot path.
+	pattern *regexp.Regexp
+}
+
+// compile caches the path-template pattern for repeated matching.
+func (filter *RequestFilter) compile() {
+	filter.pattern = canonicalPathPattern(filter.Path)
 }
 
 // EventFilter associates one canonical event type with a session node.
@@ -36,7 +49,7 @@ func FiltersForSession(session verificationruntime.Session) SessionFilters {
 		Requests: []RequestFilter{},
 		Events:   []EventFilter{},
 	}
-	seenRequests := make(map[RequestFilter]bool)
+	seenRequests := make(map[string]bool)
 	seenEvents := make(map[EventFilter]bool)
 	for _, node := range session.Nodes {
 		for _, request := range node.Requests {
@@ -44,11 +57,13 @@ func FiltersForSession(session verificationruntime.Session) SessionFilters {
 				NodeNumber: node.Number,
 				Method:     strings.ToUpper(request.Method),
 				Path:       request.Path,
+				ParamKeys:  append([]string(nil), request.ParamKeys...),
 			}
-			if filter.Method == "" || filter.Path == "" || seenRequests[filter] {
+			key := fmt.Sprintf("%d|%s|%s", filter.NodeNumber, filter.Method, filter.Path)
+			if filter.Method == "" || filter.Path == "" || seenRequests[key] {
 				continue
 			}
-			seenRequests[filter] = true
+			seenRequests[key] = true
 			filters.Requests = append(filters.Requests, filter)
 		}
 		for _, eventType := range node.Events {
@@ -111,9 +126,14 @@ func sortedKeys(values map[string]bool) []string {
 // as a single path segment. Paths are never filtered server side — matching
 // happens here, against the full delivered stream.
 func (filter RequestFilter) matches(observation *RequestObservation) bool {
-	return observation != nil &&
-		strings.EqualFold(filter.Method, observation.Method) &&
-		canonicalPathPattern(filter.Path).MatchString(observation.Path)
+	if observation == nil || !strings.EqualFold(filter.Method, observation.Method) {
+		return false
+	}
+	pattern := filter.pattern
+	if pattern == nil {
+		pattern = canonicalPathPattern(filter.Path)
+	}
+	return pattern.MatchString(observation.Path)
 }
 
 func canonicalPathPattern(template string) *regexp.Regexp {

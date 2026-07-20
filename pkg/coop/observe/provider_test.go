@@ -814,6 +814,10 @@ func TestProviderResultsUseOnlyBoundedEvidenceKeys(t *testing.T) {
 		"coverage_gap":      true,
 		"http_status_class": true,
 		"reason":            true,
+		"params_present":    true,
+		"params_missing":    true,
+		"request_source":    true,
+		"error_code":        true,
 	}
 	require.NotEmpty(t, all)
 	for _, result := range all {
@@ -1296,4 +1300,298 @@ func TestProviderRejectionClearedResultTriggersReopen(t *testing.T) {
 	providerWaitForResult(t, run.store, 1, "passive.request", verification.StatusPassed)
 
 	run.end(t)
+}
+
+// --- Request-log detail enrichment ---------------------------------------
+
+// providerRequestSessionWithParams builds a session like providerRequestSession
+// but with blueprint-declared params on the request node's params, so
+// ParamKeys flow through SessionMetadata into the request filter for
+// enrichment tests. params must be a map[string]interface{} (the JSON shape
+// real blueprints unmarshal into); a map[string]string type-asserts to
+// nothing in verificationruntime.SessionMetadata's paramKeys helper.
+func providerRequestSessionWithParams(params map[string]interface{}) *coop.Session {
+	session := providerRequestSession()
+	session.Steps[0].Nodes[0].Request.Params = params
+	return session
+}
+
+// providerFakeFetcher is a controllable RequestLogFetcher: it either always
+// returns the configured detail or always fails, and counts calls so tests
+// can assert fetch-once-per-attempt behavior.
+type providerFakeFetcher struct {
+	mu     sync.Mutex
+	detail RequestLogDetail
+	err    error
+	calls  int
+}
+
+func (fetcher *providerFakeFetcher) Fetch(ctx context.Context, requestID string) (RequestLogDetail, error) {
+	fetcher.mu.Lock()
+	fetcher.calls++
+	fetcher.mu.Unlock()
+	if fetcher.err != nil {
+		return RequestLogDetail{}, fetcher.err
+	}
+	return fetcher.detail, nil
+}
+
+func (fetcher *providerFakeFetcher) callCount() int {
+	fetcher.mu.Lock()
+	defer fetcher.mu.Unlock()
+	return fetcher.calls
+}
+
+// providerStartRunWithFetcher mirrors providerStartRunWithEmit but injects a
+// fake RequestLogFetcher into the provider before launching Run, so
+// enrichment tests exercise the real fetch queue and worker without a live
+// Stripe client. A nil fetcher leaves enrichment disabled, matching
+// production's newProvider default.
+func providerStartRunWithFetcher(
+	t *testing.T,
+	session *coop.Session,
+	config ProviderConfig,
+	factory providerCollectorFactory,
+	fetcher RequestLogFetcher,
+) *providerRun {
+	t.Helper()
+	store := newProviderFakeStore(session)
+	log := &providerEmitLog{}
+	provider := newProvider(store, config, factory)
+	provider.fetcher = fetcher
+	ctx, cancel := context.WithCancel(context.Background())
+	run := &providerRun{store: store, log: log, cancel: cancel, finished: make(chan struct{})}
+	metadata := store.metadata()
+	emit := store.emit(log)
+	go func() {
+		run.err = provider.Run(ctx, metadata, emit)
+		close(run.finished)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-run.finished:
+		case <-time.After(2 * time.Second):
+		}
+	})
+	return run
+}
+
+// providerWaitForEvidence waits until the stored result for nodeNumber/id at
+// status carries the given evidence key/value pair, so tests can wait past
+// the streaming pre-enrichment emission for the later enriched re-emit.
+func providerWaitForEvidence(
+	t *testing.T,
+	store *providerFakeStore,
+	nodeNumber int,
+	resultID verification.ResultID,
+	status verification.Status,
+	key, value string,
+) verification.Result {
+	t.Helper()
+	var found verification.Result
+	require.Eventually(t, func() bool {
+		for _, result := range store.results(nodeNumber) {
+			if result.ID == resultID && result.Status == status && providerEvidenceValue(result, key) == value {
+				found = result
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 5*time.Millisecond)
+	return found
+}
+
+func TestProviderEnrichmentAddsParamsAndSourceEvidence(t *testing.T) {
+	t.Parallel()
+
+	session := providerRequestSessionWithParams(map[string]interface{}{
+		"currency": "usd",
+		"amount":   2000,
+		"customer": "cus_123",
+	})
+	collector := newProviderFakeCollector()
+	fetcher := &providerFakeFetcher{detail: RequestLogDetail{
+		ParamKeys:   []string{"currency", "amount"},
+		SourceClass: RequestSourceCLI,
+	}}
+	run := providerStartRunWithFetcher(t, session, providerTestConfig(), providerStaticFactory(collector), fetcher)
+	startedAt := run.store.transition(t, 1, coop.NodeActive)
+	collector.push(providerMatchObservation(201), startedAt.Add(time.Millisecond))
+
+	result := providerWaitForEvidence(t, run.store, 1, "passive.request", verification.StatusPassed, "request_source", "cli")
+	assert.Equal(t, "2/3", providerEvidenceValue(result, "params_present"))
+	assert.Equal(t, "customer", providerEvidenceValue(result, "params_missing"))
+	assert.Contains(t, result.Detail, "Missing blueprint params: customer.")
+	run.end(t)
+}
+
+func TestProviderEnrichmentDashboardNoteInDetail(t *testing.T) {
+	t.Parallel()
+
+	session := providerRequestSessionWithParams(map[string]interface{}{"currency": "usd"})
+	collector := newProviderFakeCollector()
+	fetcher := &providerFakeFetcher{detail: RequestLogDetail{
+		ParamKeys:   []string{"currency"},
+		SourceClass: RequestSourceDashboard,
+	}}
+	run := providerStartRunWithFetcher(t, session, providerTestConfig(), providerStaticFactory(collector), fetcher)
+	startedAt := run.store.transition(t, 1, coop.NodeActive)
+	collector.push(providerMatchObservation(201), startedAt.Add(time.Millisecond))
+
+	result := providerWaitForEvidence(t, run.store, 1, "passive.request", verification.StatusPassed, "request_source", "dashboard")
+	assert.Contains(t, result.Detail, "Request came from the Dashboard.")
+	run.end(t)
+}
+
+func TestProviderEnrichmentFetchFailureIsHarmless(t *testing.T) {
+	t.Parallel()
+
+	session := providerRequestSessionWithParams(map[string]interface{}{"currency": "usd"})
+	collector := newProviderFakeCollector()
+	fetcher := &providerFakeFetcher{err: errors.New("fetch failed in test")}
+	run := providerStartRunWithFetcher(t, session, providerTestConfig(), providerStaticFactory(collector), fetcher)
+	startedAt := run.store.transition(t, 1, coop.NodeActive)
+	collector.push(providerMatchObservation(201), startedAt.Add(time.Millisecond))
+
+	providerWaitForResult(t, run.store, 1, "passive.request", verification.StatusPassed)
+
+	// A failing fetcher never populates pendingDetails, so no amount of
+	// additional polling can produce enrichment; a short settle window is
+	// enough to prove the negative deterministically.
+	time.Sleep(20 * providerTestConfig().PollInterval)
+	results := run.store.results(1)
+	require.Len(t, results, 1)
+	result := results[0]
+	assert.Empty(t, providerEvidenceValue(result, "params_present"))
+	assert.Empty(t, providerEvidenceValue(result, "params_missing"))
+	assert.Empty(t, providerEvidenceValue(result, "request_source"))
+	assert.Equal(t, providerRequestPassedDetail, result.Detail)
+	assert.NotContains(t, result.Detail, "Missing blueprint params")
+	run.end(t)
+}
+
+func TestProviderEnrichmentFetchesOncePerAttempt(t *testing.T) {
+	t.Parallel()
+
+	session := providerRequestSessionWithParams(map[string]interface{}{"currency": "usd"})
+	collector := newProviderFakeCollector()
+	fetcher := &providerFakeFetcher{detail: RequestLogDetail{
+		ParamKeys:   []string{"currency"},
+		SourceClass: RequestSourceCLI,
+	}}
+	run := providerStartRunWithFetcher(t, session, providerTestConfig(), providerStaticFactory(collector), fetcher)
+	startedAt := run.store.transition(t, 1, coop.NodeActive)
+
+	// Multiple matching observations land within the same attempt.
+	collector.push(providerMatchObservation(201), startedAt.Add(time.Millisecond))
+	collector.push(providerMatchObservation(201), startedAt.Add(2*time.Millisecond))
+	collector.push(providerMatchObservation(201), startedAt.Add(3*time.Millisecond))
+
+	providerWaitForEvidence(t, run.store, 1, "passive.request", verification.StatusPassed, "request_source", "cli")
+	time.Sleep(20 * providerTestConfig().PollInterval)
+	assert.Equal(t, 1, fetcher.callCount(), "one attempt must fetch exactly once even with multiple matches")
+
+	// Reject (review -> active) to force a fresh attempt, matching the
+	// pattern in TestProviderRejectedNodeReopensAndPasses: let the provider
+	// observe the review state, then wait for the reopened attempt's fresh
+	// streaming emission before pushing the second match.
+	run.store.transition(t, 1, coop.NodeReview)
+	time.Sleep(20 * providerTestConfig().PollInterval)
+	emitted := len(run.log.all())
+	run.store.transition(t, 1, coop.NodeActive)
+	require.Eventually(t, func() bool {
+		return len(run.log.all()) > emitted
+	}, 2*time.Second, 5*time.Millisecond)
+
+	collector.push(providerMatchObservation(200), time.Now().UTC())
+	providerWaitForEvidence(t, run.store, 1, "passive.request", verification.StatusPassed, "request_source", "cli")
+	time.Sleep(20 * providerTestConfig().PollInterval)
+	assert.Equal(t, 2, fetcher.callCount(), "the reopened attempt fetches once more")
+
+	run.end(t)
+}
+
+// TestProviderEnrichmentAppliesOnlyWithMatch drives applyPendingDetail
+// directly (same package) rather than through the streaming Run loop: timing
+// a "detail arrives before the fresh attempt has re-matched" race
+// deterministically through the public flow is not practical, since the fake
+// fetcher resolves near-instantly. The direct unit style exercises exactly
+// the documented invariant: a detail applies only while the attempt has a
+// match, so it stays queued (not discarded) until one lands.
+func TestProviderEnrichmentAppliesOnlyWithMatch(t *testing.T) {
+	t.Parallel()
+
+	provider := newProvider(nil, providerTestConfig(), nil)
+	target := &providerTarget{
+		nodeNumber: 1,
+		stream:     StreamLogsTail,
+		requests: []RequestFilter{
+			{NodeNumber: 1, Method: "POST", Path: "/v1/payment_intents", ParamKeys: []string{"currency", "amount"}},
+		},
+	}
+
+	detail := RequestLogDetail{ParamKeys: []string{"currency"}, SourceClass: RequestSourceCLI}
+	provider.pendingDetails[1] = detail
+
+	// No match yet (fresh or reopened attempt): applying must be a no-op and
+	// leave the pending detail queued for a later match to consume.
+	provider.applyPendingDetail(target)
+	assert.Zero(t, target.paramsChecked)
+	assert.Empty(t, target.sourceClass)
+	provider.detailMu.Lock()
+	_, stillPending := provider.pendingDetails[1]
+	provider.detailMu.Unlock()
+	assert.True(t, stillPending, "a detail delivered before any match must remain queued, not discarded")
+
+	// A match lands: the same pending detail now applies and is consumed.
+	target.seenPassed = true
+	provider.applyPendingDetail(target)
+	assert.Equal(t, 2, target.paramsChecked)
+	assert.Equal(t, 1, target.paramsPresent)
+	assert.Equal(t, []string{"amount"}, target.paramsMissing)
+	assert.Equal(t, RequestSourceCLI, target.sourceClass)
+	provider.detailMu.Lock()
+	_, stillPending = provider.pendingDetails[1]
+	provider.detailMu.Unlock()
+	assert.False(t, stillPending, "an applied detail must be removed from the pending map")
+}
+
+func TestProviderEnrichmentNoFetcherNoEvidence(t *testing.T) {
+	t.Parallel()
+
+	session := providerRequestSessionWithParams(map[string]interface{}{"currency": "usd"})
+	collector := newProviderFakeCollector()
+	// providerStartRun builds the provider via newProvider directly, leaving
+	// fetcher nil (production's default when no connector/API key wires one
+	// up), so no enrichment should ever be attempted.
+	run := providerStartRun(t, session, providerTestConfig(), providerStaticFactory(collector))
+	startedAt := run.store.transition(t, 1, coop.NodeActive)
+	collector.push(providerMatchObservation(201), startedAt.Add(time.Millisecond))
+
+	providerWaitForResult(t, run.store, 1, "passive.request", verification.StatusPassed)
+	time.Sleep(20 * providerTestConfig().PollInterval)
+	results := run.store.results(1)
+	require.Len(t, results, 1)
+	result := results[0]
+	assert.Empty(t, providerEvidenceValue(result, "params_present"))
+	assert.Empty(t, providerEvidenceValue(result, "params_missing"))
+	assert.Empty(t, providerEvidenceValue(result, "request_source"))
+	assert.Equal(t, providerRequestPassedDetail, result.Detail)
+	run.end(t)
+}
+
+func TestExpectedParamKeysUnionsFilters(t *testing.T) {
+	t.Parallel()
+
+	target := &providerTarget{
+		requests: []RequestFilter{
+			{ParamKeys: []string{"currency", "amount"}},
+			{ParamKeys: []string{"amount", "customer"}},
+		},
+	}
+	assert.Equal(t, []string{"amount", "currency", "customer"}, target.expectedParamKeys())
+
+	empty := &providerTarget{}
+	assert.Empty(t, empty.expectedParamKeys())
 }

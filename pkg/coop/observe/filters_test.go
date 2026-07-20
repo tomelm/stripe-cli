@@ -45,11 +45,10 @@ func TestFiltersCoverSixEvaluationBlueprints(t *testing.T) {
 
 			assert.Len(t, filters.Requests, test.requestCount)
 			assert.Len(t, filters.Events, test.eventCount)
-			assert.Contains(t, filters.Requests, RequestFilter{
-				NodeNumber: requestNodeNumber(filters.Requests, test.requestMethod, test.requestPath),
-				Method:     test.requestMethod,
-				Path:       test.requestPath,
-			})
+			// Match on identity fields; ParamKeys ride along from the
+			// blueprint and are covered separately.
+			assert.Positive(t, requestNodeNumber(filters.Requests, test.requestMethod, test.requestPath),
+				"expected request filter %s %s", test.requestMethod, test.requestPath)
 			assert.Contains(t, filters.Events, EventFilter{
 				NodeNumber: eventNodeNumber(filters.Events, test.eventType),
 				EventType:  test.eventType,
@@ -172,4 +171,13 @@ func eventNodeNumber(filters []EventFilter, eventType string) int {
 		}
 	}
 	return -1
+}
+
+func TestFiltersCarryBlueprintParamKeys(t *testing.T) {
+	t.Parallel()
+
+	filters := filtersForBlueprint(t, "accept-payment-with-payment-element")
+	require.Len(t, filters.Requests, 1)
+	assert.Equal(t, []string{"amount", "automatic_payment_methods", "currency"}, filters.Requests[0].ParamKeys,
+		"param key names (never values) flow from the canonical blueprint")
 }

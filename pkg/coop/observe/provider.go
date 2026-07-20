@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math/rand"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
@@ -15,10 +17,17 @@ import (
 
 const (
 	defaultProviderPollInterval = 100 * time.Millisecond
-	// defaultSettleDuration keeps a finished node's observation attempt open
+	// defaultSettleDuration keeps a done node's observation attempt open
 	// briefly so asynchronously delivered requests and events still count.
 	defaultSettleDuration = 2 * time.Second
 	collectorStopTimeout  = 2 * time.Second
+
+	// Collector tuning shared by both streams.
+	collectorStartupTimeout    = 15 * time.Second
+	collectorStableReadyPeriod = 15 * time.Second
+	collectorBackoffInitial    = time.Second
+	collectorBackoffMaximum    = 30 * time.Second
+	collectorBackoffJitter     = 0.2
 )
 
 // Coverage gap classifications recorded as bounded evidence.
@@ -64,17 +73,29 @@ type Provider struct {
 	store        providerStore
 	config       ProviderConfig
 	newCollector providerCollectorFactory
+
+	// fetcher enriches matched requests with bounded request-log detail
+	// (param presence, source attribution). nil disables enrichment.
+	fetcher    RequestLogFetcher
+	fetchQueue chan fetchJob
+
+	detailMu       sync.Mutex
+	pendingDetails map[int]RequestLogDetail
 }
 
 // NewProvider creates a provider backed by the supplied explicit connector.
 // A nil connector remains fail-open and produces unavailable results.
 func NewProvider(store providerStore, config ProviderConfig, connector Connector) *Provider {
-	return newProvider(store, config, func(collectorConfig Config) (providerCollector, error) {
+	provider := newProvider(store, config, func(collectorConfig Config) (providerCollector, error) {
 		if connector == nil {
 			return nil, errors.New("collector unavailable")
 		}
 		return NewSupervisor(collectorConfig, connector, SystemClock{}, JitterFunc(rand.Float64))
 	})
+	if connector != nil && provider.config.APIKey != "" {
+		provider.fetcher = NewRequestLogFetcher(provider.config.APIKey)
+	}
+	return provider
 }
 
 func newProvider(store providerStore, config ProviderConfig, factory providerCollectorFactory) *Provider {
@@ -84,7 +105,12 @@ func newProvider(store providerStore, config ProviderConfig, factory providerCol
 	if config.SettleDuration <= 0 {
 		config.SettleDuration = defaultSettleDuration
 	}
-	return &Provider{store: store, config: config, newCollector: factory}
+	return &Provider{
+		store:          store,
+		config:         config,
+		newCollector:   factory,
+		pendingDetails: make(map[int]RequestLogDetail),
+	}
 }
 
 // streamDelivery is one poll's worth of collector state for a stream.
@@ -118,6 +144,12 @@ type providerTarget struct {
 	seenFailed         bool
 	lastFailedStatus   int
 	lastErrorCode      string
+	fetchRequestID     string
+	fetchQueued        bool
+	paramsChecked      int
+	paramsPresent      int
+	paramsMissing      []string
+	sourceClass        RequestSourceClass
 	settleDeadline     time.Time
 	finalized          bool
 	final              bool
@@ -125,6 +157,13 @@ type providerTarget struct {
 	mirrorResetPending bool
 	lastState          coop.NodeState
 	lastResultKey      string
+
+	// Takeover honesty: a fresh observer (lease takeover, restart) must not
+	// overwrite another observer's definitive stored result with its own
+	// indeterminate view. mayDowngrade is set only when this observer
+	// witnessed the node reopen; storedDefinitive is refreshed each poll.
+	mayDowngrade     bool
+	storedDefinitive bool
 }
 
 // Run owns collectors until cancellation or session completion.
@@ -146,8 +185,13 @@ func (provider *Provider) Run(ctx context.Context, session verificationruntime.S
 		reason = UnavailableCollector
 	}
 	if reason != "" {
-		provider.emitUnavailableUntilDelivered(ctx, targets, reason, emit)
+		provider.emitUnavailableUntilDelivered(ctx, session.ID, targets, reason, emit)
 		return nil
+	}
+
+	if provider.fetcher != nil {
+		provider.fetchQueue = make(chan fetchJob, fetchQueueCapacity)
+		go provider.runDetailFetcher(ctx)
 	}
 
 	collectors := make(map[Stream]providerCollector, 2)
@@ -201,12 +245,12 @@ func (provider *Provider) collectorConfig(sessionID string, stream Stream, filte
 		APIKey:            provider.config.APIKey,
 		DeviceName:        provider.config.DeviceName,
 		AccountID:         provider.config.AccountID,
-		StartupTimeout:    15 * time.Second,
-		StableReadyPeriod: 15 * time.Second,
+		StartupTimeout:    collectorStartupTimeout,
+		StableReadyPeriod: collectorStableReadyPeriod,
 		Backoff: BackoffPolicy{
-			InitialDelay:   time.Second,
-			MaximumDelay:   30 * time.Second,
-			JitterFraction: 0.2,
+			InitialDelay:   collectorBackoffInitial,
+			MaximumDelay:   collectorBackoffMaximum,
+			JitterFraction: collectorBackoffJitter,
 		},
 	}
 	if stream == StreamLogsTail {
@@ -246,8 +290,118 @@ func (provider *Provider) reconcile(
 		if err != nil {
 			continue
 		}
+		provider.applyPendingDetail(target)
 		target.reconcile(node, deliveries[target.stream], windows[target.nodeNumber], now, settle, force, emit)
+		provider.queueDetailFetch(target)
 	}
+}
+
+// fetchJob asks the detail worker to load one matched request's log detail.
+type fetchJob struct {
+	nodeNumber int
+	requestID  string
+}
+
+const (
+	fetchQueueCapacity   = 8
+	fetchRetryBaseDelay  = time.Second
+	fetchAttempts        = 3
+	fetchResponseTimeout = 10 * time.Second
+)
+
+// queueDetailFetch enqueues one detail fetch per attempt for a matched
+// request target. A full queue retries on the next poll.
+func (provider *Provider) queueDetailFetch(target *providerTarget) {
+	if provider.fetchQueue == nil || target.fetchQueued || target.fetchRequestID == "" {
+		return
+	}
+	select {
+	case provider.fetchQueue <- fetchJob{nodeNumber: target.nodeNumber, requestID: target.fetchRequestID}:
+		target.fetchQueued = true
+	default:
+	}
+}
+
+// applyPendingDetail folds a completed fetch into the target's attempt state
+// and forces one re-emit so the enriched evidence persists. Details apply
+// only while the attempt has a match, so a stale fetch from a rejected
+// attempt is held until the redo matches again (and is then replaced).
+func (provider *Provider) applyPendingDetail(target *providerTarget) {
+	if !target.seenPassed && !target.seenFailed {
+		return
+	}
+	provider.detailMu.Lock()
+	detail, ok := provider.pendingDetails[target.nodeNumber]
+	if ok {
+		delete(provider.pendingDetails, target.nodeNumber)
+	}
+	provider.detailMu.Unlock()
+	if !ok {
+		return
+	}
+	expected := target.expectedParamKeys()
+	target.paramsChecked = len(expected)
+	target.paramsPresent, target.paramsMissing = paramPresenceCounts(expected, detail.ParamKeys)
+	target.sourceClass = detail.SourceClass
+	target.lastResultKey = ""
+}
+
+func paramPresenceCounts(expected, observed []string) (int, []string) {
+	present, missing := paramPresence(expected, observed, maxMissingParamNames)
+	return present, missing
+}
+
+const maxMissingParamNames = 4
+
+func (target *providerTarget) expectedParamKeys() []string {
+	seen := make(map[string]bool)
+	for _, filter := range target.requests {
+		for _, key := range filter.ParamKeys {
+			seen[key] = true
+		}
+	}
+	return sortedKeys(seen)
+}
+
+// runDetailFetcher loads request-log details for matched requests with
+// bounded retries (log indexing can lag the stream by a moment).
+func (provider *Provider) runDetailFetcher(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case job := <-provider.fetchQueue:
+			if detail, err := provider.fetchWithRetry(ctx, job.requestID); err == nil {
+				provider.detailMu.Lock()
+				provider.pendingDetails[job.nodeNumber] = detail
+				provider.detailMu.Unlock()
+			}
+		}
+	}
+}
+
+func (provider *Provider) fetchWithRetry(ctx context.Context, requestID string) (RequestLogDetail, error) {
+	var lastErr error
+	for attempt := 0; attempt < fetchAttempts; attempt++ {
+		if attempt > 0 {
+			delay := time.Duration(attempt) * fetchRetryBaseDelay
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return RequestLogDetail{}, ctx.Err()
+			case <-timer.C:
+			}
+		}
+		fetchCtx, cancel := context.WithTimeout(ctx, fetchResponseTimeout)
+		detail, err := provider.fetcher.Fetch(fetchCtx, requestID)
+		cancel()
+		if err == nil {
+			return detail, nil
+		}
+		lastErr = err
+	}
+	return RequestLogDetail{}, lastErr
 }
 
 // stepWindows maps each 1-based node number to the earliest StartedAt among
@@ -282,6 +436,15 @@ func (target *providerTarget) reconcile(
 ) {
 	state := node.State
 	defer func() { target.lastState = state }()
+	target.storedDefinitive = nodeHasDefinitiveResult(node, target.resultID())
+
+	// Adopt another observer's finished work: a fresh observer that first
+	// sees a node already terminal with a stored result has nothing to add.
+	if !target.started && (state == coop.NodeDone || state == coop.NodeSkipped) && nodeHasResult(node, target.resultID()) {
+		target.started = true
+		target.finalized = true
+		return
+	}
 
 	switch state {
 	case coop.NodePending:
@@ -378,6 +541,12 @@ func (target *providerTarget) beginAttempt(start time.Time, snapshot Snapshot) {
 	target.seenFailed = false
 	target.lastFailedStatus = 0
 	target.lastErrorCode = ""
+	target.fetchRequestID = ""
+	target.fetchQueued = false
+	target.paramsChecked = 0
+	target.paramsPresent = 0
+	target.paramsMissing = nil
+	target.sourceClass = ""
 	target.settleDeadline = time.Time{}
 	target.finalized = false
 	target.final = false
@@ -389,23 +558,41 @@ func (target *providerTarget) beginAttempt(start time.Time, snapshot Snapshot) {
 // results on rejection, so a previously persisted result that has vanished is
 // itself the reopen signal.
 func (target *providerTarget) rejectionClearedResult(node *coop.SessionNode) bool {
-	if target.lastResultKey == "" || node.VerificationResults == nil {
-		return target.lastResultKey != "" && node.VerificationResults == nil
+	return target.lastResultKey != "" && !nodeHasResult(node, target.resultID())
+}
+
+func nodeHasResult(node *coop.SessionNode, id verification.ResultID) bool {
+	if node.VerificationResults == nil {
+		return false
 	}
 	for _, result := range node.VerificationResults.Results {
-		if result.ID == target.resultID() {
-			return false
+		if result.ID == id {
+			return true
 		}
 	}
-	return true
+	return false
+}
+
+func nodeHasDefinitiveResult(node *coop.SessionNode, id verification.ResultID) bool {
+	if node.VerificationResults == nil {
+		return false
+	}
+	for _, result := range node.VerificationResults.Results {
+		if result.ID == id {
+			return result.Status == verification.StatusPassed || result.Status == verification.StatusFailed
+		}
+	}
+	return false
 }
 
 // reopenAttempt starts a clean attempt after a rejection reopened the node.
 // Delivered downstream mirrors are reset so stale attribution does not
-// survive a step redo.
+// survive a step redo. Having witnessed the reopen, this observer may
+// legitimately replace a stored definitive result with a fresh streaming one.
 func (target *providerTarget) reopenAttempt(now time.Time, snapshot Snapshot) {
 	wasDelivered := target.mirrorDelivered
 	target.beginAttempt(now, snapshot)
+	target.mayDowngrade = true
 	target.mirrorDelivered = false
 	target.mirrorResetPending = wasDelivered
 }
@@ -452,6 +639,9 @@ func (target *providerTarget) match(observation Observation) {
 				target.lastFailedStatus = observation.Request.Status
 				target.lastErrorCode = observation.Request.ErrorCode
 			}
+			if target.fetchRequestID == "" {
+				target.fetchRequestID = observation.Request.RequestID
+			}
 			return
 		}
 		return
@@ -494,10 +684,17 @@ func (target *providerTarget) passedDetail() string {
 	if target.stream != StreamLogsTail {
 		return "Matching event observed on Stripe; this does not confirm your application processed it."
 	}
+	detail := "Matching API request observed on Stripe; this does not confirm it came from your application."
 	if target.seenFailed {
-		return fmt.Sprintf("Matching API request observed on Stripe (after earlier failed attempts, HTTP %s); this does not confirm it came from your application.", httpStatusClass(target.lastFailedStatus))
+		detail = fmt.Sprintf("Matching API request observed on Stripe (after earlier failed attempts, HTTP %s); this does not confirm it came from your application.", httpStatusClass(target.lastFailedStatus))
 	}
-	return "Matching API request observed on Stripe; this does not confirm it came from your application."
+	if len(target.paramsMissing) > 0 {
+		detail += " Missing blueprint params: " + strings.Join(target.paramsMissing, ", ") + "."
+	}
+	if target.sourceClass == RequestSourceDashboard {
+		detail += " Request came from the Dashboard."
+	}
+	return detail
 }
 
 // mirrorDetail wordings for downstream uiComponent attribution.
@@ -591,6 +788,15 @@ func (target *providerTarget) emitResult(
 	if gap != "" {
 		result.Evidence = append(result.Evidence, verification.Evidence{Key: "coverage_gap", Class: verification.EvidenceSafe, Value: gap})
 	}
+	if target.paramsChecked > 0 {
+		result.Evidence = append(result.Evidence, verification.Evidence{Key: "params_present", Class: verification.EvidenceSafe, Value: fmt.Sprintf("%d/%d", target.paramsPresent, target.paramsChecked)})
+	}
+	if len(target.paramsMissing) > 0 {
+		result.Evidence = append(result.Evidence, verification.Evidence{Key: "params_missing", Class: verification.EvidenceSafe, Value: strings.Join(target.paramsMissing, ",")})
+	}
+	if target.sourceClass != "" {
+		result.Evidence = append(result.Evidence, verification.Evidence{Key: "request_source", Class: verification.EvidenceSafe, Value: string(target.sourceClass)})
+	}
 	switch status {
 	case verification.StatusFailed:
 		result.FailureDomain = verification.FailureDomainIntegration
@@ -603,6 +809,12 @@ func (target *providerTarget) emitResult(
 		result.Transient = transient
 	case verification.StatusInconclusive, verification.StatusNotObserved:
 		result.FailureDomain = verification.FailureDomainCoverage
+	}
+	// Takeover honesty: never overwrite another observer's stored definitive
+	// result with this observer's indeterminate view unless this observer
+	// witnessed the reopen. Matching continues; an upgrade emits normally.
+	if status.Indeterminate() && target.storedDefinitive && !target.mayDowngrade {
+		return true
 	}
 	key := fmt.Sprintf("%s|%s|%d|%t|%t|%d|%s|%s|%t|%t", status, snapshot.State, snapshot.Epoch, target.seenPassed, target.seenFailed, target.lastFailedStatus, target.lastErrorCode, gap, transient, target.final)
 	if key == target.lastResultKey {
@@ -648,6 +860,7 @@ func targetsForFilters(filters SessionFilters, session verificationruntime.Sessi
 			byKey[key] = target
 			targets = append(targets, target)
 		}
+		filter.compile()
 		target.requests = append(target.requests, filter)
 	}
 	for _, filter := range filters.Events {
@@ -700,8 +913,9 @@ func targetsUseStream(targets []*providerTarget, stream Stream) bool {
 
 // emitUnavailableUntilDelivered keeps the advisory unavailability visible: it
 // retries targets whose store write failed until every target's result has
-// persisted or the session ends.
-func (provider *Provider) emitUnavailableUntilDelivered(ctx context.Context, targets []*providerTarget, reason UnavailableReason, emit verificationruntime.Emit) {
+// persisted, then waits for the session to end (the provider owns terminal
+// detection).
+func (provider *Provider) emitUnavailableUntilDelivered(ctx context.Context, sessionID string, targets []*providerTarget, reason UnavailableReason, emit verificationruntime.Emit) {
 	pending := make(map[*providerTarget]bool, len(targets))
 	for _, target := range targets {
 		pending[target] = true
@@ -712,6 +926,11 @@ func (provider *Provider) emitUnavailableUntilDelivered(ctx context.Context, tar
 		for target := range pending {
 			if emitUnavailableTarget(target, reason, emit) {
 				delete(pending, target)
+			}
+		}
+		if current, err := provider.store.Read(sessionID); err == nil {
+			if current.Status != coop.SessionActive || current.IsComplete() {
+				return
 			}
 		}
 		select {
@@ -757,10 +976,18 @@ func emitUnavailableTarget(target *providerTarget, reason UnavailableReason, emi
 	return emit(target.nodeNumber, result) == nil
 }
 
+// stopProviderCollectors stops all collectors in parallel under one shared
+// budget so TUI shutdown never stalls sequentially.
 func stopProviderCollectors(collectors map[Stream]providerCollector) {
+	ctx, cancel := context.WithTimeout(context.Background(), collectorStopTimeout)
+	defer cancel()
+	var stopping sync.WaitGroup
 	for _, collector := range collectors {
-		ctx, cancel := context.WithTimeout(context.Background(), collectorStopTimeout)
-		_ = collector.Stop(ctx)
-		cancel()
+		stopping.Add(1)
+		go func(collector providerCollector) {
+			defer stopping.Done()
+			_ = collector.Stop(ctx)
+		}(collector)
 	}
+	stopping.Wait()
 }
