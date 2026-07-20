@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/stripe/stripe-cli/pkg/coop"
 	"github.com/stripe/stripe-cli/pkg/coop/verification"
 )
 
@@ -59,24 +60,29 @@ func freshWindow() (*time.Time, *time.Time) {
 	return &started, &completed
 }
 
-// buildRequest assembles a ReportRequest for a frozen blueprint/stage with a
-// fresh action window. Most fixtures report references at a node number
-// different from nodeNumber so the created-in-window check (covered by its
-// own dedicated tests below) never incidentally interferes with an unrelated
-// assertion.
-func buildRequest(blueprintID, nodeID string, nodeNumber int, refs []ReportReference) ReportRequest {
+// buildRequest loads the named blueprint into a fresh session, resolves
+// nodeID to its 1-based node number, and assembles a ReportRequest with a
+// fresh action window. Most fixtures report references at node 1 (the
+// prepended, never-derivable context node) so the created-in-window check
+// (covered by its own dedicated tests below) never incidentally interferes
+// with an unrelated assertion.
+func buildRequest(t *testing.T, blueprintID, nodeID string, refs []ReportReference) (ReportRequest, *coop.Session) {
+	t.Helper()
+	bp, err := coop.LoadBlueprint(blueprintID)
+	require.NoError(t, err)
+	session := coop.NewSessionFromBlueprint(bp, "session_checks_"+blueprintID, nil, nil)
+	nodeNumber := nodeNumberFor(t, session, nodeID)
+
 	started, completed := freshWindow()
-	return ReportRequest{
-		SessionID:       "session_checks_test",
-		BlueprintID:     blueprintID,
-		BlueprintDigest: frozenBlueprintDigests[blueprintID],
-		NodeID:          nodeID,
-		NodeNumber:      nodeNumber,
-		StartedAt:       started,
-		CompletedAt:     completed,
-		References:      refs,
-		Deadline:        time.Now().Add(DefaultReportDeadline),
+	request := ReportRequest{
+		Session:     session,
+		NodeNumber:  nodeNumber,
+		StartedAt:   started,
+		CompletedAt: completed,
+		References:  refs,
+		Deadline:    time.Now().Add(DefaultReportDeadline),
 	}
+	return request, session
 }
 
 func runVerify(t *testing.T, reader Reader, request ReportRequest) verification.ResultSet {
@@ -140,19 +146,23 @@ func accountResourceID(suffix string) string         { return "acct_test_" + suf
 
 // --- per-blueprint fixture builders -----------------------------------------
 
-func oneTimePaymentFixture(salt string, mutateIntent func(map[string]any)) ([]ReportReference, map[string]map[string]any, string, string) {
+func oneTimePaymentFixture(salt string, mutateSession, mutateIntent func(map[string]any)) ([]ReportReference, map[string]map[string]any, string, string) {
 	csID := checkoutSessionResourceID("otp" + salt)
 	piID := paymentIntentResourceID("otp" + salt)
+	session := map[string]any{
+		"id": csID, "status": "complete", "payment_status": "paid", "payment_intent": piID,
+		"amount_total": num(2000), "currency": "usd",
+	}
 	intent := map[string]any{"id": piID, "status": "succeeded", "amount": num(2000), "currency": "usd"}
+	if mutateSession != nil {
+		mutateSession(session)
+	}
 	if mutateIntent != nil {
 		mutateIntent(intent)
 	}
 	objects := map[string]map[string]any{
-		"/v1/checkout/sessions/" + csID: {
-			"id": csID, "status": "complete", "payment_status": "paid", "payment_intent": piID,
-			"amount_total": num(2000), "currency": "usd",
-		},
-		"/v1/payment_intents/" + piID: intent,
+		"/v1/checkout/sessions/" + csID: session,
+		"/v1/payment_intents/" + piID:   intent,
 	}
 	refs := []ReportReference{
 		ref("checkout_session", ResourceCheckoutSession, csID, 1),
@@ -171,12 +181,15 @@ func invoicePaidFixture(salt string, mutate func(map[string]any)) ([]ReportRefer
 	return refs, map[string]map[string]any{"/v1/invoices/" + invID: invoice}, invID
 }
 
-func flatSubscriptionTrackFixture(salt string, mutateSub func(map[string]any)) ([]ReportReference, map[string]map[string]any) {
+// flatSubscriptionTrackFixture builds a fixture for
+// subscribe-chapter.track-subscription-creation, whose derived stage
+// declares only the "subscription" role: this blueprint creates its
+// customer through a test helper (no apiRequest node), so no customer role
+// is derived here (see TestDerivedStagesMatchBlueprints).
+func flatSubscriptionTrackFixture(salt string, mutateSub func(map[string]any)) ([]ReportReference, map[string]map[string]any, string) {
 	subID := subscriptionResourceID("track" + salt)
-	csID := checkoutSessionResourceID("track" + salt)
-	custID := customerResourceID("track" + salt)
 	sub := map[string]any{
-		"id": subID, "status": "active", "customer": custID,
+		"id": subID, "status": "active",
 		"items": map[string]any{
 			"data": []any{
 				map[string]any{
@@ -192,17 +205,9 @@ func flatSubscriptionTrackFixture(salt string, mutateSub func(map[string]any)) (
 	if mutateSub != nil {
 		mutateSub(sub)
 	}
-	objects := map[string]map[string]any{
-		"/v1/subscriptions/" + subID:    sub,
-		"/v1/checkout/sessions/" + csID: {"id": csID, "status": "complete", "payment_status": "paid"},
-		"/v1/customers/" + custID:       {"id": custID},
-	}
-	refs := []ReportReference{
-		ref("subscription", ResourceSubscription, subID, 1),
-		ref("checkout_session", ResourceCheckoutSession, csID, 1),
-		ref("customer", ResourceCustomer, custID, 1),
-	}
-	return refs, objects
+	objects := map[string]map[string]any{"/v1/subscriptions/" + subID: sub}
+	refs := []ReportReference{ref("subscription", ResourceSubscription, subID, 1)}
+	return refs, objects, subID
 }
 
 func marketplaceFixture(salt string, mutateIntent, mutateSession func(map[string]any)) ([]ReportReference, map[string]map[string]any, string, string, string) {
@@ -242,15 +247,15 @@ func marketplaceFixture(salt string, mutateIntent, mutateSession func(map[string
 // =============================================================================
 
 func TestOneTimePaymentFinalStagePasses(t *testing.T) {
-	refs, objects, _, _ := oneTimePaymentFixture("final0001", nil)
-	request := buildRequest("one-time-payment", "webhook-chapter.handle-checkout-completed", 10, refs)
+	refs, objects, _, _ := oneTimePaymentFixture("final0001", nil, nil)
+	request, _ := buildRequest(t, "one-time-payment", "webhook-chapter.handle-checkout-completed", refs)
 	set := runVerify(t, &fakeReader{objects: objects}, request)
 	assertAllStatus(t, set, verification.StatusPassed)
 }
 
 func TestInvoicePaymentsFinalStagePasses(t *testing.T) {
 	refs, objects, _ := invoicePaidFixture("final0001", nil)
-	request := buildRequest("invoice-payments", "payment-chapter.wait-for-invoice-paid", 10, refs)
+	request, _ := buildRequest(t, "invoice-payments", "payment-chapter.wait-for-invoice-paid", refs)
 	set := runVerify(t, &fakeReader{objects: objects}, request)
 	assertAllStatus(t, set, verification.StatusPassed)
 }
@@ -261,78 +266,59 @@ func TestPaymentElementFinalStagePasses(t *testing.T) {
 		"/v1/payment_intents/" + piID: {"id": piID, "status": "succeeded", "amount": num(2000)},
 	}
 	refs := []ReportReference{ref("payment_intent", ResourcePaymentIntent, piID, 1)}
-	request := buildRequest("accept-payment-with-payment-element", "accept-payment-chapter.handle-payment-succeeded", 10, refs)
+	request, _ := buildRequest(t, "accept-payment-with-payment-element", "accept-payment-chapter.handle-payment-succeeded", refs)
 	set := runVerify(t, &fakeReader{objects: objects}, request)
 	assertAllStatus(t, set, verification.StatusPassed)
 }
 
 func TestFlatSubscriptionFinalStagePasses(t *testing.T) {
-	refs, objects := flatSubscriptionTrackFixture("final0001", nil)
-	request := buildRequest("flat-subscription-with-entitlements", "subscribe-chapter.track-subscription-creation", 10, refs)
+	refs, objects, _ := flatSubscriptionTrackFixture("final0001", nil)
+	request, _ := buildRequest(t, "flat-subscription-with-entitlements", "subscribe-chapter.track-subscription-creation", refs)
 	set := runVerify(t, &fakeReader{objects: objects}, request)
 	assertAllStatus(t, set, verification.StatusPassed)
 }
 
 func TestMarketplaceFinalStagePasses(t *testing.T) {
 	refs, objects, _, _, _ := marketplaceFixture("final0001", nil, nil)
-	request := buildRequest("learn-accounts-v1-marketplace", "accept-embedded-payments-chapter.wait-for-checkout", 10, refs)
+	request, _ := buildRequest(t, "learn-accounts-v1-marketplace", "accept-embedded-payments-chapter.wait-for-checkout", refs)
 	set := runVerify(t, &fakeReader{objects: objects}, request)
 	assertAllStatus(t, set, verification.StatusPassed)
 }
 
-// TestFlatFeeFinalStageV2BestEffort covers the one blueprint whose final
-// stage cannot pass cleanly end to end: the v2 billing spine is best-effort
-// and must degrade to unavailable (never pass, never fail) while the v1
-// portion (checkout session, customer, meter) verifies normally.
+// TestFlatFeeFinalStageV2BestEffort covers the flat-fee blueprint's final
+// node, whose derived stage is a single best-effort v2 role
+// (pricing_plan_subscription, from the servicing_activated event) plus the
+// unconditional "this CLI cannot read v2 billing state" marker the event
+// always emits. Both must degrade to unavailable, never pass or fail.
 func TestFlatFeeFinalStageV2BestEffort(t *testing.T) {
-	custID := customerResourceID("ffinal0001")
-	csID := checkoutSessionResourceID("ffinal0001")
-	mtrID := meterResourceID("ffinal0001")
-	ppID := "pricing_plan_final_0001"
 	ppsID := "pricing_plan_sub_final_0001"
-
 	reader := &fakeReader{
-		objects: map[string]map[string]any{
-			"/v1/checkout/sessions/" + csID: {"id": csID, "status": "complete"},
-			"/v1/customers/" + custID:       {"id": custID},
-			"/v1/billing/meters/" + mtrID:   {"id": mtrID, "event_name": "meter.usage.recorded"},
-		},
 		errs: map[string]error{
-			"/v2/billing/pricing_plans/" + ppID:               ErrUnavailable,
 			"/v2/billing/pricing_plan_subscriptions/" + ppsID: ErrNotFound,
 		},
 	}
 	refs := []ReportReference{
-		ref("checkout_session", ResourceCheckoutSession, csID, 1),
-		ref("customer", ResourceCustomer, custID, 1),
-		ref("meter", ResourceBillingMeter, mtrID, 1),
-		ref("pricing_plan", ResourceV2PricingPlan, ppID, 1),
 		ref("pricing_plan_subscription", ResourceV2PricingPlanSubscription, ppsID, 1),
 	}
-	request := buildRequest("flat-fee-and-overages", "subscribe-customer-chapter.waitForServicingActivated", 10, refs)
+	request, _ := buildRequest(t, "flat-fee-and-overages", "subscribe-customer-chapter.waitForServicingActivated", refs)
 	set := runVerify(t, reader, request)
 	byID := resultsByID(t, set)
 
-	// v1 portion passes outright.
-	assert.Equal(t, verification.StatusPassed, byID[existsID("checkout_session", csID)].Status)
-	assert.Equal(t, verification.StatusPassed, byID[fieldID("checkout_session", "status", csID)].Status)
-	assert.Equal(t, verification.StatusPassed, byID[existsID("customer", custID)].Status)
-	assert.Equal(t, verification.StatusPassed, byID[existsID("meter", mtrID)].Status)
-	assert.Equal(t, verification.StatusPassed, byID[fieldID("meter", "event_name", mtrID)].Status)
-
-	// v2 portion is unavailable, never passed or failed.
-	assert.Equal(t, verification.StatusUnavailable, byID[existsID("pricing_plan", ppID)].Status)
 	assert.Equal(t, verification.StatusUnavailable, byID[existsID("pricing_plan_subscription", ppsID)].Status)
-	assert.Equal(t, verification.StatusUnavailable, byID["unverifiable:servicing-activation"].Status)
 
-	v2Seen := 0
+	unverifiableCount := 0
 	for _, result := range set.Results {
-		if strings.Contains(result.ID, "pricing-plan") {
-			v2Seen++
-			assert.Equal(t, verification.StatusUnavailable, result.Status, "v2 billing reads must degrade to unavailable, never pass or fail: %s", result.ID)
+		if strings.HasPrefix(result.ID, "unverifiable:") {
+			unverifiableCount++
+			assert.Equal(t, verification.StatusUnavailable, result.Status)
 		}
 	}
-	assert.GreaterOrEqual(t, v2Seen, 2, "expected at least the two v2 role results")
+	assert.Equal(t, 1, unverifiableCount, "expected exactly one unverifiable servicing-activation marker")
+
+	for _, result := range set.Results {
+		assert.NotEqual(t, verification.StatusPassed, result.Status, "no v2 result may pass: %s", result.ID)
+		assert.NotEqual(t, verification.StatusFailed, result.Status, "no v2 result may fail: %s", result.ID)
+	}
 }
 
 // =============================================================================
@@ -340,10 +326,10 @@ func TestFlatFeeFinalStageV2BestEffort(t *testing.T) {
 // =============================================================================
 
 func TestPaymentIntentRequiresPaymentMethodFails(t *testing.T) {
-	refs, objects, _, piID := oneTimePaymentFixture("reqpm0001", func(intent map[string]any) {
+	refs, objects, _, piID := oneTimePaymentFixture("reqpm0001", nil, func(intent map[string]any) {
 		intent["status"] = "requires_payment_method"
 	})
-	request := buildRequest("one-time-payment", "webhook-chapter.handle-checkout-completed", 10, refs)
+	request, _ := buildRequest(t, "one-time-payment", "webhook-chapter.handle-checkout-completed", refs)
 	set := runVerify(t, &fakeReader{objects: objects}, request)
 	byID := resultsByID(t, set)
 	assert.Equal(t, verification.StatusFailed, byID[fieldID("payment_intent", "status", piID)].Status)
@@ -353,34 +339,10 @@ func TestInvoiceOpenAtFinalStageFails(t *testing.T) {
 	refs, objects, invID := invoicePaidFixture("open0001", func(invoice map[string]any) {
 		invoice["status"] = "open"
 	})
-	request := buildRequest("invoice-payments", "payment-chapter.wait-for-invoice-paid", 10, refs)
+	request, _ := buildRequest(t, "invoice-payments", "payment-chapter.wait-for-invoice-paid", refs)
 	set := runVerify(t, &fakeReader{objects: objects}, request)
 	byID := resultsByID(t, set)
 	assert.Equal(t, verification.StatusFailed, byID[fieldID("invoice", "status", invID)].Status)
-}
-
-// Wrong collection method is a genuine structural contradiction: the
-// blueprint's flow is hosted invoicing, so charge_automatically can never be
-// a correct integration of it. App-chosen values (amounts, payment terms) are
-// deliberately NOT asserted; see the consistency and positivity tests below.
-func TestInvoiceWrongCollectionMethodFails(t *testing.T) {
-	invID := invoiceResourceID("wrongmethod0001")
-	custID := customerResourceID("wrongmethod0001")
-	reader := &fakeReader{objects: map[string]map[string]any{
-		"/v1/invoices/" + invID: {
-			"id": invID, "collection_method": "charge_automatically", "customer": custID,
-		},
-		"/v1/customers/" + custID: {"id": custID},
-	}}
-	refs := []ReportReference{
-		ref("invoice", ResourceInvoice, invID, 1),
-		ref("customer", ResourceCustomer, custID, 1),
-	}
-	request := buildRequest("invoice-payments", "create-invoice-chapter.create-invoice", 10, refs)
-	set := runVerify(t, reader, request)
-	byID := resultsByID(t, set)
-	assert.Equal(t, verification.StatusFailed, byID[fieldID("invoice", "collection_method", invID)].Status)
-	assert.Equal(t, verification.StatusPassed, byID[linkID("invoice", "customer", invID)].Status)
 }
 
 func TestPaymentElementZeroAmountFails(t *testing.T) {
@@ -389,7 +351,7 @@ func TestPaymentElementZeroAmountFails(t *testing.T) {
 		"/v1/payment_intents/" + piID: {"id": piID, "amount": num(0)},
 	}}
 	refs := []ReportReference{ref("payment_intent", ResourcePaymentIntent, piID, 1)}
-	request := buildRequest("accept-payment-with-payment-element", "accept-payment-chapter.create-payment-intent", 10, refs)
+	request, _ := buildRequest(t, "accept-payment-with-payment-element", "accept-payment-chapter.create-payment-intent", refs)
 	set := runVerify(t, reader, request)
 	byID := resultsByID(t, set)
 	assert.Equal(t, verification.StatusFailed, byID[fieldID("payment_intent", "amount", piID)].Status)
@@ -401,7 +363,7 @@ func TestMarketplaceFeeBehavior(t *testing.T) {
 	appChosen, objects, _, piID, _ := marketplaceFixture("fee0001", func(intent map[string]any) {
 		intent["application_fee_amount"] = num(999)
 	}, nil)
-	request := buildRequest("learn-accounts-v1-marketplace", "accept-embedded-payments-chapter.wait-for-checkout", 10, appChosen)
+	request, _ := buildRequest(t, "learn-accounts-v1-marketplace", "accept-embedded-payments-chapter.wait-for-checkout", appChosen)
 	set := runVerify(t, &fakeReader{objects: objects}, request)
 	byID := resultsByID(t, set)
 	assert.Equal(t, verification.StatusPassed, byID[fieldID("payment_intent", "application_fee_amount", piID)].Status,
@@ -410,7 +372,7 @@ func TestMarketplaceFeeBehavior(t *testing.T) {
 	missingFee, objects, _, piID, _ := marketplaceFixture("fee0002", func(intent map[string]any) {
 		delete(intent, "application_fee_amount")
 	}, nil)
-	request = buildRequest("learn-accounts-v1-marketplace", "accept-embedded-payments-chapter.wait-for-checkout", 10, missingFee)
+	request, _ = buildRequest(t, "learn-accounts-v1-marketplace", "accept-embedded-payments-chapter.wait-for-checkout", missingFee)
 	set = runVerify(t, &fakeReader{objects: objects}, request)
 	byID = resultsByID(t, set)
 	assert.Equal(t, verification.StatusFailed, byID[fieldID("payment_intent", "application_fee_amount", piID)].Status,
@@ -421,10 +383,10 @@ func TestMarketplaceFeeBehavior(t *testing.T) {
 // Checkout Session whose PaymentIntent shows a different amount is broken
 // regardless of what either value is.
 func TestCheckoutPaymentIntentAmountDisagreementFails(t *testing.T) {
-	refs, objects, csID, piID := oneTimePaymentFixture("agree0001", func(intent map[string]any) {
+	refs, objects, csID, piID := oneTimePaymentFixture("agree0001", nil, func(intent map[string]any) {
 		intent["amount"] = num(4200)
 	})
-	request := buildRequest("one-time-payment", "webhook-chapter.handle-checkout-completed", 10, refs)
+	request, _ := buildRequest(t, "one-time-payment", "webhook-chapter.handle-checkout-completed", refs)
 	set := runVerify(t, &fakeReader{objects: objects}, request)
 	byID := resultsByID(t, set)
 	agreement := byID["consistency:checkout-session-payment-intent.amount-total:"+fingerprint(csID, piID)]
@@ -436,7 +398,7 @@ func TestMarketplaceTransferDestinationMismatchFails(t *testing.T) {
 	refs, objects, _, piID, _ := marketplaceFixture("dest0001", func(intent map[string]any) {
 		intent["transfer_data"] = map[string]any{"destination": accountResourceID("unreporteddest0001")}
 	}, nil)
-	request := buildRequest("learn-accounts-v1-marketplace", "accept-embedded-payments-chapter.wait-for-checkout", 10, refs)
+	request, _ := buildRequest(t, "learn-accounts-v1-marketplace", "accept-embedded-payments-chapter.wait-for-checkout", refs)
 	set := runVerify(t, &fakeReader{objects: objects}, request)
 	byID := resultsByID(t, set)
 	result := byID[linkID("payment_intent", "connected_account", piID)]
@@ -456,12 +418,65 @@ func TestCheckoutLinkToUnreportedPaymentIntentFails(t *testing.T) {
 		ref("checkout_session", ResourceCheckoutSession, csID, 1),
 		ref("payment_intent", ResourcePaymentIntent, reportedPiID, 1),
 	}
-	request := buildRequest("one-time-payment", "webhook-chapter.handle-checkout-completed", 10, refs)
+	request, _ := buildRequest(t, "one-time-payment", "webhook-chapter.handle-checkout-completed", refs)
 	set := runVerify(t, reader, request)
 	byID := resultsByID(t, set)
 	result := byID[linkID("checkout_session", "payment_intent", csID)]
 	assert.Equal(t, verification.StatusFailed, result.Status)
 	assert.Contains(t, result.Detail, "does not match")
+}
+
+// TestCheckoutPaymentStatusAcceptedValues confirms the checkout session's
+// payment_status field accepts either successful value the canonical
+// semantics allow ("paid" or the legitimate "no_payment_required") and
+// rejects anything else (e.g. "unpaid").
+func TestCheckoutPaymentStatusAcceptedValues(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     string
+		wantStatus verification.Status
+	}{
+		{"paid passes", "paid", verification.StatusPassed},
+		{"no_payment_required passes", "no_payment_required", verification.StatusPassed},
+		{"unpaid fails", "unpaid", verification.StatusFailed},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			refs, objects, csID, _ := oneTimePaymentFixture("paystatus"+testCase.status, func(session map[string]any) {
+				session["payment_status"] = testCase.status
+			}, nil)
+			request, _ := buildRequest(t, "one-time-payment", "webhook-chapter.handle-checkout-completed", refs)
+			set := runVerify(t, &fakeReader{objects: objects}, request)
+			byID := resultsByID(t, set)
+			assert.Equal(t, testCase.wantStatus, byID[fieldID("checkout_session", "payment_status", csID)].Status)
+		})
+	}
+}
+
+// TestSubscriptionStatusAcceptedValues confirms only the access-granting
+// subscription statuses (active, trialing) pass; a non-access status like
+// past_due is the contradiction.
+func TestSubscriptionStatusAcceptedValues(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     string
+		wantStatus verification.Status
+	}{
+		{"active passes", "active", verification.StatusPassed},
+		{"trialing passes", "trialing", verification.StatusPassed},
+		{"past_due fails", "past_due", verification.StatusFailed},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			refs, objects, subID := flatSubscriptionTrackFixture("substatus"+testCase.status, func(sub map[string]any) {
+				sub["status"] = testCase.status
+			})
+			request, _ := buildRequest(t, "flat-subscription-with-entitlements", "subscribe-chapter.track-subscription-creation", refs)
+			set := runVerify(t, &fakeReader{objects: objects}, request)
+			byID := resultsByID(t, set)
+			assert.Equal(t, testCase.wantStatus, byID[fieldID("subscription", "status", subID)].Status)
+		})
+	}
 }
 
 func TestLiveModeObjectFailsExists(t *testing.T) {
@@ -470,7 +485,7 @@ func TestLiveModeObjectFailsExists(t *testing.T) {
 		"/v1/products/" + prodID: {"id": prodID, "active": true, "livemode": true},
 	}}
 	refs := []ReportReference{ref("product", ResourceProduct, prodID, 1)}
-	request := buildRequest("one-time-payment", "setup-chapter.create-product", 10, refs)
+	request, _ := buildRequest(t, "one-time-payment", "setup-chapter.create-product", refs)
 	set := runVerify(t, reader, request)
 	byID := resultsByID(t, set)
 	result := byID[existsID("product", prodID)]
@@ -485,7 +500,7 @@ func TestNotFoundObjectFailsExists(t *testing.T) {
 	prodID := productResourceID("missing0001")
 	reader := &fakeReader{errs: map[string]error{"/v1/products/" + prodID: ErrNotFound}}
 	refs := []ReportReference{ref("product", ResourceProduct, prodID, 1)}
-	request := buildRequest("one-time-payment", "setup-chapter.create-product", 10, refs)
+	request, _ := buildRequest(t, "one-time-payment", "setup-chapter.create-product", refs)
 	set := runVerify(t, reader, request)
 	byID := resultsByID(t, set)
 	result := byID[existsID("product", prodID)]
@@ -494,7 +509,7 @@ func TestNotFoundObjectFailsExists(t *testing.T) {
 }
 
 func TestMissingRequiredRoleFails(t *testing.T) {
-	request := buildRequest("one-time-payment", "setup-chapter.create-product", 10, nil)
+	request, _ := buildRequest(t, "one-time-payment", "setup-chapter.create-product", nil)
 	reader := &fakeReader{}
 	set := runVerify(t, reader, request)
 	require.Len(t, set.Results, 1)
@@ -505,11 +520,132 @@ func TestMissingRequiredRoleFails(t *testing.T) {
 }
 
 func TestMissingBestEffortRoleUnavailable(t *testing.T) {
-	request := buildRequest("flat-fee-and-overages", "create-pricing-plan-chapter.createEmptyPricingPlan", 10, nil)
+	request, _ := buildRequest(t, "flat-fee-and-overages", "create-pricing-plan-chapter.createEmptyPricingPlan", nil)
 	set := runVerify(t, &fakeReader{}, request)
 	require.Len(t, set.Results, 1)
 	assert.Equal(t, existsID("pricing_plan", ""), set.Results[0].ID)
 	assert.Equal(t, verification.StatusUnavailable, set.Results[0].Status)
+}
+
+// =============================================================================
+// Blueprint-literal structural checks
+// =============================================================================
+
+// Wrong collection method is a genuine structural contradiction: the
+// blueprint's flow is hosted invoicing, so charge_automatically can never be
+// a correct integration of it. App-chosen values (amounts, payment terms) are
+// deliberately NOT asserted. The invoice->customer link is derived from the
+// blueprint's "customer" param reference and must pass regardless.
+func TestInvoiceCollectionMethodStructuralCheck(t *testing.T) {
+	cases := []struct {
+		name       string
+		method     string
+		wantStatus verification.Status
+	}{
+		{"send_invoice passes", "send_invoice", verification.StatusPassed},
+		{"charge_automatically fails", "charge_automatically", verification.StatusFailed},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			invID := invoiceResourceID("method" + testCase.method)
+			custID := customerResourceID("method" + testCase.method)
+			reader := &fakeReader{objects: map[string]map[string]any{
+				"/v1/invoices/" + invID: {
+					"id": invID, "collection_method": testCase.method, "customer": custID,
+				},
+				"/v1/customers/" + custID: {"id": custID},
+			}}
+			refs := []ReportReference{
+				ref("invoice", ResourceInvoice, invID, 1),
+				ref("customer", ResourceCustomer, custID, 1),
+			}
+			request, _ := buildRequest(t, "invoice-payments", "create-invoice-chapter.create-invoice", refs)
+			set := runVerify(t, reader, request)
+			byID := resultsByID(t, set)
+			assert.Equal(t, testCase.wantStatus, byID[fieldID("invoice", "collection_method", invID)].Status)
+			assert.Equal(t, verification.StatusPassed, byID[linkID("invoice", "customer", invID)].Status)
+		})
+	}
+}
+
+// TestMarketplaceAccountControllerStructuralChecks confirms the connected
+// account's controller.* fields (structural literals from the blueprint's
+// create-account request) are compared exactly: a match passes and any
+// mismatch on any of the three fields fails just that field.
+func TestMarketplaceAccountControllerStructuralChecks(t *testing.T) {
+	buildAccount := func(id string) map[string]any {
+		return map[string]any{
+			"id": id,
+			"controller": map[string]any{
+				"fees":                   map[string]any{"payer": "application"},
+				"losses":                 map[string]any{"payments": "application"},
+				"requirement_collection": "stripe",
+			},
+		}
+	}
+	cases := []struct {
+		name       string
+		salt       string
+		mutate     func(map[string]any)
+		field      string
+		wantStatus verification.Status
+	}{
+		{"controller matches passes", "match0001", nil, "controller.fees.payer", verification.StatusPassed},
+		{"fees payer mismatch fails", "fees0001", func(account map[string]any) {
+			account["controller"].(map[string]any)["fees"] = map[string]any{"payer": "stripe"}
+		}, "controller.fees.payer", verification.StatusFailed},
+		{"losses payments mismatch fails", "losses0001", func(account map[string]any) {
+			account["controller"].(map[string]any)["losses"] = map[string]any{"payments": "stripe"}
+		}, "controller.losses.payments", verification.StatusFailed},
+		{"requirement_collection mismatch fails", "reqcollect0001", func(account map[string]any) {
+			account["controller"].(map[string]any)["requirement_collection"] = "application"
+		}, "controller.requirement_collection", verification.StatusFailed},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			acctID := accountResourceID(testCase.salt)
+			account := buildAccount(acctID)
+			if testCase.mutate != nil {
+				testCase.mutate(account)
+			}
+			reader := &fakeReader{objects: map[string]map[string]any{"/v1/accounts/" + acctID: account}}
+			refs := []ReportReference{ref("connected_account", ResourceAccount, acctID, 1)}
+			request, _ := buildRequest(t, "learn-accounts-v1-marketplace", "create-account-chapter.create-account", refs)
+			set := runVerify(t, reader, request)
+			byID := resultsByID(t, set)
+			assert.Equal(t, testCase.wantStatus, byID[fieldID("connected_account", testCase.field, acctID)].Status)
+		})
+	}
+}
+
+// TestSendInvoiceHostedURLPresence confirms sending the invoice requires a
+// non-empty hosted_invoice_url; its value varies per run, so only presence
+// is asserted.
+func TestSendInvoiceHostedURLPresence(t *testing.T) {
+	cases := []struct {
+		name       string
+		salt       string
+		url        string
+		wantStatus verification.Status
+	}{
+		{"present passes", "present0001", "https://invoice.stripe.com/i/acct_x/test_x", verification.StatusPassed},
+		{"absent fails", "absent0001", "", verification.StatusFailed},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			invID := invoiceResourceID("hosted" + testCase.salt)
+			payload := map[string]any{"id": invID}
+			if testCase.url != "" {
+				payload["hosted_invoice_url"] = testCase.url
+			}
+			reader := &fakeReader{objects: map[string]map[string]any{"/v1/invoices/" + invID: payload}}
+			refs := []ReportReference{ref("invoice", ResourceInvoice, invID, 1)}
+			request, _ := buildRequest(t, "invoice-payments", "create-invoice-chapter.send-invoice", refs)
+			set := runVerify(t, reader, request)
+			byID := resultsByID(t, set)
+			assert.Equal(t, testCase.wantStatus, byID[fieldID("invoice", "hosted_invoice_url", invID)].Status)
+		})
+	}
 }
 
 // =============================================================================
@@ -523,7 +659,6 @@ func TestFeatureByListLookup(t *testing.T) {
 		name       string
 		payload    map[string]any
 		wantStatus verification.Status
-		wantField  bool
 	}{
 		{
 			name: "found and active",
@@ -532,7 +667,6 @@ func TestFeatureByListLookup(t *testing.T) {
 				"has_more": false,
 			},
 			wantStatus: verification.StatusPassed,
-			wantField:  true,
 		},
 		{
 			name: "has_more without a match",
@@ -552,12 +686,10 @@ func TestFeatureByListLookup(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			reader := &fakeReader{objects: map[string]map[string]any{"/v1/entitlements/features": testCase.payload}}
 			refs := []ReportReference{ref("feature", ResourceEntitlementFeature, featID, 1)}
-			request := buildRequest("flat-subscription-with-entitlements", "create-products-chapter.create-basic-feature", 10, refs)
+			request, _ := buildRequest(t, "flat-subscription-with-entitlements", "create-products-chapter.create-basic-feature", refs)
 			set := runVerify(t, reader, request)
 			byID := resultsByID(t, set)
 			assert.Equal(t, testCase.wantStatus, byID[existsID("feature", featID)].Status)
-			_, hasField := byID[fieldID("feature", "active", featID)]
-			assert.Equal(t, testCase.wantField, hasField)
 		})
 	}
 }
@@ -597,7 +729,7 @@ func TestProductFeatureAttachmentLookup(t *testing.T) {
 				ref("product", ResourceProduct, prodID, 1),
 				ref("feature", ResourceEntitlementFeature, featID, 1),
 			}
-			request := buildRequest("flat-subscription-with-entitlements", "create-products-chapter.attach-feature-to-product", 10, refs)
+			request, _ := buildRequest(t, "flat-subscription-with-entitlements", "create-products-chapter.attach-feature-to-product", refs)
 			set := runVerify(t, reader, request)
 			byID := resultsByID(t, set)
 			assert.Equal(t, testCase.wantStatus, byID[productFeatureResultID("product", "feature", prodID, featID)].Status)
@@ -640,7 +772,7 @@ func TestActiveEntitlementLookup(t *testing.T) {
 				ref("customer", ResourceCustomer, custID, 1),
 				ref("feature", ResourceEntitlementFeature, featID, 1),
 			}
-			request := buildRequest("flat-subscription-with-entitlements", "subscribe-chapter.check-entitlements", 10, refs)
+			request, _ := buildRequest(t, "flat-subscription-with-entitlements", "subscribe-chapter.check-entitlements", refs)
 			set := runVerify(t, reader, request)
 			byID := resultsByID(t, set)
 			assert.Equal(t, testCase.wantStatus, byID[entitlementResultID("customer", "feature", custID, featID)].Status)
@@ -654,7 +786,6 @@ func TestActiveEntitlementLookup(t *testing.T) {
 
 func TestInvoiceSubscriptionParentShape(t *testing.T) {
 	subID := subscriptionResourceID("parent0001")
-	custID := customerResourceID("parent0001")
 	invID := invoiceResourceID("parent0001")
 
 	cases := []struct {
@@ -664,7 +795,7 @@ func TestInvoiceSubscriptionParentShape(t *testing.T) {
 		{
 			name: "parent subscription_details link passes",
 			invoice: map[string]any{
-				"id": invID, "customer": custID,
+				"id": invID,
 				"parent": map[string]any{
 					"type":                 "subscription_details",
 					"subscription_details": map[string]any{"subscription": subID},
@@ -674,7 +805,7 @@ func TestInvoiceSubscriptionParentShape(t *testing.T) {
 		{
 			name: "quote parent is ignored, legacy fallback rescues",
 			invoice: map[string]any{
-				"id": invID, "customer": custID,
+				"id":           invID,
 				"parent":       map[string]any{"type": "quote_details", "quote_details": map[string]any{}},
 				"subscription": subID,
 			},
@@ -682,13 +813,13 @@ func TestInvoiceSubscriptionParentShape(t *testing.T) {
 		{
 			name: "legacy fallback used when parent is absent",
 			invoice: map[string]any{
-				"id": invID, "customer": custID, "subscription": subID,
+				"id": invID, "subscription": subID,
 			},
 		},
 		{
 			name: "parent wins over a conflicting legacy field",
 			invoice: map[string]any{
-				"id": invID, "customer": custID,
+				"id": invID,
 				"parent": map[string]any{
 					"type":                 "subscription_details",
 					"subscription_details": map[string]any{"subscription": subID},
@@ -703,20 +834,17 @@ func TestInvoiceSubscriptionParentShape(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			reader := &fakeReader{objects: map[string]map[string]any{
 				"/v1/invoices/" + invID:      testCase.invoice,
-				"/v1/customers/" + custID:    {"id": custID},
 				"/v1/subscriptions/" + subID: {"id": subID},
 			}}
 			refs := []ReportReference{
 				ref("invoice", ResourceInvoice, invID, 1),
 				ref("subscription", ResourceSubscription, subID, 1),
-				ref("customer", ResourceCustomer, custID, 1),
 			}
-			request := buildRequest("flat-subscription-with-entitlements", "next-billing-cycle-chapter.wait-for-invoice-created", 10, refs)
+			request, _ := buildRequest(t, "flat-subscription-with-entitlements", "next-billing-cycle-chapter.wait-for-invoice-created", refs)
 			set := runVerify(t, reader, request)
 			byID := resultsByID(t, set)
 			result := byID[linkID("invoice", "subscription", invID)]
 			assert.Equal(t, verification.StatusPassed, result.Status, result.Detail)
-			assert.Equal(t, verification.StatusPassed, byID[linkID("invoice", "customer", invID)].Status)
 		})
 	}
 }
@@ -729,23 +857,15 @@ func productCreatedAt(id string, createdAt time.Time) map[string]any {
 	return map[string]any{"id": id, "active": true, "created": num(createdAt.Unix())}
 }
 
-// buildWindowRequest overrides buildRequest's fresh window with an explicit
-// [started, completed) pair, for tests that exercise the window boundary
-// itself against the single-role "setup-chapter.create-product" stage.
-func buildWindowRequest(nodeNumber int, started, completed time.Time, refs []ReportReference) ReportRequest {
-	request := buildRequest("one-time-payment", "setup-chapter.create-product", nodeNumber, refs)
-	request.StartedAt = &started
-	request.CompletedAt = &completed
-	return request
-}
-
 func TestCreatedInWindowPasses(t *testing.T) {
 	prodID := productResourceID("window0001")
 	started, completed := time.Now().Add(-90*time.Second), time.Now()
+	request, _ := buildRequest(t, "one-time-payment", "setup-chapter.create-product", nil)
+	request.StartedAt, request.CompletedAt = &started, &completed
+	request.References = []ReportReference{ref("product", ResourceProduct, prodID, request.NodeNumber)}
 	reader := &fakeReader{objects: map[string]map[string]any{
 		"/v1/products/" + prodID: productCreatedAt(prodID, started.Add(30*time.Second)),
 	}}
-	request := buildWindowRequest(3, started, completed, []ReportReference{ref("product", ResourceProduct, prodID, 3)})
 	result := resultsByID(t, runVerify(t, reader, request))[existsID("product", prodID)]
 	assert.Equal(t, verification.StatusPassed, result.Status)
 	assert.Contains(t, result.Detail, "action window")
@@ -754,10 +874,12 @@ func TestCreatedInWindowPasses(t *testing.T) {
 func TestCreatedOutsideWindowFails(t *testing.T) {
 	prodID := productResourceID("window0002")
 	started, completed := time.Now().Add(-90*time.Second), time.Now()
+	request, _ := buildRequest(t, "one-time-payment", "setup-chapter.create-product", nil)
+	request.StartedAt, request.CompletedAt = &started, &completed
+	request.References = []ReportReference{ref("product", ResourceProduct, prodID, request.NodeNumber)}
 	reader := &fakeReader{objects: map[string]map[string]any{
 		"/v1/products/" + prodID: productCreatedAt(prodID, started.Add(-1*time.Hour)),
 	}}
-	request := buildWindowRequest(3, started, completed, []ReportReference{ref("product", ResourceProduct, prodID, 3)})
 	result := resultsByID(t, runVerify(t, reader, request))[existsID("product", prodID)]
 	assert.Equal(t, verification.StatusFailed, result.Status)
 	assert.Contains(t, result.Detail, "outside this node's action window")
@@ -766,8 +888,10 @@ func TestCreatedOutsideWindowFails(t *testing.T) {
 func TestUnusableWindowFallsBackToExistenceCheck(t *testing.T) {
 	prodID := productResourceID("window0003")
 	started, completed := time.Now().Add(-25*time.Hour), time.Now()
+	request, _ := buildRequest(t, "one-time-payment", "setup-chapter.create-product", nil)
+	request.StartedAt, request.CompletedAt = &started, &completed
+	request.References = []ReportReference{ref("product", ResourceProduct, prodID, request.NodeNumber)}
 	reader := &fakeReader{objects: map[string]map[string]any{"/v1/products/" + prodID: {"id": prodID, "active": true}}}
-	request := buildWindowRequest(3, started, completed, []ReportReference{ref("product", ResourceProduct, prodID, 3)})
 	result := resultsByID(t, runVerify(t, reader, request))[existsID("product", prodID)]
 	assert.Equal(t, verification.StatusPassed, result.Status)
 	assert.Contains(t, result.Detail, "unavailable or too broad")
@@ -776,8 +900,10 @@ func TestUnusableWindowFallsBackToExistenceCheck(t *testing.T) {
 func TestUnusableWindowStillFailsOnNotFound(t *testing.T) {
 	prodID := productResourceID("window0004")
 	started, completed := time.Now().Add(-25*time.Hour), time.Now()
+	request, _ := buildRequest(t, "one-time-payment", "setup-chapter.create-product", nil)
+	request.StartedAt, request.CompletedAt = &started, &completed
+	request.References = []ReportReference{ref("product", ResourceProduct, prodID, request.NodeNumber)}
 	reader := &fakeReader{errs: map[string]error{"/v1/products/" + prodID: ErrNotFound}}
-	request := buildWindowRequest(3, started, completed, []ReportReference{ref("product", ResourceProduct, prodID, 3)})
 	result := resultsByID(t, runVerify(t, reader, request))[existsID("product", prodID)]
 	assert.Equal(t, verification.StatusFailed, result.Status)
 	assert.Contains(t, result.Detail, "not found")
@@ -786,13 +912,15 @@ func TestUnusableWindowStillFailsOnNotFound(t *testing.T) {
 func TestRetainedReferenceSkipsWindowCheck(t *testing.T) {
 	prodID := productResourceID("window0005")
 	started, completed := time.Now().Add(-2*time.Minute), time.Now()
-	// A creation time far outside any plausible window: if the window check
-	// ran at all for this retained reference, it would fail.
+	request, _ := buildRequest(t, "one-time-payment", "setup-chapter.create-product", nil)
+	request.StartedAt, request.CompletedAt = &started, &completed
+	// Reported at an earlier node (the context node, always #1), not the
+	// current node: a creation time far outside any plausible window would
+	// fail the window check if it ran at all for this retained reference.
+	request.References = []ReportReference{ref("product", ResourceProduct, prodID, 1)}
 	reader := &fakeReader{objects: map[string]map[string]any{
 		"/v1/products/" + prodID: productCreatedAt(prodID, time.Now().Add(-72*time.Hour)),
 	}}
-	// Reported at an earlier node (2), not the current node (5).
-	request := buildWindowRequest(5, started, completed, []ReportReference{ref("product", ResourceProduct, prodID, 2)})
 	result := resultsByID(t, runVerify(t, reader, request))[existsID("product", prodID)]
 	assert.Equal(t, verification.StatusPassed, result.Status)
 	assert.Contains(t, result.Detail, "current state")
@@ -817,7 +945,7 @@ func TestReferenceOverflowCapsAtEightPerRole(t *testing.T) {
 	kept := ids[:maxReferencesPerRole]
 	dropped := ids[maxReferencesPerRole]
 
-	request := buildRequest("one-time-payment", "setup-chapter.create-product", 10, refs)
+	request, _ := buildRequest(t, "one-time-payment", "setup-chapter.create-product", refs)
 	reader := &fakeReader{objects: objects}
 	set := runVerify(t, reader, request)
 	byID := resultsByID(t, set)
@@ -881,7 +1009,7 @@ func TestResultCapRetainsAllFailedResultsAndAddsTruncationMarker(t *testing.T) {
 		refs = append(refs, ref("connected_account", ResourceAccount, id, 1))
 	}
 
-	request := buildRequest("learn-accounts-v1-marketplace", "accept-embedded-payments-chapter.wait-for-checkout", 10, refs)
+	request, _ := buildRequest(t, "learn-accounts-v1-marketplace", "accept-embedded-payments-chapter.wait-for-checkout", refs)
 	set := runVerify(t, &fakeReader{objects: objects}, request)
 	byID := resultsByID(t, set)
 
@@ -907,32 +1035,15 @@ func TestResultCapRetainsAllFailedResultsAndAddsTruncationMarker(t *testing.T) {
 // Gating and scope
 // =============================================================================
 
-func TestVerifyDigestMismatchReturnsOverlayBindingUnavailable(t *testing.T) {
-	request := buildRequest("one-time-payment", "setup-chapter.create-product", 10, nil)
-	request.BlueprintDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+func TestVerifyNonDerivableStageReturnsEmptySet(t *testing.T) {
+	request, _ := buildRequest(t, "one-time-payment", "checkout-chapter.complete-checkout", nil)
 	set := runVerify(t, &fakeReader{}, request)
-	require.Len(t, set.Results, 1)
-	assert.Equal(t, "overlay-binding", set.Results[0].ID)
-	assert.Equal(t, verification.StatusUnavailable, set.Results[0].Status)
-}
-
-func TestVerifyUnknownBlueprintOrStageReturnsEmptySet(t *testing.T) {
-	t.Run("unknown blueprint", func(t *testing.T) {
-		request := buildRequest("one-time-payment", "setup-chapter.create-product", 10, nil)
-		request.BlueprintID = "not-a-real-blueprint"
-		set := runVerify(t, &fakeReader{}, request)
-		assert.Empty(t, set.Results)
-	})
-	t.Run("unknown stage", func(t *testing.T) {
-		request := buildRequest("one-time-payment", "no-such-chapter.no-such-node", 10, nil)
-		set := runVerify(t, &fakeReader{}, request)
-		assert.Empty(t, set.Results)
-	})
+	assert.Empty(t, set.Results)
 }
 
 func TestVerifyNilReaderReturnsPerRoleUnavailable(t *testing.T) {
 	refs := []ReportReference{ref("product", ResourceProduct, productResourceID("nilreader0001"), 1)}
-	request := buildRequest("one-time-payment", "setup-chapter.create-product", 10, refs)
+	request, _ := buildRequest(t, "one-time-payment", "setup-chapter.create-product", refs)
 	verifier := NewReportVerifier(nil, checksAccount)
 	set, err := verifier.Verify(context.Background(), request)
 	require.NoError(t, err)
@@ -942,7 +1053,7 @@ func TestVerifyNilReaderReturnsPerRoleUnavailable(t *testing.T) {
 }
 
 func TestVerifyNonTestAccountModeReturnsPerRoleUnavailable(t *testing.T) {
-	request := buildRequest("one-time-payment", "setup-chapter.create-product", 10, nil)
+	request, _ := buildRequest(t, "one-time-payment", "setup-chapter.create-product", nil)
 	verifier := NewReportVerifier(&fakeReader{}, AccountContext{Mode: ModeLive, AccountID: "acct_livemodenotallowed1"})
 	set, err := verifier.Verify(context.Background(), request)
 	require.NoError(t, err)
@@ -974,7 +1085,7 @@ func TestResultsNeverExposeRawResourceIDsOrCredentials(t *testing.T) {
 		ref("checkout_session", ResourceCheckoutSession, csID, 1),
 		ref("payment_intent", ResourcePaymentIntent, piID, 1),
 	}
-	request := buildRequest("one-time-payment", "webhook-chapter.handle-checkout-completed", 10, refs)
+	request, _ := buildRequest(t, "one-time-payment", "webhook-chapter.handle-checkout-completed", refs)
 	set := runVerify(t, reader, request)
 	require.NotEmpty(t, set.Results)
 

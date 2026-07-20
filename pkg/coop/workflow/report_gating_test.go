@@ -276,8 +276,9 @@ func TestAutoConfirmVerifiesBeforeDone(t *testing.T) {
 
 func TestBestEffortV2RoleDoesNotBlock(t *testing.T) {
 	store, session := frozenSessionStore(t, "flat-fee-and-overages", "session_best_effort")
-	declaration, ok := resourcecheck.StageForBlueprint(session.Blueprint, session.BlueprintDigest, "create-pricing-plan-chapter.createEmptyPricingPlan")
-	require.True(t, ok, "overlay must be digest-bound for this test to exercise best-effort roles")
+	// Node 3 is createEmptyPricingPlan (after the prepended context node).
+	declaration, ok := resourcecheck.DeriveStage(session, 3)
+	require.True(t, ok, "the pricing plan node must derive a stage for this test to exercise best-effort roles")
 	require.Len(t, declaration.Resources, 1)
 	require.Equal(t, "pricing_plan", declaration.Resources[0].Role)
 	require.True(t, resourcecheck.BestEffortResourceType(declaration.Resources[0].Type))

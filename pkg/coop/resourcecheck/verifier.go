@@ -9,6 +9,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/stripe/stripe-cli/pkg/coop"
 	"github.com/stripe/stripe-cli/pkg/coop/verification"
 )
 
@@ -23,7 +24,7 @@ const (
 )
 
 // ReportReference is one session-owned role/ID pair. Type is resolved from
-// the stage tables, never supplied by the agent.
+// the derived stage, never supplied by the agent.
 type ReportReference struct {
 	Role         string
 	Type         ResourceType
@@ -32,18 +33,17 @@ type ReportReference struct {
 }
 
 // ReportRequest contains the full bounded context for automatic report-work
-// verification. CompletedAt is the prospective report time: verification runs
-// before the node transition.
+// verification. Checks derive from the session's own blueprint content, so
+// they can never drift from the blueprint the session was created from.
+// CompletedAt is the prospective report time: verification runs before the
+// node transition.
 type ReportRequest struct {
-	SessionID       string
-	BlueprintID     string
-	BlueprintDigest string
-	NodeID          string
-	NodeNumber      int
-	StartedAt       *time.Time
-	CompletedAt     *time.Time
-	References      []ReportReference
-	Deadline        time.Time
+	Session     *coop.Session
+	NodeNumber  int
+	StartedAt   *time.Time
+	CompletedAt *time.Time
+	References  []ReportReference
+	Deadline    time.Time
 }
 
 // ReportVerifier performs one process-local, read-only Stripe pass. It owns
@@ -60,26 +60,16 @@ func NewReportVerifier(reader Reader, account AccountContext) *ReportVerifier {
 	return &ReportVerifier{reader: reader, account: account}
 }
 
-// Verify runs the stage's checks over the newly reported and retained
+// Verify runs the node's derived checks over the newly reported and retained
 // references. Failed results are deterministic contradictions that gate
 // report-work; unavailable results fail open.
 func (verifier *ReportVerifier) Verify(ctx context.Context, request ReportRequest) (verification.ResultSet, error) {
 	if ctx == nil {
 		return verification.ResultSet{}, errors.New("report verification context is required")
 	}
-	expectedDigest, supported := frozenBlueprintDigests[request.BlueprintID]
-	if !supported {
+	stage, derivable := deriveStage(request.Session, request.NodeNumber)
+	if !derivable {
 		return verification.NewResultSet(), nil
-	}
-	roles, stageKnown := stageRoles[request.BlueprintID][request.NodeID]
-	if !stageKnown {
-		return verification.NewResultSet(), nil
-	}
-	if request.BlueprintDigest == "" || request.BlueprintDigest != expectedDigest {
-		return verification.NewResultSet(verification.Result{
-			ID: "overlay-binding", Status: verification.StatusUnavailable,
-			Detail: "Stripe resource verification is unavailable because the session blueprint digest does not match",
-		}), nil
 	}
 	if request.Deadline.IsZero() {
 		return verification.ResultSet{}, errors.New("report verification deadline is required")
@@ -94,11 +84,11 @@ func (verifier *ReportVerifier) Verify(ctx context.Context, request ReportReques
 	c := &stageCtx{
 		ctx:     runContext,
 		request: request,
-		roles:   roles,
+		roles:   stage.declaration.Resources,
 		refs:    map[string][]ReportReference{},
 	}
 	if verifier == nil || verifier.reader == nil || verifier.account.Mode != ModeTest {
-		for _, role := range roles {
+		for _, role := range c.roles {
 			c.unavailableResult(existsID(role.Role, ""), "Stripe authentication or the resource reader is unavailable; "+role.Role+" was not verified")
 		}
 		return verification.NewResultSet(c.results...), nil
@@ -107,9 +97,7 @@ func (verifier *ReportVerifier) Verify(ctx context.Context, request ReportReques
 
 	c.groupReferences()
 	c.reportMissingRoles()
-	if check := stageChecks[request.BlueprintID][request.NodeID]; check != nil {
-		check(c)
-	}
+	stage.run(c)
 
 	sort.Slice(c.results, func(left, right int) bool { return c.results[left].ID < c.results[right].ID })
 	results := capResults(c.results)

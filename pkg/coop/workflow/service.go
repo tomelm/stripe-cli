@@ -145,14 +145,12 @@ func (s *Service) StartWork(sessionID string, nodeNumber int, note string) (coop
 		Message:   fmt.Sprintf("Started: %s", node.Title),
 		Next:      fmt.Sprintf("stripe coop agent report-work --session=%s --step=%d --file=<path> --note=\"<what you did>\"", session.ID, nodeNumber),
 	}
-	if step, _, _, err := session.StepByNodeNumber(nodeNumber); err == nil {
-		if declaration, ok := resourcecheck.StageForBlueprint(session.Blueprint, session.BlueprintDigest, step.Key+"."+node.Key); ok {
-			resp.StripeResourceRoles = make([]coop.StripeResourceRole, 0, len(declaration.Resources))
-			for _, resource := range declaration.Resources {
-				resp.StripeResourceRoles = append(resp.StripeResourceRoles, coop.StripeResourceRole{
-					Role: resource.Role, Type: string(resource.Type), Lifecycle: string(resource.Lifecycle),
-				})
-			}
+	if declaration, ok := resourcecheck.DeriveStage(session, nodeNumber); ok {
+		resp.StripeResourceRoles = make([]coop.StripeResourceRole, 0, len(declaration.Resources))
+		for _, resource := range declaration.Resources {
+			resp.StripeResourceRoles = append(resp.StripeResourceRoles, coop.StripeResourceRole{
+				Role: resource.Role, Type: string(resource.Type), Lifecycle: string(resource.Lifecycle),
+			})
 		}
 	}
 	if node.Type == coop.NodeAPIRequest && node.Request != nil {
@@ -168,11 +166,12 @@ func (s *Service) ReportWork(sessionID string, nodeNumber int, input ReportWorkI
 	return s.ReportWorkContext(context.Background(), sessionID, nodeNumber, input, autoConfirm)
 }
 
-// ReportWorkContext verifies reported Stripe resources for the node's
-// digest-bound overlay before any state transition, then persists references,
-// results, and the outcome in one guarded update. Deterministic contradictions
-// and missing declared roles keep the node active with repair guidance for the
-// agent; unavailable evidence fails open to normal review.
+// ReportWorkContext verifies reported Stripe resources against checks derived
+// from the session's own blueprint content before any state transition, then
+// persists references, results, and the outcome in one guarded update.
+// Deterministic contradictions and missing derived roles keep the node active
+// with repair guidance for the agent; unavailable evidence fails open to
+// normal review.
 func (s *Service) ReportWorkContext(ctx context.Context, sessionID string, nodeNumber int, input ReportWorkInput, autoConfirm bool) (coop.CommandResponse, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -189,10 +188,6 @@ func (s *Service) ReportWorkContext(ctx context.Context, sessionID string, nodeN
 	if err != nil {
 		return errorResponse(err, startWorkHint), nil
 	}
-	step, _, _, err := snapshot.StepByNodeNumber(nodeNumber)
-	if err != nil {
-		return errorResponse(err, startWorkHint), nil
-	}
 	prospectiveTarget := coop.NodeReview
 	if autoConfirm || node.AutoConfirm {
 		prospectiveTarget = coop.NodeDone
@@ -200,8 +195,7 @@ func (s *Service) ReportWorkContext(ctx context.Context, sessionID string, nodeN
 	if node.State != coop.NodeActive {
 		return errorResponse(reportTransitionError(node.State, nodeNumber, prospectiveTarget), startWorkHint), nil
 	}
-	nodeID := step.Key + "." + node.Key
-	replacedRoles, replacements, err := stripeResourceReplacements(snapshot, nodeNumber, nodeID, input.StripeResources)
+	replacedRoles, replacements, err := stripeResourceReplacements(snapshot, nodeNumber, input.StripeResources)
 	if err != nil {
 		return errorResponse(err, startWorkHint), nil
 	}
@@ -214,20 +208,17 @@ func (s *Service) ReportWorkContext(ctx context.Context, sessionID string, nodeN
 	var missing []string
 	verifierRan := s.resourceVerifier != nil
 	if verifierRan {
-		if declaration, ok := resourcecheck.StageForBlueprint(snapshot.Blueprint, snapshot.BlueprintDigest, nodeID); ok {
+		if declaration, ok := resourcecheck.DeriveStage(snapshot, nodeNumber); ok {
 			missing = missingStageRoles(declaration, prospective)
 		}
 		completedAt := s.now()
 		set, verifyErr := s.resourceVerifier.Verify(ctx, resourcecheck.ReportRequest{
-			SessionID:       snapshot.ID,
-			BlueprintID:     snapshot.Blueprint,
-			BlueprintDigest: snapshot.BlueprintDigest,
-			NodeID:          nodeID,
-			NodeNumber:      nodeNumber,
-			StartedAt:       startedAtSnapshot,
-			CompletedAt:     &completedAt,
-			References:      reportReferences(prospective),
-			Deadline:        s.now().Add(resourcecheck.DefaultReportDeadline),
+			Session:     snapshot,
+			NodeNumber:  nodeNumber,
+			StartedAt:   startedAtSnapshot,
+			CompletedAt: &completedAt,
+			References:  reportReferences(prospective),
+			Deadline:    s.now().Add(resourcecheck.DefaultReportDeadline),
 		})
 		if verifyErr != nil {
 			set = verification.NewResultSet(verification.Result{
@@ -316,13 +307,13 @@ func reportTransitionError(state coop.NodeState, nodeNumber int, target coop.Nod
 // replacement references. A corrected report supersedes every earlier
 // reference for a re-reported role, so stale IDs from prior attempts cannot
 // keep feeding verification.
-func stripeResourceReplacements(session *coop.Session, nodeNumber int, nodeID string, inputs []StripeResourceInput) (map[string]struct{}, []coop.StripeResourceReference, error) {
+func stripeResourceReplacements(session *coop.Session, nodeNumber int, inputs []StripeResourceInput) (map[string]struct{}, []coop.StripeResourceReference, error) {
 	if len(inputs) == 0 {
 		return nil, nil, nil
 	}
-	declaration, ok := resourcecheck.StageForBlueprint(session.Blueprint, session.BlueprintDigest, nodeID)
+	declaration, ok := resourcecheck.DeriveStage(session, nodeNumber)
 	if !ok {
-		return nil, nil, fmt.Errorf("--stripe-resource is not supported for this blueprint stage or session digest")
+		return nil, nil, fmt.Errorf("--stripe-resource is not supported for this node")
 	}
 	roles := make(map[string]resourcecheck.ResourceType, len(declaration.Resources))
 	for _, resource := range declaration.Resources {

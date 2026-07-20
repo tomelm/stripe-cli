@@ -216,10 +216,11 @@ func TestCoopAgentReportWorkAutomaticallyVerifiesMultipleResources(t *testing.T)
 	var response coop.CommandResponse
 	require.NoError(t, json.Unmarshal([]byte(output), &response))
 	require.True(t, response.OK)
-	require.Len(t, response.VerificationResults, 4)
-	// Each unique product is fetched once and reused for both its existence
-	// result and its stable active-field expectation. The duplicate role/ID
-	// pair adds no calls.
+	// One existence result per unique product: the blueprint's create-product
+	// node sets no structural literals, so no field checks derive from it.
+	require.Len(t, response.VerificationResults, 2)
+	// Each unique product is fetched once; the duplicate role/ID pair adds no
+	// calls.
 	assert.Equal(t, 2, productCalls)
 	loaded, err := store.Read(session.ID)
 	require.NoError(t, err)

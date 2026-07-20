@@ -12,285 +12,6 @@ import (
 	"github.com/stripe/stripe-cli/pkg/coop/verification"
 )
 
-// stageChecks maps blueprint ID -> node ID -> the imperative check function
-// for that stage. Each function reads top to bottom as the stage's checklist;
-// variable values (amounts, currency, terms, fee) are the frozen blueprints'
-// literals. Terminal payment states are asserted only on final stages so a
-// mid-flow report cannot spuriously fail.
-var stageChecks = map[string]map[string]func(*stageCtx){
-	"one-time-payment": {
-		"setup-chapter.create-product": func(c *stageCtx) {
-			for _, product := range c.created("product") {
-				c.expectBool(product, "active", true)
-			}
-		},
-		"checkout-chapter.create-checkout-session": func(c *stageCtx) {
-			for _, session := range c.created("checkout_session") {
-				c.expectString(session, "mode", "payment")
-				c.expectPositive(session, "amount_total")
-			}
-			c.reused("product")
-		},
-		"checkout-chapter.complete-checkout": func(c *stageCtx) {
-			c.reused("checkout_session")
-		},
-		"webhook-chapter.handle-checkout-completed": func(c *stageCtx) {
-			sessions := c.reused("checkout_session")
-			intents := c.reused("payment_intent")
-			for _, session := range sessions {
-				c.expectString(session, "status", "complete")
-				c.expectString(session, "payment_status", "paid")
-				c.expectLink(session, "payment_intent", "payment_intent")
-				if intent, linked := linkedObserved(session, "payment_intent", intents); linked {
-					c.expectAgreement(session, "amount_total", intent, "amount", "the paid amount")
-					c.expectAgreement(session, "currency", intent, "currency", "the currency")
-				}
-			}
-			for _, intent := range intents {
-				c.expectString(intent, "status", "succeeded")
-				c.expectPositive(intent, "amount")
-			}
-		},
-	},
-	"invoice-payments": {
-		"set-up-chapter.create-product": func(c *stageCtx) {
-			for _, product := range c.created("product") {
-				c.expectBool(product, "active", true)
-			}
-		},
-		"set-up-chapter.create-customer": func(c *stageCtx) {
-			c.created("customer")
-		},
-		"create-invoice-chapter.create-invoice": func(c *stageCtx) {
-			for _, invoice := range c.created("invoice") {
-				c.expectString(invoice, "collection_method", "send_invoice")
-				c.expectLink(invoice, "customer", "customer")
-			}
-			c.reused("customer")
-		},
-		"create-invoice-chapter.add-invoice-item": func(c *stageCtx) {
-			for _, item := range c.created("invoice_item") {
-				c.expectPositive(item, "amount")
-				c.expectLink(item, "invoice", "invoice")
-				c.expectLink(item, "customer", "customer")
-			}
-			c.reused("invoice")
-			c.reused("customer")
-		},
-		"create-invoice-chapter.send-invoice": func(c *stageCtx) {
-			for _, invoice := range c.reused("invoice") {
-				c.expectString(invoice, "collection_method", "send_invoice")
-				c.expectPresent(invoice, "hosted_invoice_url")
-				c.expectLink(invoice, "customer", "customer")
-			}
-			c.reused("customer")
-		},
-		"payment-chapter.view-invoice": func(c *stageCtx) {
-			for _, invoice := range c.reused("invoice") {
-				c.expectLink(invoice, "customer", "customer")
-			}
-			c.reused("customer")
-		},
-		"payment-chapter.wait-for-invoice-paid": func(c *stageCtx) {
-			for _, invoice := range c.reused("invoice") {
-				c.expectString(invoice, "status", "paid")
-			}
-		},
-	},
-	"accept-payment-with-payment-element": {
-		"accept-payment-chapter.create-payment-intent": func(c *stageCtx) {
-			for _, intent := range c.created("payment_intent") {
-				c.expectPositive(intent, "amount")
-			}
-		},
-		"accept-payment-chapter.mount-payment-element": func(c *stageCtx) {
-			c.reused("payment_intent")
-		},
-		"accept-payment-chapter.handle-payment-succeeded": func(c *stageCtx) {
-			for _, intent := range c.reused("payment_intent") {
-				c.expectString(intent, "status", "succeeded")
-				c.expectPositive(intent, "amount")
-			}
-		},
-	},
-	"flat-subscription-with-entitlements": {
-		"create-products-chapter.create-basic-product": func(c *stageCtx) {
-			for _, product := range c.created("product") {
-				c.expectBool(product, "active", true)
-			}
-		},
-		"create-products-chapter.create-basic-feature": func(c *stageCtx) {
-			for _, feature := range c.created("feature") {
-				c.expectBool(feature, "active", true)
-			}
-		},
-		"create-products-chapter.attach-feature-to-product": func(c *stageCtx) {
-			c.reused("product")
-			c.reused("feature")
-			c.checkProductFeature("product", "feature")
-		},
-		"setup-chapter.create-customer": func(c *stageCtx) {
-			c.created("customer")
-		},
-		"subscribe-chapter.create-checkout-session": func(c *stageCtx) {
-			for _, session := range c.created("checkout_session") {
-				c.expectString(session, "mode", "subscription")
-				c.expectPositive(session, "amount_total")
-				c.expectLink(session, "customer", "customer")
-			}
-			c.reused("customer")
-		},
-		"subscribe-chapter.complete-checkout": func(c *stageCtx) {
-			c.reused("checkout_session")
-		},
-		"subscribe-chapter.track-subscription-creation": func(c *stageCtx) {
-			for _, subscription := range c.reused("subscription") {
-				c.expectString(subscription, "status", "active")
-				c.expectRecurringPrice(subscription)
-				c.expectLink(subscription, "customer", "customer")
-			}
-			// The checkout terminal state is asserted here (webhook-confirmed)
-			// rather than on the complete-checkout uiComponent node, so a
-			// report racing the redirect cannot spuriously fail.
-			for _, session := range c.reused("checkout_session") {
-				c.expectString(session, "status", "complete")
-				c.expectString(session, "payment_status", "paid")
-			}
-			c.reused("customer")
-		},
-		"subscribe-chapter.check-entitlements": func(c *stageCtx) {
-			c.reused("customer")
-			c.reused("feature")
-			c.checkActiveEntitlement("customer", "feature")
-		},
-		"next-billing-cycle-chapter.wait-for-invoice-created": func(c *stageCtx) {
-			for _, invoice := range c.reused("invoice") {
-				c.expectInvoiceSubscriptionLink(invoice, "subscription")
-				c.expectLink(invoice, "customer", "customer")
-			}
-			c.reused("subscription")
-			c.reused("customer")
-		},
-		"next-billing-cycle-chapter.view-invoice": func(c *stageCtx) {
-			c.reused("invoice")
-		},
-	},
-	// The v2 billing pricing-plan family is a preview API this CLI cannot
-	// reliably read. Every v2 role is checked best-effort (pass or explicit
-	// unavailable, never silently passed) and each unreadable association is
-	// declared as an explicit verification gap so flat-fee can never look
-	// healthy while its v2 spine is unverified.
-	"flat-fee-and-overages": {
-		"create-customer-chapter.createCustomer": func(c *stageCtx) {
-			c.created("customer")
-		},
-		"create-pricing-plan-chapter.createEmptyPricingPlan": func(c *stageCtx) {
-			c.created("pricing_plan")
-		},
-		"create-pricing-plan-chapter.createMeter": func(c *stageCtx) {
-			for _, meter := range c.created("meter") {
-				c.expectPresent(meter, "event_name")
-			}
-		},
-		"create-rate-card-chapter.createRateCard": func(c *stageCtx) {
-			c.created("rate_card")
-		},
-		"create-rate-card-chapter.createMeteredItem": func(c *stageCtx) {
-			c.created("metered_item")
-			c.unverifiable("metered-item-meter", "the metered item to billing meter association is a v2 billing relationship this CLI cannot read; it is unavailable, not verified")
-		},
-		"create-rate-card-chapter.addGraduatedRateToRateCard": func(c *stageCtx) {
-			c.reused("rate_card")
-			c.reused("metered_item")
-			c.unverifiable("graduated-tiers", "the rate card's graduated tiers are v2 billing data this CLI cannot read; they are unavailable, not verified")
-		},
-		"create-rate-card-chapter.attachRateCardToPricingPlan": func(c *stageCtx) {
-			c.reused("pricing_plan")
-			c.reused("rate_card")
-			c.unverifiable("rate-card-attachment", "the rate card to pricing plan attachment is a v2 billing relationship this CLI cannot read; it is unavailable, not verified")
-		},
-		"create-licensed-fee-chapter.createLicensedItem": func(c *stageCtx) {
-			c.created("licensed_item")
-		},
-		"create-licensed-fee-chapter.createLicenseFee": func(c *stageCtx) {
-			c.created("license_fee")
-			c.unverifiable("license-fee-configuration", "the license fee amount, currency, and service interval are v2 billing data this CLI cannot read; they are unavailable, not verified")
-		},
-		"create-licensed-fee-chapter.attachLicenseFeeToPricingPlan": func(c *stageCtx) {
-			c.reused("pricing_plan")
-			c.reused("license_fee")
-			c.unverifiable("license-fee-attachment", "the license fee to pricing plan attachment is a v2 billing relationship this CLI cannot read; it is unavailable, not verified")
-		},
-		"subscribe-customer-chapter.setLiveVersion": func(c *stageCtx) {
-			c.reused("pricing_plan")
-			c.unverifiable("live-version", "the pricing plan live version is v2 billing data this CLI cannot read; it is unavailable, not verified")
-		},
-		"subscribe-customer-chapter.createCheckoutSession": func(c *stageCtx) {
-			for _, session := range c.created("checkout_session") {
-				c.expectLink(session, "customer", "customer")
-			}
-			c.reused("customer")
-			c.reused("pricing_plan")
-		},
-		"subscribe-customer-chapter.waitForServicingActivated": func(c *stageCtx) {
-			for _, session := range c.reused("checkout_session") {
-				c.expectString(session, "status", "complete")
-			}
-			c.reused("customer")
-			for _, meter := range c.reused("meter") {
-				c.expectPresent(meter, "event_name")
-			}
-			c.reused("pricing_plan")
-			c.reused("pricing_plan_subscription")
-			c.unverifiable("servicing-activation", "pricing plan servicing activation is v2 billing state this CLI cannot read; it is unavailable, not verified")
-		},
-	},
-	"learn-accounts-v1-marketplace": {
-		"create-account-chapter.create-account": func(c *stageCtx) {
-			for _, account := range c.created("connected_account") {
-				c.expectString(account, "controller.fees.payer", "application")
-				c.expectString(account, "controller.losses.payments", "application")
-				c.expectString(account, "controller.requirement_collection", "stripe")
-			}
-		},
-		"create-account-chapter.create-account-link": func(c *stageCtx) {
-			c.reused("connected_account")
-		},
-		"accept-embedded-payments-chapter.create-checkout-session": func(c *stageCtx) {
-			for _, session := range c.created("checkout_session") {
-				c.expectString(session, "mode", "payment")
-				c.expectPositive(session, "amount_total")
-			}
-			c.reused("connected_account")
-		},
-		"accept-embedded-payments-chapter.complete-checkout": func(c *stageCtx) {
-			c.reused("checkout_session")
-		},
-		"accept-embedded-payments-chapter.wait-for-checkout": func(c *stageCtx) {
-			sessions := c.reused("checkout_session")
-			intents := c.reused("payment_intent")
-			for _, session := range sessions {
-				c.expectString(session, "status", "complete")
-				c.expectString(session, "payment_status", "paid")
-				c.expectLink(session, "payment_intent", "payment_intent")
-				if intent, linked := linkedObserved(session, "payment_intent", intents); linked {
-					c.expectAgreement(session, "amount_total", intent, "amount", "the paid amount")
-					c.expectAgreement(session, "currency", intent, "currency", "the currency")
-				}
-			}
-			for _, intent := range intents {
-				c.expectString(intent, "status", "succeeded")
-				c.expectPositive(intent, "amount")
-				// The commission is chosen by the application; verification
-				// requires it to exist and be positive.
-				c.expectPositive(intent, "application_fee_amount")
-				c.expectLink(intent, "transfer_data.destination", "connected_account")
-			}
-			c.reused("connected_account")
-		},
-	},
-}
-
 // stageCtx carries one verification pass: the grouped references, the reader,
 // and the accumulated results. Check helpers append results as they go.
 type stageCtx struct {
@@ -510,42 +231,24 @@ func (c *stageCtx) expectString(entry observed, path, want string) {
 	}
 }
 
-// expectNumber asserts one integer field on a fetched object.
-func (c *stageCtx) expectNumber(entry observed, path string, want int64) {
+// expectStringOneOf asserts a string field matches one of the accepted
+// values (used for state sets like paid/no_payment_required).
+func (c *stageCtx) expectStringOneOf(entry observed, path string, accepted []string) {
 	if entry.payload == nil {
 		return
 	}
 	resultID := "field:" + roleToken(entry.role) + "." + pathToken(path) + ":" + fingerprint(entry.id)
 	value, present := rawAt(entry.payload, path)
-	if !present {
-		c.failedResult(resultID, entry.role+" has no "+path+" value; expected "+strconv.FormatInt(want, 10))
-		return
-	}
-	if number, ok := value.(json.Number); ok {
-		if parsed, err := number.Int64(); err == nil && parsed == want {
-			c.passedResult(resultID, entry.role+" "+path+" is "+strconv.FormatInt(want, 10))
-			return
+	text, isString := value.(string)
+	if present && isString {
+		for _, candidate := range accepted {
+			if text == candidate {
+				c.passedResult(resultID, entry.role+" "+path+" is "+strconv.Quote(candidate))
+				return
+			}
 		}
 	}
-	c.failedResult(resultID, entry.role+" "+path+" does not match the expected "+strconv.FormatInt(want, 10))
-}
-
-// expectBool asserts one boolean field on a fetched object.
-func (c *stageCtx) expectBool(entry observed, path string, want bool) {
-	if entry.payload == nil {
-		return
-	}
-	resultID := "field:" + roleToken(entry.role) + "." + pathToken(path) + ":" + fingerprint(entry.id)
-	value, present := rawAt(entry.payload, path)
-	flag, isBool := value.(bool)
-	switch {
-	case !present || !isBool:
-		c.failedResult(resultID, entry.role+" has no "+path+" value; expected "+strconv.FormatBool(want))
-	case flag != want:
-		c.failedResult(resultID, entry.role+" "+path+" does not match the expected "+strconv.FormatBool(want))
-	default:
-		c.passedResult(resultID, entry.role+" "+path+" is "+strconv.FormatBool(want))
-	}
+	c.failedResult(resultID, entry.role+" "+path+" is not one of the accepted values ("+strings.Join(accepted, ", ")+")")
 }
 
 // expectPositive asserts a numeric field is present and greater than zero.
@@ -911,13 +614,4 @@ func expandableID(value any) (string, bool) {
 	default:
 		return "", false
 	}
-}
-
-func numberEquals(value any, want int64) bool {
-	number, ok := value.(json.Number)
-	if !ok {
-		return false
-	}
-	parsed, err := number.Int64()
-	return err == nil && parsed == want
 }

@@ -76,7 +76,8 @@ active ──→ completed    (all nodes done/skipped, or "stripe coop stop")
 
 All agent commands output JSON with an `ok` field and a `next` field suggesting the next command. The `--step` flag name is retained for the CLI, but its value is the 1-based node number across the session.
 
-For supported blueprint stages, `agent start-work` also returns
+For nodes with derivable Stripe resources (creation requests, node
+references, or webhook events in the blueprint), `agent start-work` also returns
 `stripe_resource_roles`. Each entry fixes the role's Stripe object type and
 whether the stage creates or reuses it. The agent reports only object IDs with
 repeatable `--stripe-resource role=id` flags. Multiple IDs under one role are

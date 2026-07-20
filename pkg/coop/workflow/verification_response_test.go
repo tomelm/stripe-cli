@@ -75,7 +75,7 @@ func TestReportWorkAutomaticallyVerifiesAndReusesRetainedReferences(t *testing.T
 	require.Len(t, second.VerificationResults, 1)
 
 	require.Len(t, provider.requests, 2)
-	assert.Equal(t, "checkout-chapter.create-checkout-session", provider.requests[1].NodeID)
+	assert.Equal(t, 3, provider.requests[1].NodeNumber)
 	require.Len(t, provider.requests[1].References, 3)
 	assert.ElementsMatch(t, []string{"product=prod_retained123", "product=prod_retained456", "checkout_session=cs_retained123"}, referenceLabels(provider.requests[1].References))
 
