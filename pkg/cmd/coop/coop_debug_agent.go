@@ -12,13 +12,17 @@ import (
 
 	"github.com/stripe/stripe-cli/pkg/coop"
 	"github.com/stripe/stripe-cli/pkg/coop/helpers"
+	"github.com/stripe/stripe-cli/pkg/coop/uicheck"
 	"github.com/stripe/stripe-cli/pkg/coop/workflow"
 )
 
 type coopDebugAgentCmd struct {
-	cmd     *cobra.Command
-	session string
-	delay   time.Duration
+	cmd             *cobra.Command
+	session         string
+	delay           time.Duration
+	simulateOutcome string
+	simulateObserve string
+	live            bool
 }
 
 func newCoopDebugAgentCmd() *coopDebugAgentCmd {
@@ -30,9 +34,18 @@ func newCoopDebugAgentCmd() *coopDebugAgentCmd {
 		RunE:   dc.runDebugAgentCmd,
 	}
 
+	// Defaults keep plain --debug-agent runs self-sufficient: gated
+	// uiComponent nodes get a synthetic binding and a quick simulated
+	// observation, so the gate is exercised without wedging the session.
 	dc.cmd.Flags().StringVar(&dc.session, "session", "", "Session ID to drive")
 	dc.cmd.Flags().DurationVar(&dc.delay, "delay", dc.delay, "Delay between active and review states")
+	dc.cmd.Flags().StringVar(&dc.simulateOutcome, "simulate-outcome", "bind", "Journey outcome binding: bind (synthetic ids) | off")
+	dc.cmd.Flags().StringVar(&dc.simulateObserve, "simulate-observe", "after=2s", "Simulated observation: after=<duration> | fail | unavailable | never")
+	dc.cmd.Flags().BoolVar(&dc.live, "live", false, "Execute apiRequest nodes for real with the test-mode key and bind real object ids")
 	mustMarkFlagHidden(dc.cmd, "delay")
+	mustMarkFlagHidden(dc.cmd, "simulate-outcome")
+	mustMarkFlagHidden(dc.cmd, "simulate-observe")
+	mustMarkFlagHidden(dc.cmd, "live")
 
 	return dc
 }
@@ -54,6 +67,15 @@ func (dc *coopDebugAgentCmd) runDebugAgentCmd(cmd *cobra.Command, args []string)
 		pollInterval:             500 * time.Millisecond,
 		out:                      os.Stdout,
 		waitForNextStepSelection: true,
+		simulateBind:             dc.simulateOutcome == "bind",
+		observeMode:              dc.simulateObserve,
+	}
+	if dc.live {
+		live, err := newDebugLiveExecutor()
+		if err != nil {
+			return err
+		}
+		agent.live = live
 	}
 	return agent.run(cmd.Context())
 }
@@ -65,6 +87,14 @@ type coopDebugAgent struct {
 	pollInterval             time.Duration
 	out                      io.Writer
 	waitForNextStepSelection bool
+
+	// simulateBind attaches synthetic outcome bindings to gated uiComponent
+	// nodes; observeMode scripts what a fake observer then reports
+	// (after=<dur> | fail | unavailable | never). live executes apiRequest
+	// nodes for real and binds real object ids instead.
+	simulateBind bool
+	observeMode  string
+	live         *debugLiveExecutor
 }
 
 func (a *coopDebugAgent) run(ctx context.Context) error {
@@ -173,19 +203,106 @@ func (a *coopDebugAgent) completeActiveStep(ctx context.Context, step int) error
 	if !resp.OK {
 		return fmt.Errorf("%s", resp.Error)
 	}
-	resp, err = service.ReportWork(a.sessionID, step, workflow.ReportWorkInput{
+	input := workflow.ReportWorkInput{
 		File:  "debug/" + safeDebugFileName(node.Key) + ".txt",
 		Lines: "1-1",
 		Note:  "Deterministic debug agent completed " + node.Title,
-	}, false)
+	}
+	if a.live != nil && node.Type == coop.NodeAPIRequest && node.Request != nil {
+		result, err := a.live.execute(ctx, session, step, node)
+		if err != nil {
+			return fmt.Errorf("live request for node %d: %w", step, err)
+		}
+		input.Note = "Live debug agent executed " + strings.ToUpper(node.Request.Method) + " " + node.Request.Path
+		if id := result.Get("id").String(); id != "" {
+			input.Note += " -> " + id
+		}
+	}
+	if expectation, ok := uicheck.DeriveExpectation(session, step); ok && expectation.Gated() {
+		switch {
+		case a.live != nil:
+			if id, journeyURL := a.live.bindingFor(expectation); id != "" {
+				input.Outcome = &workflow.OutcomeInput{Role: expectation.Role, ID: id}
+				input.JourneyURL = journeyURL
+				a.logf("step %d bound live outcome %s=%s", step, expectation.Role, id)
+			}
+		case a.simulateBind:
+			input.Outcome = &workflow.OutcomeInput{
+				Role: expectation.Role,
+				ID:   fmt.Sprintf("%sdebug_%06d", expectation.IDPrefix, step),
+			}
+			input.JourneyURL = "https://example.com/debug-journey"
+		}
+	}
+	resp, err = service.ReportWork(a.sessionID, step, input, false)
 	if err != nil {
 		return err
 	}
 	if !resp.OK {
 		return fmt.Errorf("%s", resp.Error)
 	}
+	if input.Outcome != nil && a.live == nil {
+		a.scheduleSimulatedObservation(ctx, step, input.Outcome.ID)
+	}
 	a.logf("step %d %s: %s", step, resp.State, node.Title)
 	return nil
+}
+
+// scheduleSimulatedObservation plays the observer for headless runs: after
+// the configured delay it persists a scripted observation through the same
+// compare-and-set path the real observer uses, so the TUI renders production
+// behavior with zero network.
+func (a *coopDebugAgent) scheduleSimulatedObservation(ctx context.Context, step int, boundID string) {
+	mode := strings.TrimSpace(a.observeMode)
+	if mode == "" || mode == "never" {
+		return
+	}
+	delay := time.Second
+	observation := uicheck.Observation{}
+	switch {
+	case strings.HasPrefix(mode, "after="):
+		parsed, err := time.ParseDuration(strings.TrimPrefix(mode, "after="))
+		if err != nil {
+			a.logf("invalid --simulate-observe %q: %v", mode, err)
+			return
+		}
+		delay = parsed
+		observation = uicheck.Observation{
+			Status: coop.UIOutcomeObserved,
+			Detail: "debug simulated observation",
+			Evidence: []coop.UIOutcomeEvidence{
+				{Key: "status", Value: "complete"},
+				{Key: "payment_status", Value: "paid"},
+			},
+		}
+	case mode == "fail":
+		observation = uicheck.Observation{
+			Status:   coop.UIOutcomeFailed,
+			Detail:   "debug simulated failure: the journey did not complete",
+			Evidence: []coop.UIOutcomeEvidence{{Key: "status", Value: "expired"}},
+		}
+	case mode == "unavailable":
+		observation = uicheck.Observation{
+			Status: coop.UIOutcomeUnavailable,
+			Detail: "debug simulated unavailable check",
+		}
+	default:
+		a.logf("unknown --simulate-observe mode %q", mode)
+		return
+	}
+	go func() {
+		if err := a.sleep(ctx, delay); err != nil {
+			return
+		}
+		applied, err := uicheck.ApplyObservation(a.store, a.sessionID, step, boundID, observation, time.Now())
+		if err != nil {
+			a.logf("simulated observation for step %d failed: %v", step, err)
+			return
+		}
+		if applied {
+			a.logf("simulated observation applied to step %d (%s)", step, observation.Status)
+		}
+	}()
 }
 
 func (a *coopDebugAgent) awaitReview(ctx context.Context, step int) error {

@@ -193,6 +193,15 @@ func (rc *coopRunCmd) debugAgentPaneCommandBuilder(stripeBin string) coopPaneCom
 			sessionID = session.ID
 		}
 		cmd := fmt.Sprintf("%s coop debug-agent --session %s", shellQuote(stripeBin), shellQuote(sessionID))
+		if rc.debugSimulateOutcome != "" {
+			cmd += " --simulate-outcome " + shellQuote(rc.debugSimulateOutcome)
+		}
+		if rc.debugSimulateObserve != "" {
+			cmd += " --simulate-observe " + shellQuote(rc.debugSimulateObserve)
+		}
+		if rc.debugLive {
+			cmd += " --live"
+		}
 		return shellCommandWithCoopEnv(cmd), nil, nil
 	}
 }

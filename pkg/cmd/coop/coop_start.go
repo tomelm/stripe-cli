@@ -16,6 +16,11 @@ type coopRunCmd struct {
 	settings   []string
 	agent      string
 	debugAgent bool
+
+	// debug-agent passthrough flags (only meaningful with --debug-agent).
+	debugSimulateOutcome string
+	debugSimulateObserve string
+	debugLive            bool
 }
 
 func newCoopRunCmd() *coopRunCmd {
@@ -42,7 +47,13 @@ splits the current window. Otherwise creates a new tmux session.`,
 	rc.cmd.Flags().StringArrayVar(&rc.settings, "setting", nil, "Blueprint settings as key=value pairs")
 	rc.cmd.Flags().StringVar(&rc.agent, "agent", "", "Agent to use (default: auto-detect claude/codex)")
 	rc.cmd.Flags().BoolVar(&rc.debugAgent, "debug-agent", false, "Use a deterministic fake agent for local TUI debugging")
+	rc.cmd.Flags().StringVar(&rc.debugSimulateOutcome, "simulate-outcome", "", "Debug agent journey binding: bind | off (default: agent default)")
+	rc.cmd.Flags().StringVar(&rc.debugSimulateObserve, "simulate-observe", "", "Debug agent observation script: after=<duration> | fail | unavailable | never (default: agent default)")
+	rc.cmd.Flags().BoolVar(&rc.debugLive, "live", false, "Debug agent executes apiRequest nodes for real with the test-mode key")
 	mustMarkFlagHidden(rc.cmd, "debug-agent")
+	mustMarkFlagHidden(rc.cmd, "simulate-outcome")
+	mustMarkFlagHidden(rc.cmd, "simulate-observe")
+	mustMarkFlagHidden(rc.cmd, "live")
 
 	return rc
 }
