@@ -2,13 +2,22 @@ package coopcmd
 
 import (
 	"context"
+	"errors"
 	"sync"
+	"time"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
 	"github.com/stripe/stripe-cli/pkg/coop/observe"
 	"github.com/stripe/stripe-cli/pkg/coop/tui"
 	verificationruntime "github.com/stripe/stripe-cli/pkg/coop/verification/runtime"
 )
+
+const (
+	observerLeaseRefreshInterval = 5 * time.Second
+	observerLeaseRetryInterval   = 2 * time.Second
+)
+
+var errObserverLeaseLost = errors.New("observer lease lost")
 
 // coopTUIOptions is the production option set for every Co-op TUI launch: the
 // TUI process owns passive session observation for its lifetime.
@@ -60,7 +69,62 @@ var runSessionObservation = func(ctx context.Context, sessionID string) error {
 
 // observeSession runs passive observation for one session until the session
 // reaches a terminal state or ctx is canceled. Results are advisory only.
+//
+// Only one process observes a session at a time: a second joined TUI stands
+// by on the observer lease and takes over if the holder exits or crashes.
 func observeSession(ctx context.Context, store *coop.Store, sessionID string) error {
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		if terminal, err := sessionTerminal(store, sessionID); err == nil && terminal {
+			return nil
+		}
+		held, err := store.AcquireObserverLease(sessionID)
+		if err != nil {
+			return err
+		}
+		if !held {
+			if !sleepContext(ctx, observerLeaseRetryInterval) {
+				return nil
+			}
+			continue
+		}
+		err = observeSessionHoldingLease(ctx, store, sessionID)
+		_ = store.ReleaseObserverLease(sessionID)
+		if errors.Is(err, errObserverLeaseLost) {
+			continue
+		}
+		return err
+	}
+}
+
+// observeSessionHoldingLease runs the observer while refreshing the lease.
+// Losing the lease (e.g. reclaimed after a long system suspend) cancels the
+// runner and reports errObserverLeaseLost so the caller re-enters standby.
+func observeSessionHoldingLease(ctx context.Context, store *coop.Store, sessionID string) error {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	lost := make(chan struct{})
+	refreshDone := make(chan struct{})
+	go func() {
+		defer close(refreshDone)
+		ticker := time.NewTicker(observerLeaseRefreshInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-ticker.C:
+				if held, err := store.AcquireObserverLease(sessionID); err != nil || !held {
+					close(lost)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
 	providerConfig := passiveProviderConfig()
 	var connector observe.Connector
 	if providerConfig.UnavailableReason == "" {
@@ -71,7 +135,35 @@ func observeSession(ctx context.Context, store *coop.Store, sessionID string) er
 		observe.NewProvider(store, providerConfig, connector),
 		verificationruntime.WithCredentials(providerConfig.APIKey),
 	)
-	return runner.Run(ctx, sessionID)
+	err := runner.Run(runCtx, sessionID)
+	cancel()
+	<-refreshDone
+	select {
+	case <-lost:
+		return errObserverLeaseLost
+	default:
+	}
+	return err
+}
+
+func sessionTerminal(store *coop.Store, sessionID string) (bool, error) {
+	session, err := store.Read(sessionID)
+	if err != nil {
+		return false, err
+	}
+	return session.Status != coop.SessionActive || session.IsComplete(), nil
+}
+
+// sleepContext waits for d and reports false when ctx ended first.
+func sleepContext(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 // passiveProviderConfig resolves collector credentials from the CLI profile.

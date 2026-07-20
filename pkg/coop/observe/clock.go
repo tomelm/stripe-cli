@@ -63,17 +63,14 @@ func (policy BackoffPolicy) Validate() error {
 }
 
 // Delay returns the jittered delay after consecutiveFailures. The first
-// failure uses InitialDelay; later failures double until MaximumDelay.
-func (policy BackoffPolicy) Delay(consecutiveFailures uint, sample float64) (time.Duration, error) {
-	if err := policy.Validate(); err != nil {
-		return 0, err
-	}
-	if consecutiveFailures == 0 {
-		return 0, fmt.Errorf("consecutiveFailures must be positive")
-	}
-	if math.IsNaN(sample) || math.IsInf(sample, 0) || sample < 0 || sample >= 1 {
-		return 0, fmt.Errorf("jitter sample must be in [0, 1)")
-	}
+// failure uses InitialDelay; later failures double until MaximumDelay. The
+// policy itself is validated once at construction time (Config.Validate), so
+// Delay does not revalidate it on every call. sample is clamped into [0, 1)
+// rather than erroring, since callers pass rand.Float64 output that is
+// already in range and a defensively out-of-range sample should still yield a
+// bounded delay.
+func (policy BackoffPolicy) Delay(consecutiveFailures uint, sample float64) time.Duration {
+	sample = clampUnitSample(sample)
 
 	base := policy.InitialDelay
 	for failure := uint(1); failure < consecutiveFailures && base < policy.MaximumDelay; failure++ {
@@ -94,5 +91,18 @@ func (policy BackoffPolicy) Delay(consecutiveFailures uint, sample float64) (tim
 	if delay > policy.MaximumDelay {
 		delay = policy.MaximumDelay
 	}
-	return delay, nil
+	return delay
+}
+
+// clampUnitSample clamps sample into [0, 1), mapping NaN and values below 0
+// (including -Inf) to 0, and values at or above 1 (including +Inf) to the
+// largest representable value below 1.
+func clampUnitSample(sample float64) float64 {
+	if math.IsNaN(sample) || sample < 0 {
+		return 0
+	}
+	if sample >= 1 {
+		return math.Nextafter(1, 0)
+	}
+	return sample
 }

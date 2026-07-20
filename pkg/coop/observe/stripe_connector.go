@@ -20,8 +20,17 @@ import (
 )
 
 const (
+	// stripeObserverBuffer is the per-connection observation and element
+	// buffer depth. Paired with observationRingCapacity in supervisor.go:
+	// handling is synchronous and consumers drain every poll interval, so
+	// this buffer cannot fill before the connector's own overflow reconnect
+	// changes the epoch.
 	stripeObserverBuffer      = 128
 	passiveWebSocketReadLimit = 4 << 20 // 4 MiB bounds one frame before JSON decoding.
+
+	// listenForwardTimeoutSeconds is proxy.Config.Timeout for the passive
+	// listen stream, in seconds.
+	listenForwardTimeoutSeconds int64 = 30
 )
 
 // StripeConnector opens the existing Stripe CLI logs-tail and listen
@@ -70,56 +79,34 @@ func (connector *StripeConnector) Connect(parent context.Context, request Connec
 	return connection, nil
 }
 
+// validateConnectRequest defends the connector's own Connect entry point.
+// Config.Validate already enforces these same bounds before a Supervisor is
+// ever constructed on the production path, so this is defense in depth for a
+// directly-constructed ConnectRequest; its per-field and filter limits are
+// shared with Config.Validate via validateConfigText/validateStreamFilters so
+// the two cannot drift.
 func validateConnectRequest(request ConnectRequest) error {
 	if !request.Stream.Valid() {
 		return fmt.Errorf("stream is invalid")
 	}
-	for field, value := range map[string]string{
-		"session_id":  request.SessionID,
-		"api_key":     request.APIKey,
-		"device_name": request.DeviceName,
-	} {
-		if err := validateConfigText(field, value, 512, false); err != nil {
-			return err
-		}
+	if err := validateConfigText("session_id", request.SessionID, maxSessionIDBytes, false); err != nil {
+		return err
+	}
+	if err := validateConfigText("api_key", request.APIKey, maxAPIKeyBytes, false); err != nil {
+		return err
+	}
+	if err := validateConfigText("device_name", request.DeviceName, maxDeviceNameBytes, false); err != nil {
+		return err
 	}
 	if request.AccountID != "" {
-		if err := validateConfigText("account_id", request.AccountID, 128, false); err != nil {
+		if err := validateConfigText("account_id", request.AccountID, maxAccountIDBytes, false); err != nil {
 			return err
 		}
 	}
 	if request.Deadline.IsZero() {
 		return fmt.Errorf("deadline is required")
 	}
-	if request.Stream == StreamLogsTail && len(request.EventTypes) != 0 {
-		return fmt.Errorf("logs_tail does not accept event types")
-	}
-	if request.Stream == StreamListen && len(request.RequestMethods) != 0 {
-		return fmt.Errorf("listen does not accept request filters")
-	}
-	if len(request.RequestMethods) > maxRequestFilters {
-		return fmt.Errorf("too many request filters")
-	}
-	if err := validateRequestMethods(request.RequestMethods); err != nil {
-		return err
-	}
-	if len(request.EventTypes) > maxEventTypes {
-		return fmt.Errorf("too many event types")
-	}
-	seen := make(map[string]bool, len(request.EventTypes))
-	for _, eventType := range request.EventTypes {
-		if err := validateConfigText("event_type", eventType, 128, false); err != nil {
-			return err
-		}
-		if seen[eventType] {
-			return fmt.Errorf("event type is duplicated")
-		}
-		if request.Stream == StreamListen && !proxy.IsValidEventType(eventType) && !proxy.IsThinEventType(eventType) {
-			return fmt.Errorf("event type is invalid")
-		}
-		seen[eventType] = true
-	}
-	return nil
+	return validateStreamFilters(request.Stream, request.RequestMethods, request.EventTypes)
 }
 
 func cloneConnectRequest(request ConnectRequest) ConnectRequest {
@@ -209,7 +196,7 @@ func listenProxyConfig(client *stripe.Client, request ConnectRequest, logger *lo
 		ThinEvents:                   thin,
 		WebSocketFeatures:            features,
 		Log:                          logger,
-		Timeout:                      30,
+		Timeout:                      listenForwardTimeoutSeconds,
 		OutCh:                        output,
 		WebSocketReadLimit:           passiveWebSocketReadLimit,
 		ReportConnectionGaps:         true,

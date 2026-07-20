@@ -461,3 +461,65 @@ func TestLockReclaimedByAgeWhenOwnerUnknown(t *testing.T) {
 	require.NoError(t, os.Chtimes(lockPath, old, old))
 	assert.True(t, store.lockAbandoned(lockPath), "stale lock with unknown owner should be reclaimed by age")
 }
+
+func TestObserverLeaseAcquireRefreshRelease(t *testing.T) {
+	store, err := NewStoreAt(t.TempDir())
+	require.NoError(t, err)
+
+	held, err := store.AcquireObserverLease("lease_001")
+	require.NoError(t, err)
+	assert.True(t, held)
+
+	// Re-acquiring our own lease refreshes it.
+	held, err = store.AcquireObserverLease("lease_001")
+	require.NoError(t, err)
+	assert.True(t, held)
+
+	require.NoError(t, store.ReleaseObserverLease("lease_001"))
+	leasePath, err := store.observerLeasePath("lease_001")
+	require.NoError(t, err)
+	_, statErr := os.Stat(leasePath)
+	assert.True(t, os.IsNotExist(statErr))
+
+	// Releasing again is a no-op.
+	require.NoError(t, store.ReleaseObserverLease("lease_001"))
+}
+
+func TestObserverLeaseBlocksLiveForeignOwner(t *testing.T) {
+	store, err := NewStoreAt(t.TempDir())
+	require.NoError(t, err)
+	leasePath, err := store.observerLeasePath("lease_002")
+	require.NoError(t, err)
+
+	// The parent process is alive and is not us.
+	foreign := fmt.Sprintf("%d\n%d\n", os.Getppid(), time.Now().UnixNano())
+	require.NoError(t, os.WriteFile(leasePath, []byte(foreign), 0600))
+
+	held, err := store.AcquireObserverLease("lease_002")
+	require.NoError(t, err)
+	assert.False(t, held)
+
+	// A foreign lease must not be released by us.
+	require.NoError(t, store.ReleaseObserverLease("lease_002"))
+	_, statErr := os.Stat(leasePath)
+	assert.NoError(t, statErr)
+}
+
+func TestObserverLeaseReclaimsDeadOwner(t *testing.T) {
+	store, err := NewStoreAt(t.TempDir())
+	require.NoError(t, err)
+	leasePath, err := store.observerLeasePath("lease_003")
+	require.NoError(t, err)
+
+	// PID 1 is init/launchd; processStartTime(1) predates any recent lease, so
+	// use an implausibly high dead PID instead.
+	dead := fmt.Sprintf("%d\n%d\n", 99999999, time.Now().UnixNano())
+	require.NoError(t, os.WriteFile(leasePath, []byte(dead), 0600))
+
+	held, err := store.AcquireObserverLease("lease_003")
+	require.NoError(t, err)
+	assert.True(t, held)
+	pid, _, ok := readLock(leasePath)
+	require.True(t, ok)
+	assert.Equal(t, os.Getpid(), pid)
+}

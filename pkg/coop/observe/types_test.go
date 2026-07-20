@@ -3,6 +3,7 @@ package observe
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -95,15 +96,58 @@ func TestBackoffIsExponentialJitteredAndCapped(t *testing.T) {
 		{failures: 1, sample: 0, want: 750 * time.Millisecond},
 	}
 	for _, test := range tests {
-		delay, err := policy.Delay(test.failures, test.sample)
-		require.NoError(t, err)
-		assert.Equal(t, test.want, delay)
+		assert.Equal(t, test.want, policy.Delay(test.failures, test.sample))
 	}
+}
 
-	_, err := policy.Delay(0, 0.5)
-	assert.Error(t, err)
-	_, err = policy.Delay(1, 1)
-	assert.Error(t, err)
+func TestBackoffDelayClampsOutOfRangeInput(t *testing.T) {
+	t.Parallel()
+
+	policy := defaultTestConfig(StreamLogsTail).Backoff
+
+	// A sample at or above 1 (including +Inf) clamps to just below 1, giving
+	// the same result as the closest valid in-range sample rather than
+	// erroring.
+	assert.Equal(t, 1250*time.Millisecond, policy.Delay(1, 1))
+	assert.Equal(t, 1250*time.Millisecond, policy.Delay(1, math.Inf(1)))
+
+	// A negative, NaN, or -Inf sample clamps to 0 rather than erroring.
+	assert.Equal(t, 750*time.Millisecond, policy.Delay(1, -1))
+	assert.Equal(t, 750*time.Millisecond, policy.Delay(1, math.NaN()))
+	assert.Equal(t, 750*time.Millisecond, policy.Delay(1, math.Inf(-1)))
+
+	// A zero consecutiveFailures is treated like the first failure rather
+	// than erroring.
+	assert.Equal(t, 750*time.Millisecond, policy.Delay(0, 0))
+}
+
+func TestBackoffPolicyValidate(t *testing.T) {
+	t.Parallel()
+
+	valid := defaultTestConfig(StreamLogsTail).Backoff
+	require.NoError(t, valid.Validate())
+
+	nonPositiveInitialDelay := valid
+	nonPositiveInitialDelay.InitialDelay = 0
+	assert.ErrorContains(t, nonPositiveInitialDelay.Validate(), "initial_delay")
+
+	unboundedInitialDelay := valid
+	unboundedInitialDelay.InitialDelay = maxConfiguredDuration + time.Nanosecond
+	assert.ErrorContains(t, unboundedInitialDelay.Validate(), "initial_delay")
+
+	maximumBelowInitial := valid
+	maximumBelowInitial.MaximumDelay = valid.InitialDelay - time.Nanosecond
+	assert.ErrorContains(t, maximumBelowInitial.Validate(), "maximum_delay")
+
+	unboundedMaximumDelay := valid
+	unboundedMaximumDelay.MaximumDelay = maxConfiguredDuration + time.Nanosecond
+	assert.ErrorContains(t, unboundedMaximumDelay.Validate(), "maximum_delay")
+
+	for _, jitter := range []float64{0, -0.01, 0.51, math.NaN(), math.Inf(1)} {
+		invalidJitter := valid
+		invalidJitter.JitterFraction = jitter
+		assert.ErrorContains(t, invalidJitter.Validate(), "jitter_fraction")
+	}
 }
 
 func TestObservationsAreMinimalAndSourceSpecific(t *testing.T) {

@@ -23,6 +23,17 @@ const (
 	maxConfiguredDuration = 24 * time.Hour
 	maxEventTypes         = 256
 	maxRequestFilters     = 256
+
+	// Shared bounded-text limits for Config and ConnectRequest fields. Config
+	// is the production entry point (its Validate runs before a Supervisor is
+	// ever constructed), so these are the limits that matter on the
+	// production path; validateConnectRequest applies the same limits so a
+	// directly-constructed ConnectRequest cannot be looser than Config.
+	maxSessionIDBytes  = 128
+	maxDeviceNameBytes = 128
+	maxAccountIDBytes  = 128
+	maxAPIKeyBytes     = 512
+	maxEventTypeBytes  = 128
 )
 
 // Stream identifies the passive Stripe CLI stream represented by a collector.
@@ -99,8 +110,9 @@ func (code FailureCode) Valid() bool {
 	}
 }
 
-// Failure is safe, structured collector state. Transient is factual input to
-// verification.Result.FailsOpen; it is not a retry or workflow decision.
+// Failure is safe, structured collector state. Transient distinguishes
+// environmental outages from permanent failures; it is not a retry or
+// workflow decision.
 type Failure struct {
 	Code      FailureCode `json:"code"`
 	Transient bool        `json:"transient,omitempty"`
@@ -155,50 +167,25 @@ type Config struct {
 
 // Validate checks injected configuration without reading external state.
 func (config Config) Validate() error {
-	if err := validateConfigText("session_id", config.SessionID, 128, false); err != nil {
+	if err := validateConfigText("session_id", config.SessionID, maxSessionIDBytes, false); err != nil {
 		return err
 	}
 	if !config.Stream.Valid() {
 		return fmt.Errorf("unsupported passive observer stream %q", config.Stream)
 	}
-	if err := validateConfigText("api_key", config.APIKey, 512, false); err != nil {
+	if err := validateConfigText("api_key", config.APIKey, maxAPIKeyBytes, false); err != nil {
 		return err
 	}
-	if err := validateConfigText("device_name", config.DeviceName, 128, false); err != nil {
+	if err := validateConfigText("device_name", config.DeviceName, maxDeviceNameBytes, false); err != nil {
 		return err
 	}
 	if config.AccountID != "" {
-		if err := validateConfigText("account_id", config.AccountID, 128, false); err != nil {
+		if err := validateConfigText("account_id", config.AccountID, maxAccountIDBytes, false); err != nil {
 			return err
 		}
 	}
-	if config.Stream == StreamLogsTail && len(config.EventTypes) > 0 {
-		return fmt.Errorf("logs_tail does not accept event_types")
-	}
-	if config.Stream == StreamListen && len(config.RequestMethods) > 0 {
-		return fmt.Errorf("listen does not accept request filters")
-	}
-	if len(config.RequestMethods) > maxRequestFilters {
-		return fmt.Errorf("request filters exceed %d entries", maxRequestFilters)
-	}
-	if err := validateRequestMethods(config.RequestMethods); err != nil {
+	if err := validateStreamFilters(config.Stream, config.RequestMethods, config.EventTypes); err != nil {
 		return err
-	}
-	if len(config.EventTypes) > maxEventTypes {
-		return fmt.Errorf("event_types exceeds %d entries", maxEventTypes)
-	}
-	seenEvents := make(map[string]bool, len(config.EventTypes))
-	for index, eventType := range config.EventTypes {
-		if err := validateConfigText(fmt.Sprintf("event_types[%d]", index), eventType, 128, false); err != nil {
-			return err
-		}
-		if seenEvents[eventType] {
-			return fmt.Errorf("event_types[%d] %q is duplicated", index, eventType)
-		}
-		if config.Stream == StreamListen && !proxy.IsValidEventType(eventType) && !proxy.IsThinEventType(eventType) {
-			return fmt.Errorf("event_types[%d] %q is not a supported listen event", index, eventType)
-		}
-		seenEvents[eventType] = true
 	}
 	for name, value := range map[string]time.Duration{
 		"startup_timeout":     config.StartupTimeout,
@@ -210,6 +197,43 @@ func (config Config) Validate() error {
 	}
 	if err := config.Backoff.Validate(); err != nil {
 		return fmt.Errorf("backoff: %w", err)
+	}
+	return nil
+}
+
+// validateStreamFilters checks the request-method and event-type filters
+// shared by Config and ConnectRequest: stream-appropriate filter families,
+// bounded counts, and per-entry text and uniqueness. Shared by
+// Config.Validate and validateConnectRequest so the two entry points cannot
+// drift.
+func validateStreamFilters(stream Stream, methods, eventTypes []string) error {
+	if stream == StreamLogsTail && len(eventTypes) > 0 {
+		return fmt.Errorf("logs_tail does not accept event_types")
+	}
+	if stream == StreamListen && len(methods) > 0 {
+		return fmt.Errorf("listen does not accept request filters")
+	}
+	if len(methods) > maxRequestFilters {
+		return fmt.Errorf("request filters exceed %d entries", maxRequestFilters)
+	}
+	if err := validateRequestMethods(methods); err != nil {
+		return err
+	}
+	if len(eventTypes) > maxEventTypes {
+		return fmt.Errorf("event_types exceeds %d entries", maxEventTypes)
+	}
+	seenEvents := make(map[string]bool, len(eventTypes))
+	for index, eventType := range eventTypes {
+		if err := validateConfigText(fmt.Sprintf("event_types[%d]", index), eventType, maxEventTypeBytes, false); err != nil {
+			return err
+		}
+		if seenEvents[eventType] {
+			return fmt.Errorf("event_types[%d] %q is duplicated", index, eventType)
+		}
+		if stream == StreamListen && !proxy.IsValidEventType(eventType) && !proxy.IsThinEventType(eventType) {
+			return fmt.Errorf("event_types[%d] %q is not a supported listen event", index, eventType)
+		}
+		seenEvents[eventType] = true
 	}
 	return nil
 }

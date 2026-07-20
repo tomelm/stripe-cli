@@ -3,6 +3,7 @@ package coopcmd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -403,4 +404,130 @@ func firstNodeWithRequest(session verificationruntime.Session) int {
 		}
 	}
 	return 0
+}
+
+func writeForeignObserverLease(t *testing.T, storeDir, sessionID string, pid int) string {
+	t.Helper()
+	leasePath := filepath.Join(storeDir, "coop", sessionID+".json.observer")
+	if _, err := os.Stat(filepath.Dir(leasePath)); err != nil {
+		leasePath = filepath.Join(storeDir, sessionID+".json.observer")
+	}
+	content := fmt.Sprintf("%d\n%d\n", pid, time.Now().UnixNano())
+	require.NoError(t, os.WriteFile(leasePath, []byte(content), 0600))
+	return leasePath
+}
+
+func TestObserveSessionStandsByWhileLeaseHeld(t *testing.T) {
+	previousOptions := options
+	options = Options{APIKey: func() (string, error) { return "", nil }}
+	t.Cleanup(func() { options = previousOptions })
+
+	storeDir := t.TempDir()
+	store, err := coop.NewStoreAt(storeDir)
+	require.NoError(t, err)
+	session := writeObservedSession(t, store, "observe_standby")
+	requestNode := firstNodeWithRequest(verificationruntime.SessionMetadata(session))
+	require.Positive(t, requestNode)
+
+	// A live foreign process (our parent) holds the lease.
+	leasePath := writeForeignObserverLease(t, storeDir, session.ID, os.Getppid())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- observeSession(ctx, store, session.ID) }()
+
+	// The standby observer must not run a provider or write results.
+	time.Sleep(150 * time.Millisecond)
+	_, ok := loadPassiveRequestResult(store, session.ID, requestNode)
+	assert.False(t, ok, "standby observer must not emit results")
+
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for standby to stop")
+	}
+
+	// The foreign lease is untouched.
+	pid, _, ok2 := readObserverLease(t, leasePath)
+	require.True(t, ok2)
+	assert.Equal(t, os.Getppid(), pid)
+}
+
+func readObserverLease(t *testing.T, leasePath string) (int, time.Time, bool) {
+	t.Helper()
+	data, err := os.ReadFile(leasePath)
+	if err != nil {
+		return 0, time.Time{}, false
+	}
+	var pid int
+	var nanos int64
+	if _, err := fmt.Sscanf(string(data), "%d\n%d\n", &pid, &nanos); err != nil {
+		return 0, time.Time{}, false
+	}
+	return pid, time.Unix(0, nanos), true
+}
+
+func TestObserveSessionTakesOverDeadOwnerLease(t *testing.T) {
+	previousOptions := options
+	options = Options{APIKey: func() (string, error) { return "", nil }}
+	t.Cleanup(func() { options = previousOptions })
+
+	storeDir := t.TempDir()
+	store, err := coop.NewStoreAt(storeDir)
+	require.NoError(t, err)
+	session := writeObservedSession(t, store, "observe_takeover")
+	requestNode := firstNodeWithRequest(verificationruntime.SessionMetadata(session))
+	require.Positive(t, requestNode)
+
+	leasePath := writeForeignObserverLease(t, storeDir, session.ID, 99999999)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- observeSession(ctx, store, session.ID) }()
+
+	// The dead owner's lease is reclaimed and observation runs.
+	require.Eventually(t, func() bool {
+		_, ok := loadPassiveRequestResult(store, session.ID, requestNode)
+		return ok
+	}, 2*time.Second, 5*time.Millisecond)
+
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for takeover observer to stop")
+	}
+
+	// The lease was released on exit.
+	_, statErr := os.Stat(leasePath)
+	assert.True(t, os.IsNotExist(statErr))
+}
+
+func TestObserveSessionStandbyExitsOnTerminalSession(t *testing.T) {
+	previousOptions := options
+	options = Options{APIKey: func() (string, error) { return "", nil }}
+	t.Cleanup(func() { options = previousOptions })
+
+	storeDir := t.TempDir()
+	store, err := coop.NewStoreAt(storeDir)
+	require.NoError(t, err)
+	session := writeObservedSession(t, store, "observe_standby_done")
+	_, err = store.Update(session.ID, func(current *coop.Session) error {
+		current.Status = coop.SessionCompleted
+		return nil
+	})
+	require.NoError(t, err)
+	writeForeignObserverLease(t, storeDir, session.ID, os.Getppid())
+
+	done := make(chan error, 1)
+	go func() { done <- observeSession(context.Background(), store, session.ID) }()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("standby did not exit on terminal session")
+	}
 }

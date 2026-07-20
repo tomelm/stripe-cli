@@ -480,8 +480,13 @@ func TestProviderMissingCredentialsIsUnavailableAndFailOpen(t *testing.T) {
 	assert.False(t, requestResult.Transient)
 	// Startup unavailability fails open in the advisory sense: it is an
 	// evidence gap, never an integration failure, and cannot block the node.
+	// Missing credentials is a persistent condition, not the transient
+	// collector outage the shared contract recognizes as fail-open, so the
+	// explicit predicate below is false even though status and domain match.
 	assert.True(t, requestResult.Indeterminate())
-	assert.False(t, requestResult.FailsOpen())
+	assert.False(t, requestResult.Status == verification.StatusUnavailable &&
+		requestResult.FailureDomain == verification.FailureDomainCollector &&
+		requestResult.Transient)
 
 	eventResult := providerWaitForResult(t, run.store, 2, "passive.event", verification.StatusUnavailable)
 	assert.Equal(t, "missing_credentials", providerEvidenceValue(eventResult, "reason"))

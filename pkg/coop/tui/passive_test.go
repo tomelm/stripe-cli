@@ -38,8 +38,12 @@ func plainOneLine(s string) string {
 }
 
 func TestPassiveResultsFilterAndOrder(t *testing.T) {
+	// This set is assigned directly to the node and never passes through
+	// Validate, so a synthetic non-CLI source is fine here: it only needs to
+	// exercise the passiveResults source filter, not satisfy the contract's
+	// single-value Source enum.
 	set := verification.NewResultSet(
-		verification.Result{ID: "agent.unit", CheckID: "unit", Source: verification.SourceAgent, Status: verification.StatusPassed},
+		verification.Result{ID: "agent.unit", CheckID: "unit", Source: verification.Source("agent"), Status: verification.StatusPassed},
 		passiveTestResult("passive.event", verification.StatusNotObserved, "No matching event observed on Stripe yet."),
 		verification.Result{ID: "cli.other", CheckID: "other", Source: verification.SourceCLI, Status: verification.StatusPassed},
 		passiveTestResult("passive.request", verification.StatusPassed, ""),

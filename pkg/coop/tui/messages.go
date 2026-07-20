@@ -19,7 +19,9 @@ type noUpdateMsg struct {
 
 // sessionUpdatedMsg carries a freshly read session.
 type sessionUpdatedMsg struct {
-	session *coop.Session
+	session      *coop.Session
+	heartbeatAge time.Duration
+	heartbeatOK  bool
 }
 
 // errMsg wraps errors that should replace the TUI with an error view.

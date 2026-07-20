@@ -28,11 +28,11 @@ func (m Model) checkForUpdates() tea.Cmd {
 		if err != nil {
 			return errMsg{err: err}
 		}
+		age, ageErr := store.HeartbeatAge(sessionID)
 		if session.Version != lastVersion {
-			return sessionUpdatedMsg{session: session}
+			return sessionUpdatedMsg{session: session, heartbeatAge: age, heartbeatOK: ageErr == nil}
 		}
-		age, err := store.HeartbeatAge(sessionID)
-		return noUpdateMsg{heartbeatAge: age, heartbeatOK: err == nil}
+		return noUpdateMsg{heartbeatAge: age, heartbeatOK: ageErr == nil}
 	}
 }
 

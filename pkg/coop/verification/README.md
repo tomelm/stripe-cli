@@ -12,11 +12,9 @@ The contract includes:
 - opaque, validated `CheckID` and `ResultID` values;
 - `passed`, `failed`, `inconclusive`, `not_observed`, `unavailable`, and
   `skipped` statuses;
-- integration, application, collector, coverage, and safety failure domains;
-- safe, identifier, fingerprint, and sensitive evidence classifications;
-- a narrow fail-open predicate (`Result.FailsOpen`) that is true only for a
-  transient, CLI-owned collector outage — a classification, never a pass;
-- versioned result envelopes with deterministic JSON serialization.
+- integration, collector, and coverage failure domains;
+- safe and sensitive evidence classifications;
+- versioned result envelopes.
 
 `not_observed` means the expected activity was not seen during healthy
 coverage. `unavailable` means the evidence source could not be evaluated.

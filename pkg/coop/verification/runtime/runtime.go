@@ -5,13 +5,10 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"time"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
 	core "github.com/stripe/stripe-cli/pkg/coop/verification"
 )
-
-const defaultSessionPollInterval = 250 * time.Millisecond
 
 // Session is the bounded session metadata passed to providers.
 type Session struct {
@@ -43,7 +40,8 @@ type Request struct {
 type Emit func(nodeNumber int, result core.Result) error
 
 // Provider produces verification results until it finishes or ctx is canceled.
-// Implementations must return promptly after cancellation.
+// Implementations must return promptly after cancellation and own terminal
+// detection: they return once the session leaves the active state.
 type Provider interface {
 	Run(ctx context.Context, session Session, emit Emit) error
 }
@@ -56,10 +54,9 @@ type Store interface {
 
 // Runner owns one provider for the lifetime of one session.
 type Runner struct {
-	store        Store
-	provider     Provider
-	sanitizer    core.Sanitizer
-	pollInterval time.Duration
+	store     Store
+	provider  Provider
+	sanitizer core.Sanitizer
 }
 
 // Option configures process-local Runner behavior.
@@ -74,22 +71,12 @@ func WithCredentials(credentials ...string) Option {
 	}
 }
 
-// WithPollInterval overrides session completion polling, primarily for tests.
-func WithPollInterval(interval time.Duration) Option {
-	return func(runner *Runner) {
-		if interval > 0 {
-			runner.pollInterval = interval
-		}
-	}
-}
-
 // New constructs a Runner for one provider without starting it.
 func New(store Store, provider Provider, options ...Option) *Runner {
 	runner := &Runner{
-		store:        store,
-		provider:     provider,
-		sanitizer:    core.NewSanitizer(),
-		pollInterval: defaultSessionPollInterval,
+		store:     store,
+		provider:  provider,
+		sanitizer: core.NewSanitizer(),
 	}
 	for _, option := range options {
 		option(runner)
@@ -97,9 +84,10 @@ func New(store Store, provider Provider, options ...Option) *Runner {
 	return runner
 }
 
-// Run opens sessionID, starts the provider, and waits until it finishes, the
-// caller cancels, or the session reaches a terminal state. Provider errors are
-// advisory and do not change the session lifecycle.
+// Run opens sessionID, starts the provider, and waits until it finishes or
+// the caller cancels. The provider owns terminal detection (it polls the
+// session as part of its work); provider errors are advisory and do not
+// change the session lifecycle.
 func (runner *Runner) Run(ctx context.Context, sessionID string) error {
 	if ctx == nil {
 		return fmt.Errorf("verification context is required")
@@ -135,29 +123,13 @@ func (runner *Runner) Run(ctx context.Context, sessionID string) error {
 		_ = runner.provider.Run(runContext, cloneSession(providerSession), emit)
 	}()
 
-	ticker := time.NewTicker(runner.pollInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			cancel()
-			<-done
-			return nil
-		case <-done:
-			return nil
-		case <-ticker.C:
-			// A transient store read failure must not end verification for the
-			// rest of the session; skip the poll instead.
-			current, err := runner.store.Read(sessionID)
-			if err != nil {
-				continue
-			}
-			if current.Status != coop.SessionActive || current.IsComplete() {
-				cancel()
-				<-done
-				return nil
-			}
-		}
+	select {
+	case <-ctx.Done():
+		cancel()
+		<-done
+		return nil
+	case <-done:
+		return nil
 	}
 }
 

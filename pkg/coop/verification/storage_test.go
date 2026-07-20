@@ -73,9 +73,9 @@ func TestUpsertResultBoundIsIndependentOfWriteOrder(t *testing.T) {
 		require.NoError(t, UpsertResult(&descending, passedResult(fmt.Sprintf("result-%02d", index), "ok"), NewSanitizer()))
 	}
 
-	ascendingJSON, err := ascending.MarshalDeterministic()
+	ascendingJSON, err := json.Marshal(ascending)
 	require.NoError(t, err)
-	descendingJSON, err := descending.MarshalDeterministic()
+	descendingJSON, err := json.Marshal(descending)
 	require.NoError(t, err)
 	assert.Equal(t, ascendingJSON, descendingJSON)
 	assert.Len(t, ascending.Results, MaxResultsPerNode)

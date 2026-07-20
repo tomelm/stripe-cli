@@ -41,7 +41,7 @@ func TestRunnerConcurrentStoreUpdates(t *testing.T) {
 		group.Wait()
 		return nil
 	})
-	runner := New(store, provider, WithPollInterval(5*time.Millisecond))
+	runner := New(store, provider)
 
 	require.NoError(t, runner.Run(context.Background(), session.ID))
 	loaded, err := store.Read(session.ID)
@@ -67,7 +67,7 @@ func TestRunnerStopsProvidersOnCancellation(t *testing.T) {
 		close(stopped)
 		return ctx.Err()
 	})
-	runner := New(store, provider, WithPollInterval(5*time.Millisecond))
+	runner := New(store, provider)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -78,19 +78,29 @@ func TestRunnerStopsProvidersOnCancellation(t *testing.T) {
 	requireClosed(t, stopped)
 }
 
-func TestRunnerStopsProvidersWhenSessionCompletes(t *testing.T) {
+func TestRunnerReturnsWhenProviderSeesSessionComplete(t *testing.T) {
 	t.Parallel()
 
+	// Terminal detection belongs to the provider: it polls the session as
+	// part of its work and returns once the session leaves the active state.
+	// The runner just waits for it.
 	store, session := runtimeTestStore(t)
 	started := make(chan struct{})
-	stopped := make(chan struct{})
-	provider := providerFunc(func(ctx context.Context, _ Session, _ Emit) error {
+	provider := providerFunc(func(ctx context.Context, provided Session, _ Emit) error {
 		close(started)
-		<-ctx.Done()
-		close(stopped)
-		return ctx.Err()
+		for {
+			current, err := store.Read(provided.ID)
+			if err == nil && (current.Status != coop.SessionActive || current.IsComplete()) {
+				return nil
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
 	})
-	runner := New(store, provider, WithPollInterval(5*time.Millisecond))
+	runner := New(store, provider)
 
 	done := make(chan error, 1)
 	go func() { done <- runner.Run(context.Background(), session.ID) }()
@@ -101,7 +111,6 @@ func TestRunnerStopsProvidersWhenSessionCompletes(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, receiveError(t, done))
-	requireClosed(t, stopped)
 }
 
 func TestRunnerNeverSerializesRawCredentials(t *testing.T) {

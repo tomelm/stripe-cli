@@ -9,9 +9,10 @@ import (
 )
 
 // observationRingCapacity bounds retained observations. The connector's
-// per-connection buffer is 128 with synchronous handling and consumers drain
-// every poll interval, so the ring cannot overflow before the connector's own
-// overflow reconnect changes the epoch.
+// per-connection buffer (stripeObserverBuffer in stripe_connector.go) is 128
+// with synchronous handling and consumers drain every poll interval, so the
+// ring cannot overflow before the connector's own overflow reconnect changes
+// the epoch.
 const observationRingCapacity = 256
 
 // SequencedObservation is one bounded observation with its position in the
@@ -229,50 +230,42 @@ func (supervisor *Supervisor) run(runContext context.Context, done chan struct{}
 		}
 		now := supervisor.clock.Now().UTC()
 
+		// outcome.failure is always already valid: it comes either from
+		// failureFromError (which validates and substitutes
+		// FailureConnectorInvalid otherwise) or from literal Failure values
+		// in runAttempt that are valid by construction, so no re-validation
+		// is needed here.
 		failure := outcome.failure
-		if err := failure.Validate(); err != nil {
-			failure = Failure{Code: FailureConnectorInvalid}
-		}
 		if outcome.wasReady && now.Sub(outcome.readyAt) >= supervisor.config.StableReadyPeriod {
 			failureCount = 0
 		}
 		if !failure.Transient {
-			supervisor.mu.Lock()
-			supervisor.readySince = time.Time{}
-			supervisor.lastFailure = &failure
-			supervisor.consecutiveFailures = failureCount
-			supervisor.nextRetryAt = time.Time{}
-			supervisor.setStateLocked(StateUnhealthy)
-			supervisor.mu.Unlock()
+			supervisor.transitionLocked(StateUnhealthy, &failure, failureCount, time.Time{})
 			<-runContext.Done()
 			return
 		}
 
 		failureCount++
-		delay, err := supervisor.config.Backoff.Delay(failureCount, supervisor.jitter.Float64())
-		if err != nil {
-			supervisor.mu.Lock()
-			invalid := Failure{Code: FailureConnectorInvalid}
-			supervisor.readySince = time.Time{}
-			supervisor.lastFailure = &invalid
-			supervisor.consecutiveFailures = failureCount
-			supervisor.nextRetryAt = time.Time{}
-			supervisor.setStateLocked(StateUnhealthy)
-			supervisor.mu.Unlock()
-			<-runContext.Done()
-			return
-		}
-		supervisor.mu.Lock()
-		supervisor.readySince = time.Time{}
-		supervisor.lastFailure = &failure
-		supervisor.consecutiveFailures = failureCount
-		supervisor.nextRetryAt = now.Add(delay)
-		supervisor.setStateLocked(StateRetrying)
-		supervisor.mu.Unlock()
+		delay := supervisor.config.Backoff.Delay(failureCount, supervisor.jitter.Float64())
+		supervisor.transitionLocked(StateRetrying, &failure, failureCount, now.Add(delay))
 		if !supervisor.waitForRetry(runContext, delay) {
 			return
 		}
 	}
+}
+
+// transitionLocked applies one run-loop failure transition: it takes the
+// lock, clears readySince, records the failure and retry bookkeeping, and
+// moves to state. retryAt is the zero time when the transition parks the
+// supervisor (StateUnhealthy) rather than scheduling a retry.
+func (supervisor *Supervisor) transitionLocked(state State, failure *Failure, failures uint, retryAt time.Time) {
+	supervisor.mu.Lock()
+	defer supervisor.mu.Unlock()
+	supervisor.readySince = time.Time{}
+	supervisor.lastFailure = failure
+	supervisor.consecutiveFailures = failures
+	supervisor.nextRetryAt = retryAt
+	supervisor.setStateLocked(state)
 }
 
 func (supervisor *Supervisor) runAttempt(runContext context.Context) attemptOutcome {

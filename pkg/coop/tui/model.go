@@ -66,6 +66,7 @@ type Model struct {
 	existingSessionIDs map[string]bool
 	lastUpdateTime     time.Time
 	agentIsIdle        bool
+	agentSignature     string
 
 	isDark  bool
 	focused bool // true when terminal has focus (default: true, updated via FocusMsg/BlurMsg)
@@ -220,8 +221,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		wasComplete := m.session != nil && m.session.IsComplete()
 		m.session = msg.session
 		m.lastVersion = msg.session.Version
-		m.lastUpdateTime = time.Now()
-		m.agentIsIdle = false
+		// Only agent-authored changes count as agent activity: passive
+		// verification writes bump the session version too and must not
+		// suppress the idle warning.
+		if signature := agentActivitySignature(msg.session); signature != m.agentSignature {
+			m.agentSignature = signature
+			m.lastUpdateTime = time.Now()
+			m.agentIsIdle = false
+		} else {
+			m.updateAgentIdle(msg.heartbeatAge, msg.heartbeatOK, time.Now())
+		}
 
 		// Child session completed → return to parent with step marked done
 		if !wasComplete && m.session.IsComplete() && m.session.ParentSessionID != "" {
@@ -1062,6 +1071,26 @@ func (m *Model) clearExpiredStatus(now time.Time) {
 		m.statusMessage = ""
 		m.statusExpiresAt = time.Time{}
 	}
+}
+
+// agentActivitySignature summarizes the agent-authored parts of a session so
+// updates that only carry passive verification results are distinguishable
+// from real agent progress. Verification results are deliberately excluded.
+func agentActivitySignature(session *coop.Session) string {
+	if session == nil {
+		return ""
+	}
+	var signature strings.Builder
+	fmt.Fprintf(&signature, "%s|", session.Status)
+	for _, step := range session.Steps {
+		for _, node := range step.Nodes {
+			fmt.Fprintf(&signature, "%s;%s;%s;%d;", node.State, node.Activity, node.RejectionNote, len(node.Verifications))
+			if node.Implementation != nil {
+				fmt.Fprintf(&signature, "%s:%s;", node.Implementation.File, node.Implementation.Lines)
+			}
+		}
+	}
+	return signature.String()
 }
 
 func (m *Model) updateAgentIdle(heartbeatAge time.Duration, heartbeatOK bool, now time.Time) {

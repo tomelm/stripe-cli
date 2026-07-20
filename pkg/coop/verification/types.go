@@ -3,18 +3,14 @@ package verification
 // CurrentSchemaVersion identifies the ResultSet wire contract.
 const CurrentSchemaVersion = 1
 
-// Source identifies who produced a result. Only CLI-owned results can satisfy
-// the narrow FailsOpen predicate.
+// Source identifies who produced a result.
 type Source string
 
-const (
-	SourceAgent Source = "agent"
-	SourceCLI   Source = "cli"
-)
+const SourceCLI Source = "cli"
 
 // Valid reports whether source is part of the verification contract.
 func (source Source) Valid() bool {
-	return source == SourceAgent || source == SourceCLI
+	return source == SourceCLI
 }
 
 // Status is the outcome reported for a check.
@@ -52,16 +48,14 @@ type FailureDomain string
 
 const (
 	FailureDomainIntegration FailureDomain = "integration"
-	FailureDomainApplication FailureDomain = "application"
 	FailureDomainCollector   FailureDomain = "collector"
 	FailureDomainCoverage    FailureDomain = "coverage"
-	FailureDomainSafety      FailureDomain = "safety"
 )
 
 // Valid reports whether domain is empty or part of the verification contract.
 func (domain FailureDomain) Valid() bool {
 	switch domain {
-	case "", FailureDomainIntegration, FailureDomainApplication, FailureDomainCollector, FailureDomainCoverage, FailureDomainSafety:
+	case "", FailureDomainIntegration, FailureDomainCollector, FailureDomainCoverage:
 		return true
 	default:
 		return false
@@ -73,16 +67,14 @@ func (domain FailureDomain) Valid() bool {
 type EvidenceClass string
 
 const (
-	EvidenceSafe        EvidenceClass = "safe"
-	EvidenceIdentifier  EvidenceClass = "identifier"
-	EvidenceFingerprint EvidenceClass = "fingerprint"
-	EvidenceSensitive   EvidenceClass = "sensitive"
+	EvidenceSafe      EvidenceClass = "safe"
+	EvidenceSensitive EvidenceClass = "sensitive"
 )
 
 // Valid reports whether class is part of the verification contract.
 func (class EvidenceClass) Valid() bool {
 	switch class {
-	case EvidenceSafe, EvidenceIdentifier, EvidenceFingerprint, EvidenceSensitive:
+	case EvidenceSafe, EvidenceSensitive:
 		return true
 	default:
 		return false
@@ -100,8 +92,9 @@ type Evidence struct {
 
 // Result is the policy-neutral outcome of one check execution.
 //
-// Transient is a factual producer classification used only by FailsOpen. It
-// does not prescribe whether or when a consumer should retry the check.
+// Transient is a factual producer classification for a temporary collector
+// outage. It does not prescribe whether or when a consumer should retry the
+// check.
 type Result struct {
 	ID            ResultID      `json:"id"`
 	CheckID       CheckID       `json:"check_id"`
@@ -116,16 +109,6 @@ type Result struct {
 // Indeterminate reports whether result represents an evidence gap.
 func (result Result) Indeterminate() bool {
 	return result.Status.Indeterminate()
-}
-
-// FailsOpen reports whether result is the exact CLI-owned, transient collector
-// outage recognized by the shared contract. The predicate does not itself
-// gate workflow progress and does not convert the result into a pass.
-func (result Result) FailsOpen() bool {
-	return result.Source == SourceCLI &&
-		result.Status == StatusUnavailable &&
-		result.FailureDomain == FailureDomainCollector &&
-		result.Transient
 }
 
 // ResultSet is the versioned deterministic wire envelope for results.

@@ -70,11 +70,11 @@ func TestReportWorkRendersConciseAdvisoryVerificationResults(t *testing.T) {
 			CheckID:       "runtime-check",
 			Source:        verification.SourceCLI,
 			Status:        verification.StatusFailed,
-			FailureDomain: verification.FailureDomainApplication,
+			FailureDomain: verification.FailureDomainIntegration,
 			Detail:        "Expected behavior was not seen.",
 			Evidence: []verification.Evidence{{
 				Key:   "internal_identifier",
-				Class: verification.EvidenceIdentifier,
+				Class: verification.EvidenceSafe,
 				Value: "internal-value",
 			}},
 		}, verification.NewSanitizer())
@@ -145,10 +145,13 @@ func TestRequestChangesCapturesAndClearsPassiveResults(t *testing.T) {
 	moveStepToReview(t, service, session.ID)
 
 	upsertNodeResult(t, store, session.ID, 1, failedPassiveRequestResult())
+	// Non-passive-prefixed results (any source, since Source is CLI-only in
+	// the contract) are outside the "passive." ID namespace and survive the
+	// prune alongside passing observations.
 	upsertNodeResult(t, store, session.ID, 1, verification.Result{
 		ID:      "agent.unit",
 		CheckID: "agent.unit",
-		Source:  verification.SourceAgent,
+		Source:  verification.SourceCLI,
 		Status:  verification.StatusPassed,
 		Detail:  "Unit tests passed.",
 	})
@@ -160,7 +163,7 @@ func TestRequestChangesCapturesAndClearsPassiveResults(t *testing.T) {
 	rejected, err := updated.NodeByNumber(1)
 	require.NoError(t, err)
 	assert.Contains(t, rejected.RejectionObserved, "Matching API request observed on Stripe but it failed (HTTP 4xx).")
-	require.NotNil(t, rejected.VerificationResults, "agent-owned results survive the prune")
+	require.NotNil(t, rejected.VerificationResults, "non-passive results survive the prune")
 	require.Len(t, rejected.VerificationResults.Results, 1)
 	assert.Equal(t, verification.ResultID("agent.unit"), rejected.VerificationResults.Results[0].ID)
 

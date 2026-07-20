@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
+	"github.com/stripe/stripe-cli/pkg/coop/verification"
 )
 
 func readyModel() Model {
@@ -1247,4 +1248,29 @@ func TestTopBottomKeysMoveSelection(t *testing.T) {
 	res, _ = end.Update(tea.KeyPressMsg{Code: 'g', Text: "g"})
 	top := res.(Model)
 	assert.True(t, top.navigationItemSelected(items[0]), "g selects the first outline item")
+}
+
+func TestPassiveResultWritesDoNotResetAgentIdle(t *testing.T) {
+	m := testModel()
+	m.agentSignature = agentActivitySignature(m.session)
+	m.lastUpdateTime = time.Now().Add(-3 * time.Minute)
+	m.agentIsIdle = true
+
+	// A passive verification write bumps the version but changes no
+	// agent-authored state: idle must survive (heartbeat stale).
+	observerOnly := *m.session
+	observerOnly.Version++
+	set := verification.NewResultSet(passiveTestResult("passive.request", verification.StatusPassed, ""))
+	observerOnly.Steps[0].Nodes[0].VerificationResults = &set
+	result, _ := m.Update(sessionUpdatedMsg{session: &observerOnly, heartbeatAge: 10 * time.Minute, heartbeatOK: true})
+	m = result.(Model)
+	assert.True(t, m.agentIsIdle, "observer-only update must not clear the idle warning")
+
+	// Real agent progress (new node activity) clears idle.
+	agentProgress := observerOnly
+	agentProgress.Version++
+	agentProgress.Steps[0].Nodes[0].Activity = "agent made progress"
+	result, _ = m.Update(sessionUpdatedMsg{session: &agentProgress, heartbeatAge: 10 * time.Minute, heartbeatOK: true})
+	m = result.(Model)
+	assert.False(t, m.agentIsIdle, "agent-authored changes clear the idle warning")
 }

@@ -157,37 +157,43 @@ func (s *Store) acquireSessionLock(path string) (func(), error) {
 	}
 }
 
-// lockAbandoned reports whether a lock file can be safely reclaimed. The lock
-// records its owner's PID and creation time:
-//   - If that process is alive the lock is left alone, even if old, so a slow
-//     Store.Update callback can't have its lock deleted out from under it.
-//   - Unless the process started *after* the lock was created: then the original
-//     writer crashed and the PID was reused by an unrelated process, so the lock
-//     is stale and reclaimed.
-//   - A known-dead owner's lock is reclaimed immediately.
-//   - When the owner can't be determined — an unparseable PID, or a platform
-//     where liveness can't be checked (e.g. Windows) — fall back to reclaiming by
-//     age so a crashed writer still can't wedge the session forever.
+// lockAbandoned reports whether a lock file can be safely reclaimed.
 func (s *Store) lockAbandoned(lockPath string) bool {
-	info, err := os.Stat(lockPath)
+	return ownerFileAbandoned(lockPath, sessionLockStale)
+}
+
+// ownerFileAbandoned reports whether a pid-owned file (session lock, observer
+// lease) can be safely reclaimed. The file records its owner's PID and
+// creation time:
+//   - If that process is alive the file is left alone, even if old, so a slow
+//     owner can't have it deleted out from under it.
+//   - Unless the process started *after* the file was created: then the
+//     original owner crashed and the PID was reused by an unrelated process,
+//     so the file is stale and reclaimed.
+//   - A known-dead owner's file is reclaimed immediately.
+//   - When the owner can't be determined — an unparseable PID, or a platform
+//     where liveness can't be checked (e.g. Windows) — fall back to reclaiming
+//     by age so a crashed owner still can't wedge the session forever.
+func ownerFileAbandoned(path string, staleAfter time.Duration) bool {
+	info, err := os.Stat(path)
 	if err != nil {
 		return false
 	}
-	if pid, created, ok := readLock(lockPath); ok {
+	if pid, created, ok := readLock(path); ok {
 		if alive, known := processAlive(pid); known {
 			if !alive {
 				return true
 			}
-			// PID reuse guard: if we know when both the lock and the process began
-			// and the process started after the lock, it can't be the writer that
-			// created the lock. Only reclaim when we're certain.
+			// PID reuse guard: if we know when both the file and the process began
+			// and the process started after the file, it can't be the owner that
+			// created the file. Only reclaim when we're certain.
 			if start, ok := processStartTime(pid); ok && !created.IsZero() && start.After(created) {
 				return true
 			}
 			return false
 		}
 	}
-	return time.Since(info.ModTime()) > sessionLockStale
+	return time.Since(info.ModTime()) > staleAfter
 }
 
 // readLock parses the owning PID and creation time from a lock file. The lock
@@ -513,6 +519,70 @@ func (s *Store) RemoveHeartbeat(id string) error {
 		return err
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// observerLeaseStale bounds how long an observer lease may sit untouched
+// before it can be reclaimed when the owner's liveness is unknown. Holders
+// refresh well inside this window.
+const observerLeaseStale = 15 * time.Second
+
+func (s *Store) observerLeasePath(id string) (string, error) {
+	path, err := s.sessionPath(id)
+	if err != nil {
+		return "", err
+	}
+	return path + ".observer", nil
+}
+
+// AcquireObserverLease claims or refreshes the single-observer lease for a
+// session so only one TUI process runs passive observation at a time. It
+// returns false when another live process holds the lease.
+func (s *Store) AcquireObserverLease(id string) (bool, error) {
+	leasePath, err := s.observerLeasePath(id)
+	if err != nil {
+		return false, err
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		f, err := os.OpenFile(leasePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err == nil {
+			fmt.Fprintf(f, "%d\n%d\n", os.Getpid(), time.Now().UnixNano())
+			f.Close()
+			return true, nil
+		}
+		if !os.IsExist(err) {
+			return false, fmt.Errorf("creating observer lease: %w", err)
+		}
+		if pid, _, ok := readLock(leasePath); ok && pid == os.Getpid() {
+			// Refreshing our own lease rewrites it so the mtime-based staleness
+			// fallback stays fresh.
+			refreshed := fmt.Sprintf("%d\n%d\n", os.Getpid(), time.Now().UnixNano())
+			if err := os.WriteFile(leasePath, []byte(refreshed), 0600); err != nil {
+				return false, fmt.Errorf("refreshing observer lease: %w", err)
+			}
+			return true, nil
+		}
+		if ownerFileAbandoned(leasePath, observerLeaseStale) {
+			os.Remove(leasePath)
+			continue
+		}
+		return false, nil
+	}
+	return false, nil
+}
+
+// ReleaseObserverLease removes the lease only when this process owns it.
+func (s *Store) ReleaseObserverLease(id string) error {
+	leasePath, err := s.observerLeasePath(id)
+	if err != nil {
+		return err
+	}
+	if pid, _, ok := readLock(leasePath); !ok || pid != os.Getpid() {
+		return nil
+	}
+	if err := os.Remove(leasePath); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return nil
