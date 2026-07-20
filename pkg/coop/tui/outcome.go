@@ -270,6 +270,13 @@ func (m *Model) handleAttest() tea.Cmd {
 		return nil
 	}
 	if !m.targetHasAttestableNode(target.nodeNumbers) {
+		// Explain the refusal instead of silently ignoring the keypress when
+		// the journey has a live machine check.
+		if reason := m.outcomeBlockReason(target.nodeNumbers); reason != "" {
+			m.setStatus("This journey has a machine-checkable outcome — complete it in your browser instead of attesting.", 6*time.Second)
+			m.resizeViewport()
+			m.syncViewport()
+		}
 		return nil
 	}
 	session, err := m.workflowService().AttestOutcome(m.session.ID, target.nodeNumbers)
