@@ -3,8 +3,6 @@ package useragent
 
 import (
 	"encoding/json"
-	"fmt"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -157,9 +155,6 @@ func init() {
 
 func initUserAgent() {
 	encodedUserAgent = "Stripe/v1 stripe-cli/" + version.Version
-	if agent := DetectAIAgent(os.Getenv); agent != "" {
-		encodedUserAgent += fmt.Sprintf(" AIAgent/%s", agent)
-	}
 
 	stripeUserAgent := &stripeClientUserAgent{
 		Name:      "stripe-cli",

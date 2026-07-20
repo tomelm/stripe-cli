@@ -105,8 +105,9 @@ func TestCanonicalRequestFiltersMatchIdentifiersWithoutBroadeningMethods(t *test
 	assert.False(t, filter.matches(&RequestObservation{Method: "POST", Path: "/v1/invoices/in_123"}))
 	assert.False(t, filter.matches(&RequestObservation{Method: "POST", Path: "/v1/invoices/in_123/extra/send"}))
 	assert.False(t, filter.matches(nil))
-	assert.Equal(t, "/v1/invoices/", transportRequestPath(filter.Path))
-	assert.Equal(t, "/", transportRequestPath("${node.create-invoice:id}"))
+	// Live request logs may carry route-style ":id" segments instead of
+	// resolved IDs; a template placeholder matches either form.
+	assert.True(t, filter.matches(&RequestObservation{Method: "POST", Path: "/v1/invoices/:id/send"}))
 
 	// An unterminated placeholder stays a literal instead of widening matches.
 	unterminated := RequestFilter{Method: "GET", Path: "/v1/items/${broken"}
@@ -152,7 +153,6 @@ func TestSessionFiltersDeduplicateAndSortForTransport(t *testing.T) {
 	}, filters.Events)
 
 	assert.Equal(t, []string{"GET", "POST"}, filters.requestMethods())
-	assert.Equal(t, []string{"/v1/customers", "/v1/invoices/", "/v1/subscriptions"}, filters.requestPaths())
 	assert.Equal(t, []string{"charge.succeeded", "invoice.paid"}, filters.eventTypes())
 }
 

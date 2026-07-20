@@ -94,13 +94,13 @@ func validateConnectRequest(request ConnectRequest) error {
 	if request.Stream == StreamLogsTail && len(request.EventTypes) != 0 {
 		return fmt.Errorf("logs_tail does not accept event types")
 	}
-	if request.Stream == StreamListen && (len(request.RequestMethods) != 0 || len(request.RequestPaths) != 0) {
+	if request.Stream == StreamListen && len(request.RequestMethods) != 0 {
 		return fmt.Errorf("listen does not accept request filters")
 	}
-	if len(request.RequestMethods) > maxRequestFilters || len(request.RequestPaths) > maxRequestFilters {
+	if len(request.RequestMethods) > maxRequestFilters {
 		return fmt.Errorf("too many request filters")
 	}
-	if err := validateRequestFilters(request.RequestMethods, request.RequestPaths); err != nil {
+	if err := validateRequestMethods(request.RequestMethods); err != nil {
 		return err
 	}
 	if len(request.EventTypes) > maxEventTypes {
@@ -124,7 +124,6 @@ func validateConnectRequest(request ConnectRequest) error {
 
 func cloneConnectRequest(request ConnectRequest) ConnectRequest {
 	request.RequestMethods = append([]string(nil), request.RequestMethods...)
-	request.RequestPaths = append([]string(nil), request.RequestPaths...)
 	request.EventTypes = append([]string(nil), request.EventTypes...)
 	return request
 }
@@ -153,8 +152,7 @@ func (factory realStripeStreamFactory) stream(ctx context.Context, request Conne
 				Client:     client,
 				DeviceName: request.DeviceName,
 				Filters: &logtailing.LogFilters{
-					FilterHTTPMethod:  append([]string(nil), request.RequestMethods...),
-					FilterRequestPath: append([]string(nil), request.RequestPaths...),
+					FilterHTTPMethod: append([]string(nil), request.RequestMethods...),
 				},
 				Log:                          logger,
 				OutCh:                        output,

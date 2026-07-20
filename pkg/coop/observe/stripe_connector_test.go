@@ -429,7 +429,7 @@ func TestStripeConnectorValidatesConnectRequest(t *testing.T) {
 			request.Stream = StreamLogsTail
 			request.EventTypes = []string{"payment_intent.succeeded"}
 		}), false},
-		{"listen_rejects_request_filters", listen(func(request *ConnectRequest) { request.RequestPaths = []string{"/v1/customers"} }), false},
+		{"listen_rejects_request_filters", listen(func(request *ConnectRequest) { request.RequestMethods = []string{"POST"} }), false},
 		{"unknown_snapshot_event_invalid", events("payment_intent.suceeded"), false},
 		{"non_namespaced_unknown_event_invalid", events("totally.unknown.event"), false},
 		{"duplicated_event_type", events("payment_intent.succeeded", "payment_intent.succeeded"), false},

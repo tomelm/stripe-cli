@@ -179,7 +179,6 @@ func TestSupervisorPassesExplicitRequestFiltersToConnector(t *testing.T) {
 	connector := newScriptedConnector(connectStep{connection: connection})
 	config := defaultTestConfig(StreamLogsTail)
 	config.RequestMethods = []string{"GET", "POST"}
-	config.RequestPaths = []string{"/v1/invoices/", "/v1/payment_intents"}
 	supervisor := newTestSupervisor(t, config, connector, clock)
 
 	require.NoError(t, supervisor.Start(context.Background()))
@@ -187,7 +186,6 @@ func TestSupervisorPassesExplicitRequestFiltersToConnector(t *testing.T) {
 	connector.waitForCalls(t, 1)
 	request := connector.Requests()[0]
 	assert.Equal(t, config.RequestMethods, request.RequestMethods)
-	assert.Equal(t, config.RequestPaths, request.RequestPaths)
 	stopSupervisor(t, supervisor)
 }
 

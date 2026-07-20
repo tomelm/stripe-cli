@@ -86,14 +86,6 @@ func (filters SessionFilters) requestMethods() []string {
 	return sortedKeys(values)
 }
 
-func (filters SessionFilters) requestPaths() []string {
-	values := make(map[string]bool)
-	for _, filter := range filters.Requests {
-		values[transportRequestPath(filter.Path)] = true
-	}
-	return sortedKeys(values)
-}
-
 func (filters SessionFilters) eventTypes() []string {
 	values := make(map[string]bool)
 	for _, filter := range filters.Events {
@@ -113,16 +105,11 @@ func sortedKeys(values map[string]bool) []string {
 	return keys
 }
 
-func transportRequestPath(path string) string {
-	if placeholder := strings.Index(path, "${"); placeholder >= 0 {
-		if prefix := path[:placeholder]; prefix != "" {
-			return prefix
-		}
-		return "/"
-	}
-	return path
-}
-
+// matches scans one delivered request log against the blueprint template.
+// Live request logs carry resolved paths (real IDs interpolated) or
+// route-style ":id" segments; the template's ${...} placeholders match either
+// as a single path segment. Paths are never filtered server side — matching
+// happens here, against the full delivered stream.
 func (filter RequestFilter) matches(observation *RequestObservation) bool {
 	return observation != nil &&
 		strings.EqualFold(filter.Method, observation.Method) &&

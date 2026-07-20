@@ -40,7 +40,6 @@ func TestConfigRequiresExplicitBoundedSessionInput(t *testing.T) {
 
 	requestFilters := defaultTestConfig(StreamLogsTail)
 	requestFilters.RequestMethods = []string{"GET", "POST"}
-	requestFilters.RequestPaths = []string{"/v1/invoices/", "/v1/payment_intents"}
 	require.NoError(t, requestFilters.Validate())
 	wrongRequestStream := defaultTestConfig(StreamListen)
 	wrongRequestStream.RequestMethods = []string{"POST"}

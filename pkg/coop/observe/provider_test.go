@@ -504,7 +504,6 @@ func TestProviderBurstWithinOnePollStillMatches(t *testing.T) {
 	run := providerStartRun(t, providerRequestSession(), providerTestConfig(), func(config Config) (providerCollector, error) {
 		assert.Equal(t, StreamLogsTail, config.Stream)
 		assert.Equal(t, []string{"POST"}, config.RequestMethods)
-		assert.Equal(t, []string{"/v1/payment_intents"}, config.RequestPaths)
 		assert.Equal(t, providerTestAPIKey, config.APIKey)
 		return collector, nil
 	})

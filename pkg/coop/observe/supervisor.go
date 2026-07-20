@@ -81,7 +81,6 @@ func NewSupervisor(config Config, connector Connector, clock Clock, jitter Jitte
 		return nil, fmt.Errorf("passive observer jitter source is required")
 	}
 	config.RequestMethods = append([]string(nil), config.RequestMethods...)
-	config.RequestPaths = append([]string(nil), config.RequestPaths...)
 	config.EventTypes = append([]string(nil), config.EventTypes...)
 	return &Supervisor{
 		config:    config,
@@ -290,7 +289,6 @@ func (supervisor *Supervisor) runAttempt(runContext context.Context) attemptOutc
 		DeviceName:     supervisor.config.DeviceName,
 		AccountID:      supervisor.config.AccountID,
 		RequestMethods: append([]string(nil), supervisor.config.RequestMethods...),
-		RequestPaths:   append([]string(nil), supervisor.config.RequestPaths...),
 		EventTypes:     append([]string(nil), supervisor.config.EventTypes...),
 		Deadline:       deadline,
 	}

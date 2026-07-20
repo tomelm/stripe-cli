@@ -199,7 +199,6 @@ func (provider *Provider) collectorConfig(sessionID string, stream Stream, filte
 	}
 	if stream == StreamLogsTail {
 		config.RequestMethods = filters.requestMethods()
-		config.RequestPaths = filters.requestPaths()
 	} else {
 		config.EventTypes = filters.eventTypes()
 	}
