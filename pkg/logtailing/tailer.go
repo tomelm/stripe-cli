@@ -52,10 +52,6 @@ type Config struct {
 	// OutCh is the channel to send logs and statuses to for processing in other packages
 	OutCh chan websocket.IElement
 
-	// WebSocketDialer, when non-nil, is used verbatim instead of the CLI's
-	// ambient proxy/Unix-socket-aware dialer.
-	WebSocketDialer websocket.Dialer
-
 	// WebSocketReadLimit bounds one inbound message before JSON decoding. Zero
 	// preserves the existing logs-tail behavior.
 	WebSocketReadLimit int64
@@ -170,7 +166,6 @@ func (t *Tailer) Run(ctx context.Context) error {
 				ConnectAttemptWait:           t.cfg.WebSocketConnectAttemptWait,
 				SynchronousEventHandling:     t.cfg.SynchronousEventHandling,
 				DisconnectOnMalformedMessage: t.cfg.DisconnectOnMalformedPayload,
-				Dialer:                       t.cfg.WebSocketDialer,
 				Log:                          t.cfg.Log,
 				NoWSS:                        t.cfg.NoWSS,
 				ReadLimit:                    t.cfg.WebSocketReadLimit,

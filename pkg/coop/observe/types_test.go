@@ -54,8 +54,8 @@ func TestConfigRequiresExplicitBoundedSessionInput(t *testing.T) {
 	assert.ErrorContains(t, unknownFilter.Validate(), "not a supported listen event")
 
 	unbounded := config
-	unbounded.ObservationTimeout = 24*time.Hour + time.Nanosecond
-	assert.ErrorContains(t, unbounded.Validate(), "observation_timeout")
+	unbounded.StartupTimeout = 24*time.Hour + time.Nanosecond
+	assert.ErrorContains(t, unbounded.Validate(), "startup_timeout")
 
 	tooManyEvents := config
 	tooManyEvents.EventTypes = make([]string, maxEventTypes+1)
@@ -63,6 +63,21 @@ func TestConfigRequiresExplicitBoundedSessionInput(t *testing.T) {
 		tooManyEvents.EventTypes[index] = fmt.Sprintf("event.%d", index)
 	}
 	assert.ErrorContains(t, tooManyEvents.Validate(), "event_types exceeds")
+}
+
+func TestConfigValidateAcceptsThinAndLegacyListenEvents(t *testing.T) {
+	t.Parallel()
+
+	config := defaultTestConfig(StreamListen)
+	config.EventTypes = []string{
+		"payment_intent.succeeded",
+		"v2.billing.pricing_plan_subscription.servicing_activated",
+	}
+	require.NoError(t, config.Validate())
+
+	misspelled := defaultTestConfig(StreamListen)
+	misspelled.EventTypes = []string{"payment_intent.suceeded"}
+	assert.ErrorContains(t, misspelled.Validate(), "not a supported listen event")
 }
 
 func TestBackoffIsExponentialJitteredAndCapped(t *testing.T) {

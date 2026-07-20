@@ -1,8 +1,7 @@
-// Package verification defines the inert data contract shared by Co-op
-// verification producers.
+// Package verification defines the advisory result contract produced by
+// Co-op's session-owned passive observer and stored on session nodes.
 //
 // The package deliberately does not execute checks, observe applications,
 // choose retries, or gate workflow progress. Consumers remain responsible for
-// those decisions. Existing Co-op sessions do not use these types until a
-// later feature explicitly adopts them.
+// those decisions.
 package verification

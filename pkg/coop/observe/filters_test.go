@@ -5,7 +5,18 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/stripe/stripe-cli/pkg/coop"
+	verificationruntime "github.com/stripe/stripe-cli/pkg/coop/verification/runtime"
 )
+
+func filtersForBlueprint(t *testing.T, blueprintID string) SessionFilters {
+	t.Helper()
+	blueprint, err := coop.LoadBlueprint(blueprintID)
+	require.NoError(t, err)
+	session := coop.NewSessionFromBlueprint(blueprint, "filter_metadata", nil, nil)
+	return FiltersForSession(verificationruntime.SessionMetadata(session))
+}
 
 func TestFiltersCoverSixEvaluationBlueprints(t *testing.T) {
 	t.Parallel()
@@ -30,8 +41,7 @@ func TestFiltersCoverSixEvaluationBlueprints(t *testing.T) {
 		test := test
 		t.Run(test.blueprint, func(t *testing.T) {
 			t.Parallel()
-			filters, err := FiltersForBlueprint(test.blueprint)
-			require.NoError(t, err)
+			filters := filtersForBlueprint(t, test.blueprint)
 
 			assert.Len(t, filters.Requests, test.requestCount)
 			assert.Len(t, filters.Events, test.eventCount)
@@ -48,6 +58,40 @@ func TestFiltersCoverSixEvaluationBlueprints(t *testing.T) {
 	}
 }
 
+func TestFiltersForSessionUsesStoredSessionMetadata(t *testing.T) {
+	t.Parallel()
+
+	// The blueprint name matches an embedded blueprint, but the handed node
+	// metadata is deliberately different: filters must come from the stored
+	// session metadata, never from a blueprint reload.
+	session := verificationruntime.Session{
+		ID:        "session_metadata",
+		Blueprint: "one-time-payment",
+		Nodes: []verificationruntime.Node{
+			{Number: 1, Key: "scan-project", Type: coop.NodeTestHelper},
+			{
+				Number:   2,
+				Key:      "session-local-request",
+				Type:     coop.NodeAPIRequest,
+				Requests: []verificationruntime.Request{{Method: "post", Path: "/v1/session_local_objects"}},
+			},
+			{
+				Number: 3,
+				Key:    "session-local-handler",
+				Type:   coop.NodeAsyncHandler,
+				Events: []string{"session.local.event"},
+			},
+		},
+	}
+	filters := FiltersForSession(session)
+	assert.Equal(t, []RequestFilter{
+		{NodeNumber: 2, Method: "POST", Path: "/v1/session_local_objects"},
+	}, filters.Requests)
+	assert.Equal(t, []EventFilter{
+		{NodeNumber: 3, EventType: "session.local.event"},
+	}, filters.Events)
+}
+
 func TestCanonicalRequestFiltersMatchIdentifiersWithoutBroadeningMethods(t *testing.T) {
 	t.Parallel()
 
@@ -56,9 +100,60 @@ func TestCanonicalRequestFiltersMatchIdentifiersWithoutBroadeningMethods(t *test
 		Path:   "/v1/invoices/${node.create-invoice:id}/send",
 	}
 	assert.True(t, filter.matches(&RequestObservation{Method: "POST", Path: "/v1/invoices/in_123/send"}))
+	assert.True(t, filter.matches(&RequestObservation{Method: "post", Path: "/v1/invoices/in_123/send"}))
 	assert.False(t, filter.matches(&RequestObservation{Method: "GET", Path: "/v1/invoices/in_123/send"}))
 	assert.False(t, filter.matches(&RequestObservation{Method: "POST", Path: "/v1/invoices/in_123"}))
+	assert.False(t, filter.matches(&RequestObservation{Method: "POST", Path: "/v1/invoices/in_123/extra/send"}))
+	assert.False(t, filter.matches(nil))
 	assert.Equal(t, "/v1/invoices/", transportRequestPath(filter.Path))
+	assert.Equal(t, "/", transportRequestPath("${node.create-invoice:id}"))
+
+	// An unterminated placeholder stays a literal instead of widening matches.
+	unterminated := RequestFilter{Method: "GET", Path: "/v1/items/${broken"}
+	assert.True(t, unterminated.matches(&RequestObservation{Method: "GET", Path: "/v1/items/${broken"}))
+	assert.False(t, unterminated.matches(&RequestObservation{Method: "GET", Path: "/v1/items/anything"}))
+}
+
+func TestSessionFiltersDeduplicateAndSortForTransport(t *testing.T) {
+	t.Parallel()
+
+	session := verificationruntime.Session{
+		ID: "session_sorting",
+		Nodes: []verificationruntime.Node{
+			{
+				Number: 2,
+				Requests: []verificationruntime.Request{
+					{Method: "post", Path: "/v1/subscriptions"},
+					{Method: "POST", Path: "/v1/subscriptions"},
+					{Method: "GET", Path: "/v1/invoices/${node.wait-for-invoice:id}"},
+				},
+				Events: []string{"invoice.paid", "invoice.paid", ""},
+			},
+			{
+				Number: 1,
+				Requests: []verificationruntime.Request{
+					{Method: "POST", Path: "/v1/customers"},
+					{Method: "", Path: "/v1/skipped"},
+					{Method: "GET", Path: ""},
+				},
+				Events: []string{"charge.succeeded"},
+			},
+		},
+	}
+	filters := FiltersForSession(session)
+	assert.Equal(t, []RequestFilter{
+		{NodeNumber: 1, Method: "POST", Path: "/v1/customers"},
+		{NodeNumber: 2, Method: "GET", Path: "/v1/invoices/${node.wait-for-invoice:id}"},
+		{NodeNumber: 2, Method: "POST", Path: "/v1/subscriptions"},
+	}, filters.Requests)
+	assert.Equal(t, []EventFilter{
+		{NodeNumber: 1, EventType: "charge.succeeded"},
+		{NodeNumber: 2, EventType: "invoice.paid"},
+	}, filters.Events)
+
+	assert.Equal(t, []string{"GET", "POST"}, filters.requestMethods())
+	assert.Equal(t, []string{"/v1/customers", "/v1/invoices/", "/v1/subscriptions"}, filters.requestPaths())
+	assert.Equal(t, []string{"charge.succeeded", "invoice.paid"}, filters.eventTypes())
 }
 
 func requestNodeNumber(filters []RequestFilter, method, path string) int {

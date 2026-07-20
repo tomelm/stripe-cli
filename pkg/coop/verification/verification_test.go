@@ -20,12 +20,8 @@ func TestStableIDs(t *testing.T) {
 		value := value
 		t.Run("valid_"+value, func(t *testing.T) {
 			t.Parallel()
-			checkID, err := ParseCheckID(value)
-			require.NoError(t, err)
-			assert.Equal(t, CheckID(value), checkID)
-			resultID, err := ParseResultID(value)
-			require.NoError(t, err)
-			assert.Equal(t, ResultID(value), resultID)
+			require.NoError(t, CheckID(value).Validate())
+			require.NoError(t, ResultID(value).Validate())
 		})
 	}
 
@@ -37,10 +33,8 @@ func TestStableIDs(t *testing.T) {
 		value := value
 		t.Run("invalid_"+value, func(t *testing.T) {
 			t.Parallel()
-			_, checkErr := ParseCheckID(value)
-			assert.Error(t, checkErr)
-			_, resultErr := ParseResultID(value)
-			assert.Error(t, resultErr)
+			assert.Error(t, CheckID(value).Validate())
+			assert.Error(t, ResultID(value).Validate())
 		})
 	}
 }

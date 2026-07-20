@@ -5,12 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
-	"time"
 
 	log "github.com/sirupsen/logrus"
 
@@ -24,111 +22,20 @@ import (
 const (
 	stripeObserverBuffer      = 128
 	passiveWebSocketReadLimit = 4 << 20 // 4 MiB bounds one frame before JSON decoding.
-	webhooksFeature           = "webhooks"
 )
 
-// StripeConnectorOptions configures the real Stripe logs-tail and listen
-// transports. The API key and account context remain per-connection inputs.
-type StripeConnectorOptions struct {
-	APIBaseURL string
-	NoWSS      bool
-}
-
 // StripeConnector opens the existing Stripe CLI logs-tail and listen
-// transports without reading ambient CLI configuration, login state, proxy
-// variables, or Unix-socket routing.
+// transports in-process over the CLI's standard HTTP and WebSocket routing.
+// Credentials arrive only through each ConnectRequest.
 type StripeConnector struct {
 	factory stripeStreamFactory
 }
 
-// NewStripeConnector constructs a concrete passive connector. An empty API
-// base selects the production Stripe API; explicit alternate bases must pass
-// the observer's exact, stricter host/scheme/path allowlist.
-func NewStripeConnector(options StripeConnectorOptions) (*StripeConnector, error) {
-	apiBaseURL := options.APIBaseURL
-	if apiBaseURL == "" {
-		apiBaseURL = stripe.DefaultAPIBaseURL
-	}
-	parsed, err := validateStripeObserverAPIBase(apiBaseURL, options.NoWSS)
-	if err != nil {
-		return nil, err
-	}
-	return &StripeConnector{factory: realStripeStreamFactory{
-		apiBaseURL:      parsed,
-		noWSS:           options.NoWSS,
-		httpClient:      newDirectStripeHTTPClient(),
-		webSocketDialer: websocket.NewDirectDialer(),
-	}}, nil
-}
-
-func validateStripeObserverAPIBase(raw string, noWSS bool) (*url.URL, error) {
-	if raw == "" || strings.TrimSpace(raw) != raw {
-		return nil, fmt.Errorf("passive observer API base is invalid")
-	}
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return nil, fmt.Errorf("passive observer API base is invalid")
-	}
-	hostname := strings.ToLower(parsed.Hostname())
-	isLoopback := hostname == "127.0.0.1"
-	isStripeHost := hostname == "api.stripe.com" || hostname == "qa-api.stripe.com" || validStripeDevHost(hostname)
-	if (!isLoopback && !isStripeHost) || (isLoopback && parsed.Scheme != "http") || (isStripeHost && parsed.Scheme != "https") {
-		return nil, fmt.Errorf("passive observer API base is invalid")
-	}
-	if isStripeHost && parsed.Port() != "" {
-		return nil, fmt.Errorf("passive observer API base is invalid")
-	}
-	if parsed.Path != "" && !validVersionBasePath(parsed.Path) {
-		return nil, fmt.Errorf("passive observer API base is invalid")
-	}
-	if noWSS && !isLoopback {
-		return nil, fmt.Errorf("passive observer websocket downgrade requires an explicit loopback API base")
-	}
-	return parsed, nil
-}
-
-func validStripeDevHost(hostname string) bool {
-	const suffix = ".dev.stripe.me"
-	if !strings.HasSuffix(hostname, suffix) {
-		return false
-	}
-	label := strings.TrimSuffix(hostname, suffix)
-	if label == "" || strings.Contains(label, ".") || label[0] == '-' || label[len(label)-1] == '-' {
-		return false
-	}
-	for _, character := range label {
-		if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
-			return false
-		}
-	}
-	return true
-}
-
-func validVersionBasePath(path string) bool {
-	if len(path) < 3 || path[0] != '/' || path[1] != 'v' {
-		return false
-	}
-	for _, character := range path[2:] {
-		if character < '0' || character > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-func newDirectStripeHTTPClient() *http.Client {
-	return &http.Client{
-		Transport: &http.Transport{
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			TLSHandshakeTimeout: 10 * time.Second,
-		},
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
+// NewStripeConnector returns the production passive connector against the
+// default Stripe API base.
+func NewStripeConnector() *StripeConnector {
+	base, _ := url.Parse(stripe.DefaultAPIBaseURL)
+	return &StripeConnector{factory: realStripeStreamFactory{apiBaseURL: base}}
 }
 
 // Connect starts exactly one explicitly configured Stripe stream.
@@ -145,10 +52,14 @@ func (connector *StripeConnector) Connect(parent context.Context, request Connec
 	if err := parent.Err(); err != nil {
 		return nil, connectorFailure(FailureConnectionUnavailable, true)
 	}
-	// Passive qualification must never inherit command-level analytics. Shadow
+	// Passive observation must never inherit command-level analytics. Shadow
 	// any ambient telemetry client before the authenticated session request.
+	//
+	// request.Deadline bounds connection SETUP only, and the supervisor already
+	// cancels ctx when its startup timer fires. Applying the deadline to this
+	// context would kill a healthy stream at the startup deadline.
 	telemetrySafeParent := stripe.WithTelemetryClient(parent, &stripe.NoOpTelemetryClient{})
-	ctx, cancel := context.WithDeadline(telemetrySafeParent, request.Deadline)
+	ctx, cancel := context.WithCancel(telemetrySafeParent)
 	runner, err := connector.factory.stream(ctx, cloneConnectRequest(request))
 	if err != nil {
 		cancel()
@@ -203,7 +114,7 @@ func validateConnectRequest(request ConnectRequest) error {
 		if seen[eventType] {
 			return fmt.Errorf("event type is duplicated")
 		}
-		if request.Stream == StreamListen && !proxy.IsValidEventType(eventType) {
+		if request.Stream == StreamListen && !proxy.IsValidEventType(eventType) && !proxy.IsThinEventType(eventType) {
 			return fmt.Errorf("event type is invalid")
 		}
 		seen[eventType] = true
@@ -228,15 +139,12 @@ type stripeStreamFactory interface {
 }
 
 type realStripeStreamFactory struct {
-	apiBaseURL      *url.URL
-	noWSS           bool
-	httpClient      *http.Client
-	webSocketDialer websocket.Dialer
+	apiBaseURL *url.URL
 }
 
 func (factory realStripeStreamFactory) stream(ctx context.Context, request ConnectRequest) (stripeStreamRunner, error) {
 	baseURL := *factory.apiBaseURL
-	client := &stripe.Client{APIKey: request.APIKey, BaseURL: &baseURL, HTTPClient: factory.httpClient}
+	client := &stripe.Client{APIKey: request.APIKey, BaseURL: &baseURL}
 	logger := &log.Logger{Out: io.Discard}
 	switch request.Stream {
 	case StreamLogsTail:
@@ -249,9 +157,7 @@ func (factory realStripeStreamFactory) stream(ctx context.Context, request Conne
 					FilterRequestPath: append([]string(nil), request.RequestPaths...),
 				},
 				Log:                          logger,
-				NoWSS:                        factory.noWSS,
 				OutCh:                        output,
-				WebSocketDialer:              factory.webSocketDialer,
 				WebSocketReadLimit:           passiveWebSocketReadLimit,
 				ReportConnectionGaps:         true,
 				SynchronousEventHandling:     true,
@@ -262,31 +168,7 @@ func (factory realStripeStreamFactory) stream(ctx context.Context, request Conne
 		}, nil
 	case StreamListen:
 		return func(runContext context.Context, output chan websocket.IElement) error {
-			deviceToken := ""
-			events := append([]string(nil), request.EventTypes...)
-			if len(events) == 0 {
-				events = []string{"*"}
-			}
-			listener, err := proxy.Init(runContext, &proxy.Config{
-				Client:                       client,
-				DeviceName:                   request.DeviceName,
-				DeviceToken:                  &deviceToken,
-				Events:                       events,
-				WebSocketFeatures:            []string{webhooksFeature},
-				Log:                          logger,
-				NoWSS:                        factory.noWSS,
-				Timeout:                      30,
-				OutCh:                        output,
-				WebSocketDialer:              factory.webSocketDialer,
-				WebSocketReadLimit:           passiveWebSocketReadLimit,
-				ReportConnectionGaps:         true,
-				SynchronousEventHandling:     true,
-				OmitReadySecret:              true,
-				OmitMarshaledPayload:         true,
-				DisconnectOnMalformedPayload: true,
-				LoggedInAccountID:            request.AccountID,
-				UseLatestAPIVersion:          false,
-			})
+			listener, err := proxy.Init(runContext, listenProxyConfig(client, request, logger, output))
 			if err != nil {
 				close(output)
 				return err
@@ -295,6 +177,50 @@ func (factory realStripeStreamFactory) stream(ctx context.Context, request Conne
 		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported stream")
+	}
+}
+
+// listenProxyConfig builds the listen proxy configuration for one passive
+// connection, splitting declared event types into legacy webhook events and
+// v1/v2 thin events so each family is requested in its own stream mode.
+func listenProxyConfig(client *stripe.Client, request ConnectRequest, logger *log.Logger, output chan websocket.IElement) *proxy.Config {
+	deviceToken := ""
+	var legacy, thin []string
+	for _, eventType := range request.EventTypes {
+		if proxy.IsThinEventType(eventType) {
+			thin = append(thin, eventType)
+		} else {
+			legacy = append(legacy, eventType)
+		}
+	}
+	var features []string
+	if len(legacy) > 0 || len(thin) == 0 {
+		features = append(features, "webhooks")
+	}
+	if len(thin) > 0 {
+		features = append(features, "v2_events")
+	}
+	if len(legacy) == 0 && len(thin) == 0 {
+		legacy = []string{"*"}
+	}
+	return &proxy.Config{
+		Client:                       client,
+		DeviceName:                   request.DeviceName,
+		DeviceToken:                  &deviceToken,
+		Events:                       legacy,
+		ThinEvents:                   thin,
+		WebSocketFeatures:            features,
+		Log:                          logger,
+		Timeout:                      30,
+		OutCh:                        output,
+		WebSocketReadLimit:           passiveWebSocketReadLimit,
+		ReportConnectionGaps:         true,
+		SynchronousEventHandling:     true,
+		OmitReadySecret:              true,
+		OmitMarshaledPayload:         true,
+		DisconnectOnMalformedPayload: true,
+		LoggedInAccountID:            request.AccountID,
+		UseLatestAPIVersion:          false,
 	}
 }
 

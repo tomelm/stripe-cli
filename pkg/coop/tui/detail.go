@@ -257,6 +257,10 @@ func (m Model) writeStepChecksDetail(md *strings.Builder, ch *coop.SessionStep) 
 			md.WriteString("- `" + strings.ReplaceAll(command, "`", "'") + "`\n")
 			wrote = true
 		}
+		for _, result := range passiveResults(&node) {
+			md.WriteString("- " + passiveStatusGlyph(result.Status) + " " + node.Title + ": " + passiveDetailText(result) + "\n")
+			wrote = true
+		}
 	}
 	if wrote {
 		md.WriteString("\n")
@@ -411,7 +415,8 @@ func implementationFileLabel(imp *coop.Implementation) string {
 }
 
 func (m Model) writeVerificationDetail(md *strings.Builder, node *coop.SessionNode) {
-	if len(node.Verifications) == 0 {
+	passive := passiveResults(node)
+	if len(node.Verifications) == 0 && len(passive) == 0 {
 		return
 	}
 	for _, v := range node.Verifications {
@@ -420,6 +425,9 @@ func (m Model) writeVerificationDetail(md *strings.Builder, node *coop.SessionNo
 		} else {
 			md.WriteString("- ✗ " + v.Check + "\n")
 		}
+	}
+	for _, result := range passive {
+		md.WriteString("- " + passiveResultLine(result) + "\n")
 	}
 	md.WriteString("\n")
 }

@@ -48,11 +48,6 @@ type Client struct {
 	// Cached HTTP client, lazily created the first time the Client is used to
 	// send a request.
 	httpClient *http.Client
-
-	// HTTPClient, when non-nil, is the exact client used for API requests. It is
-	// intended for callers that must not inherit the CLI's ambient proxy or Unix
-	// socket routing. Most CLI callers should leave it nil.
-	HTTPClient *http.Client
 }
 
 // RequestPerformer is an interface for executing requests against the Stripe
@@ -103,11 +98,7 @@ func (c *Client) PerformRequest(ctx context.Context, method, path string, params
 	}
 
 	if c.httpClient == nil {
-		if c.HTTPClient != nil {
-			c.httpClient = c.HTTPClient
-		} else {
-			c.httpClient = newHTTPClient(c.Verbose, c.VerbosePrintableHeaders, os.Getenv("STRIPE_CLI_UNIX_SOCKET"))
-		}
+		c.httpClient = newHTTPClient(c.Verbose, c.VerbosePrintableHeaders, os.Getenv("STRIPE_CLI_UNIX_SOCKET"))
 	}
 
 	if ctx != nil {

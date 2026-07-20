@@ -143,7 +143,7 @@ func testClientInvalidFrameNotifiesDisconnect(t *testing.T, payload []byte) {
 	disconnected := make(chan struct{})
 	var disconnectOnce sync.Once
 	client := NewClient("ws"+strings.TrimPrefix(server.URL, "http"), "websocket-id", "webhooks", &Config{
-		Dialer:                       NewDirectDialer(),
+		Dialer:                       newWebSocketDialer(""),
 		DisconnectOnMalformedMessage: true,
 		ReconnectInterval:            time.Hour,
 		CloseDelayPeriod:             time.Millisecond,

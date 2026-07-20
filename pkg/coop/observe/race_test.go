@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"github.com/stripe/stripe-cli/pkg/coop/verification"
 )
 
 func TestSupervisorConcurrentSnapshotsAndObservations(t *testing.T) {
@@ -18,36 +17,58 @@ func TestSupervisorConcurrentSnapshotsAndObservations(t *testing.T) {
 	require.NoError(t, supervisor.Start(context.Background()))
 	waitForState(t, supervisor, StateReady)
 
+	const observationCount = 100
+	const drainReaders = 3
+	deadline := time.Now().Add(2 * time.Second)
+	collected := make([][]SequencedObservation, drainReaders)
+
 	var group sync.WaitGroup
-	for reader := 0; reader < 8; reader++ {
+	for reader := 0; reader < drainReaders; reader++ {
+		reader := reader
 		group.Add(1)
-		go func(reader int) {
+		go func() {
 			defer group.Done()
-			for iteration := 0; iteration < 100; iteration++ {
-				_ = supervisor.Snapshot().Summary()
-				_ = supervisor.HealthEpochs()
-				_, _ = supervisor.AvailabilityResult(
-					verificationResultID(reader, iteration),
-					"collector.logs",
-				)
+			var cursor uint64
+			for len(collected[reader]) < observationCount && time.Now().Before(deadline) {
+				observations, next, missed := supervisor.ObservationsSince(cursor)
+				if missed != 0 {
+					t.Errorf("reader %d missed %d observations", reader, missed)
+					return
+				}
+				collected[reader] = append(collected[reader], observations...)
+				cursor = next
+				time.Sleep(time.Millisecond)
 			}
-		}(reader)
+		}()
 	}
-	for index := 0; index < 100; index++ {
+	for reader := 0; reader < 4; reader++ {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for iteration := 0; iteration < 200; iteration++ {
+				_ = supervisor.Snapshot()
+			}
+		}()
+	}
+	for index := 1; index <= observationCount; index++ {
 		connection.observations <- Observation{Request: &RequestObservation{
-			RequestID: fmt.Sprintf("req_%d", index),
+			RequestID: fmt.Sprintf("req_%03d", index),
 			Method:    "POST",
 			Path:      "/v1/payment_intents",
 			Status:    200,
 		}}
 	}
 	group.Wait()
-	require.Eventually(t, func() bool {
-		return supervisor.Snapshot().ObservedRequests == 100
-	}, 2*time.Second, time.Millisecond)
-	stopSupervisor(t, supervisor)
-}
 
-func verificationResultID(reader, iteration int) verification.ResultID {
-	return verification.ResultID(fmt.Sprintf("collector.logs:r%d-i%d", reader, iteration))
+	// Every reader drains its own cursor from zero and must see every pushed
+	// observation exactly once, in arrival order.
+	for reader := 0; reader < drainReaders; reader++ {
+		require.Len(t, collected[reader], observationCount, "reader %d", reader)
+		for index, sequenced := range collected[reader] {
+			require.EqualValues(t, index+1, sequenced.Sequence, "reader %d", reader)
+			require.NotNil(t, sequenced.Observation.Request)
+			require.Equal(t, fmt.Sprintf("req_%03d", index+1), sequenced.Observation.Request.RequestID)
+		}
+	}
+	stopSupervisor(t, supervisor)
 }

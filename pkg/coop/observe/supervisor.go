@@ -8,38 +8,35 @@ import (
 	"time"
 )
 
-// HealthEpoch is one continuous interval during which the stream was ready.
-// A reconnect always starts a new epoch.
-type HealthEpoch struct {
-	ID        uint64      `json:"id"`
-	StartedAt time.Time   `json:"started_at"`
-	EndedAt   time.Time   `json:"ended_at,omitempty"`
-	EndCode   FailureCode `json:"end_code,omitempty"`
+// observationRingCapacity bounds retained observations. The connector's
+// per-connection buffer is 128 with synchronous handling and consumers drain
+// every poll interval, so the ring cannot overflow before the connector's own
+// overflow reconnect changes the epoch.
+const observationRingCapacity = 256
+
+// SequencedObservation is one bounded observation with its position in the
+// collector's stream and the ready epoch it arrived in.
+type SequencedObservation struct {
+	Sequence    uint64      `json:"sequence"`
+	Epoch       uint64      `json:"epoch"`
+	ObservedAt  time.Time   `json:"observed_at"`
+	Observation Observation `json:"observation"`
 }
 
-// Snapshot is the bounded, credential-free state retained for summaries and
-// coverage accounting.
+// Snapshot is the bounded, credential-free collector state used for coverage
+// accounting and advisory results.
 type Snapshot struct {
-	CapturedAt          time.Time    `json:"captured_at"`
-	SessionID           string       `json:"session_id"`
-	Stream              Stream       `json:"stream"`
-	State               State        `json:"state"`
-	StateSince          time.Time    `json:"state_since"`
-	ReadySince          time.Time    `json:"ready_since,omitempty"`
-	NextRetryAt         time.Time    `json:"next_retry_at,omitempty"`
-	StartupDeadline     time.Time    `json:"startup_deadline,omitempty"`
-	Epoch               uint64       `json:"epoch,omitempty"`
-	GapSequence         uint64       `json:"gap_sequence,omitempty"`
-	TransitionCount     uint64       `json:"transition_count,omitempty"`
-	ConsecutiveFailures uint         `json:"consecutive_failures,omitempty"`
-	ObservedRequests    uint64       `json:"observed_requests,omitempty"`
-	ObservedEvents      uint64       `json:"observed_events,omitempty"`
-	EpochRequests       uint64       `json:"epoch_requests,omitempty"`
-	EpochEvents         uint64       `json:"epoch_events,omitempty"`
-	DroppedObservations uint64       `json:"dropped_observations,omitempty"`
-	LastObservationAt   time.Time    `json:"last_observation_at,omitempty"`
-	LastObservation     *Observation `json:"last_observation,omitempty"`
-	LastFailure         *Failure     `json:"last_failure,omitempty"`
+	SessionID           string    `json:"session_id"`
+	Stream              Stream    `json:"stream"`
+	State               State     `json:"state"`
+	ReadySince          time.Time `json:"ready_since,omitempty"`
+	NextRetryAt         time.Time `json:"next_retry_at,omitempty"`
+	Epoch               uint64    `json:"epoch,omitempty"`
+	ConsecutiveFailures uint      `json:"consecutive_failures,omitempty"`
+	ObservedRequests    uint64    `json:"observed_requests,omitempty"`
+	ObservedEvents      uint64    `json:"observed_events,omitempty"`
+	DroppedObservations uint64    `json:"dropped_observations,omitempty"`
+	LastFailure         *Failure  `json:"last_failure,omitempty"`
 }
 
 // Supervisor owns one passive logs-tail or listen connection.
@@ -53,33 +50,20 @@ type Supervisor struct {
 	cleanup             sync.WaitGroup
 	running             bool
 	state               State
-	stateSince          time.Time
 	readySince          time.Time
 	nextRetryAt         time.Time
-	startupDeadline     time.Time
 	epoch               uint64
-	gapSequence         uint64
-	transitionCount     uint64
 	consecutiveFailures uint
 	observedRequests    uint64
 	observedEvents      uint64
-	epochRequests       uint64
-	epochEvents         uint64
 	droppedObservations uint64
-	lastObservationAt   time.Time
-	lastObservation     *Observation
 	lastFailure         *Failure
-	healthEpochs        []HealthEpoch
 
-	retryPending  bool
-	retryCh       chan struct{}
-	runCancel     context.CancelFunc
-	done          chan struct{}
-	attemptID     uint64
-	attemptCancel context.CancelFunc
+	ring      []SequencedObservation
+	ringTotal uint64
 
-	windowSequence  uint64
-	coverageWindows map[uint64]coverageStart
+	runCancel context.CancelFunc
+	done      chan struct{}
 }
 
 // NewSupervisor validates all injected dependencies. It performs no I/O.
@@ -99,16 +83,13 @@ func NewSupervisor(config Config, connector Connector, clock Clock, jitter Jitte
 	config.RequestMethods = append([]string(nil), config.RequestMethods...)
 	config.RequestPaths = append([]string(nil), config.RequestPaths...)
 	config.EventTypes = append([]string(nil), config.EventTypes...)
-	now := clock.Now().UTC()
 	return &Supervisor{
-		config:          config,
-		connector:       connector,
-		clock:           clock,
-		jitter:          jitter,
-		state:           StateStopped,
-		stateSince:      now,
-		retryCh:         make(chan struct{}, 1),
-		coverageWindows: make(map[uint64]coverageStart),
+		config:    config,
+		connector: connector,
+		clock:     clock,
+		jitter:    jitter,
+		state:     StateStopped,
+		ring:      make([]SequencedObservation, observationRingCapacity),
 	}, nil
 }
 
@@ -126,42 +107,14 @@ func (supervisor *Supervisor) Start(parent context.Context) error {
 	runContext, cancel := context.WithCancel(parent)
 	now := supervisor.clock.Now().UTC()
 	supervisor.running = true
-	supervisor.retryPending = false
-	select {
-	case <-supervisor.retryCh:
-	default:
-	}
 	supervisor.runCancel = cancel
 	supervisor.done = make(chan struct{})
 	supervisor.lastFailure = nil
 	supervisor.consecutiveFailures = 0
 	supervisor.nextRetryAt = now
-	supervisor.startupDeadline = now.Add(supervisor.config.StartupTimeout)
-	supervisor.setStateLocked(StateRetrying, now)
+	supervisor.setStateLocked(StateRetrying)
 	done := supervisor.done
 	go supervisor.run(runContext, done)
-	return nil
-}
-
-// RetryNow coalesces manual retry requests and returns once the signal is
-// accepted. It never waits for Stripe to reconnect.
-func (supervisor *Supervisor) RetryNow() error {
-	supervisor.mu.Lock()
-	defer supervisor.mu.Unlock()
-	if !supervisor.running {
-		return ErrNotRunning
-	}
-	if supervisor.retryPending {
-		return nil
-	}
-	supervisor.retryPending = true
-	if supervisor.attemptCancel != nil {
-		supervisor.attemptCancel()
-	}
-	select {
-	case supervisor.retryCh <- struct{}{}:
-	default:
-	}
 	return nil
 }
 
@@ -193,28 +146,16 @@ func (supervisor *Supervisor) Snapshot() Snapshot {
 	supervisor.mu.Lock()
 	defer supervisor.mu.Unlock()
 	snapshot := Snapshot{
-		CapturedAt:          supervisor.clock.Now().UTC(),
 		SessionID:           supervisor.config.SessionID,
 		Stream:              supervisor.config.Stream,
 		State:               supervisor.state,
-		StateSince:          supervisor.stateSince,
 		ReadySince:          supervisor.readySince,
 		NextRetryAt:         supervisor.nextRetryAt,
-		StartupDeadline:     supervisor.startupDeadline,
 		Epoch:               supervisor.epoch,
-		GapSequence:         supervisor.gapSequence,
-		TransitionCount:     supervisor.transitionCount,
 		ConsecutiveFailures: supervisor.consecutiveFailures,
 		ObservedRequests:    supervisor.observedRequests,
 		ObservedEvents:      supervisor.observedEvents,
-		EpochRequests:       supervisor.epochRequests,
-		EpochEvents:         supervisor.epochEvents,
 		DroppedObservations: supervisor.droppedObservations,
-		LastObservationAt:   supervisor.lastObservationAt,
-	}
-	if supervisor.lastObservation != nil {
-		observation := cloneObservation(*supervisor.lastObservation)
-		snapshot.LastObservation = &observation
 	}
 	if supervisor.lastFailure != nil {
 		failure := *supervisor.lastFailure
@@ -223,16 +164,38 @@ func (supervisor *Supervisor) Snapshot() Snapshot {
 	return snapshot
 }
 
-// HealthEpochs returns a defensive copy of all readiness epochs.
-func (supervisor *Supervisor) HealthEpochs() []HealthEpoch {
+// ObservationsSince returns buffered observations with Sequence > cursor in
+// arrival order, the cursor for the next call, and how many observations were
+// evicted from the bounded ring before the caller could read them. Callers
+// that treat absence as evidence must treat missed > 0 as a coverage gap.
+func (supervisor *Supervisor) ObservationsSince(cursor uint64) ([]SequencedObservation, uint64, uint64) {
 	supervisor.mu.Lock()
 	defer supervisor.mu.Unlock()
-	return append([]HealthEpoch(nil), supervisor.healthEpochs...)
+	total := supervisor.ringTotal
+	if cursor >= total {
+		return nil, total, 0
+	}
+	oldest := uint64(1)
+	if total > observationRingCapacity {
+		oldest = total - observationRingCapacity + 1
+	}
+	first := cursor + 1
+	var missed uint64
+	if first < oldest {
+		missed = oldest - first
+		first = oldest
+	}
+	observations := make([]SequencedObservation, 0, total-first+1)
+	for sequence := first; sequence <= total; sequence++ {
+		entry := supervisor.ring[(sequence-1)%observationRingCapacity]
+		entry.Observation = cloneObservation(entry.Observation)
+		observations = append(observations, entry)
+	}
+	return observations, total, missed
 }
 
 type attemptOutcome struct {
 	failure  Failure
-	manual   bool
 	stopped  bool
 	wasReady bool
 	readyAt  time.Time
@@ -246,15 +209,11 @@ type connectResult struct {
 func (supervisor *Supervisor) run(runContext context.Context, done chan struct{}) {
 	defer func() {
 		supervisor.cleanup.Wait()
-		now := supervisor.clock.Now().UTC()
 		supervisor.mu.Lock()
-		supervisor.closeReadyEpochLocked(now, "", false)
+		supervisor.readySince = time.Time{}
 		supervisor.running = false
-		supervisor.retryPending = false
-		supervisor.attemptCancel = nil
 		supervisor.nextRetryAt = time.Time{}
-		supervisor.startupDeadline = time.Time{}
-		supervisor.setStateLocked(StateStopped, now)
+		supervisor.setStateLocked(StateStopped)
 		supervisor.runCancel = nil
 		close(done)
 		supervisor.mu.Unlock()
@@ -270,20 +229,6 @@ func (supervisor *Supervisor) run(runContext context.Context, done chan struct{}
 			return
 		}
 		now := supervisor.clock.Now().UTC()
-		if outcome.manual {
-			failureCount = 0
-			supervisor.mu.Lock()
-			if outcome.wasReady {
-				supervisor.closeReadyEpochLocked(now, "", true)
-			}
-			supervisor.lastFailure = nil
-			supervisor.consecutiveFailures = 0
-			supervisor.nextRetryAt = now
-			supervisor.startupDeadline = now.Add(supervisor.config.StartupTimeout)
-			supervisor.setStateLocked(StateRetrying, now)
-			supervisor.mu.Unlock()
-			continue
-		}
 
 		failure := outcome.failure
 		if err := failure.Validate(); err != nil {
@@ -294,20 +239,14 @@ func (supervisor *Supervisor) run(runContext context.Context, done chan struct{}
 		}
 		if !failure.Transient {
 			supervisor.mu.Lock()
-			if outcome.wasReady {
-				supervisor.closeReadyEpochLocked(now, failure.Code, true)
-			}
+			supervisor.readySince = time.Time{}
 			supervisor.lastFailure = &failure
 			supervisor.consecutiveFailures = failureCount
 			supervisor.nextRetryAt = time.Time{}
-			supervisor.startupDeadline = time.Time{}
-			supervisor.setStateLocked(StateUnhealthy, now)
+			supervisor.setStateLocked(StateUnhealthy)
 			supervisor.mu.Unlock()
-			if !supervisor.waitForManualRetry(runContext) {
-				return
-			}
-			failureCount = 0
-			continue
+			<-runContext.Done()
+			return
 		}
 
 		failureCount++
@@ -315,36 +254,24 @@ func (supervisor *Supervisor) run(runContext context.Context, done chan struct{}
 		if err != nil {
 			supervisor.mu.Lock()
 			invalid := Failure{Code: FailureConnectorInvalid}
-			if outcome.wasReady {
-				supervisor.closeReadyEpochLocked(now, invalid.Code, true)
-			}
+			supervisor.readySince = time.Time{}
 			supervisor.lastFailure = &invalid
 			supervisor.consecutiveFailures = failureCount
 			supervisor.nextRetryAt = time.Time{}
-			supervisor.startupDeadline = time.Time{}
-			supervisor.setStateLocked(StateUnhealthy, now)
+			supervisor.setStateLocked(StateUnhealthy)
 			supervisor.mu.Unlock()
-			if !supervisor.waitForManualRetry(runContext) {
-				return
-			}
-			failureCount = 0
-			continue
+			<-runContext.Done()
+			return
 		}
 		supervisor.mu.Lock()
-		if outcome.wasReady {
-			supervisor.closeReadyEpochLocked(now, failure.Code, true)
-		}
+		supervisor.readySince = time.Time{}
 		supervisor.lastFailure = &failure
 		supervisor.consecutiveFailures = failureCount
 		supervisor.nextRetryAt = now.Add(delay)
-		supervisor.startupDeadline = time.Time{}
-		supervisor.setStateLocked(StateRetrying, now)
+		supervisor.setStateLocked(StateRetrying)
 		supervisor.mu.Unlock()
 		if !supervisor.waitForRetry(runContext, delay) {
 			return
-		}
-		if supervisor.consumeRetry() {
-			failureCount = 0
 		}
 	}
 }
@@ -353,11 +280,8 @@ func (supervisor *Supervisor) runAttempt(runContext context.Context) attemptOutc
 	started := supervisor.clock.Now().UTC()
 	deadline := started.Add(supervisor.config.StartupTimeout)
 	attemptContext, cancelAttempt := context.WithCancel(runContext)
-	attemptID := supervisor.registerAttempt(cancelAttempt, started, deadline)
-	defer func() {
-		cancelAttempt()
-		supervisor.clearAttempt(attemptID)
-	}()
+	defer cancelAttempt()
+	supervisor.beginAttempt()
 
 	request := ConnectRequest{
 		SessionID:      supervisor.config.SessionID,
@@ -386,7 +310,7 @@ func (supervisor *Supervisor) runAttempt(runContext context.Context) attemptOutc
 			if result.connection != nil {
 				_ = result.connection.Close()
 			}
-			return supervisor.outcomeForAttemptError(runContext, attemptContext, result.err)
+			return supervisor.outcomeForAttemptError(runContext, result.err)
 		}
 		if result.connection == nil {
 			return attemptOutcome{failure: Failure{Code: FailureConnectorInvalid}}
@@ -399,7 +323,7 @@ func (supervisor *Supervisor) runAttempt(runContext context.Context) attemptOutc
 	case <-attemptContext.Done():
 		cancelAttempt()
 		supervisor.closeLateConnection(connectResults)
-		return supervisor.outcomeForAttemptError(runContext, attemptContext, attemptContext.Err())
+		return supervisor.outcomeForAttemptError(runContext, attemptContext.Err())
 	}
 	defer connection.Close()
 
@@ -410,28 +334,16 @@ func (supervisor *Supervisor) runAttempt(runContext context.Context) attemptOutc
 	select {
 	case err := <-readyResults:
 		if err != nil {
-			return supervisor.outcomeForAttemptError(runContext, attemptContext, err)
+			return supervisor.outcomeForAttemptError(runContext, err)
 		}
 		if runContext.Err() != nil {
 			return attemptOutcome{stopped: true}
-		}
-		if attemptContext.Err() != nil {
-			if supervisor.consumeRetry() {
-				return attemptOutcome{manual: true}
-			}
-			if runContext.Err() != nil {
-				return attemptOutcome{stopped: true}
-			}
-			return attemptOutcome{failure: Failure{Code: FailureConnectorInvalid}}
-		}
-		if supervisor.consumeRetry() {
-			return attemptOutcome{manual: true}
 		}
 	case <-startupTimer.C():
 		cancelAttempt()
 		return attemptOutcome{failure: Failure{Code: FailureStartupTimeout, Transient: true}}
 	case <-attemptContext.Done():
-		return supervisor.outcomeForAttemptError(runContext, attemptContext, attemptContext.Err())
+		return supervisor.outcomeForAttemptError(runContext, attemptContext.Err())
 	}
 	startupTimer.Stop()
 	readyAt := supervisor.clock.Now().UTC()
@@ -459,7 +371,7 @@ func (supervisor *Supervisor) runAttempt(runContext context.Context) attemptOutc
 			}
 			supervisor.drainAvailableObservations(observations)
 			if attemptContext.Err() != nil {
-				outcome := supervisor.outcomeForAttemptError(runContext, attemptContext, attemptContext.Err())
+				outcome := supervisor.outcomeForAttemptError(runContext, attemptContext.Err())
 				outcome.wasReady = true
 				outcome.readyAt = readyAt
 				return outcome
@@ -467,7 +379,7 @@ func (supervisor *Supervisor) runAttempt(runContext context.Context) attemptOutc
 			failure := failureFromError(err)
 			return attemptOutcome{failure: failure, wasReady: true, readyAt: readyAt}
 		case <-attemptContext.Done():
-			outcome := supervisor.outcomeForAttemptError(runContext, attemptContext, attemptContext.Err())
+			outcome := supervisor.outcomeForAttemptError(runContext, attemptContext.Err())
 			outcome.wasReady = true
 			outcome.readyAt = readyAt
 			return outcome
@@ -489,24 +401,11 @@ func (supervisor *Supervisor) drainAvailableObservations(observations <-chan Obs
 	}
 }
 
-func (supervisor *Supervisor) registerAttempt(cancel context.CancelFunc, started, deadline time.Time) uint64 {
+func (supervisor *Supervisor) beginAttempt() {
 	supervisor.mu.Lock()
 	defer supervisor.mu.Unlock()
-	supervisor.attemptID++
-	supervisor.attemptCancel = cancel
 	supervisor.nextRetryAt = time.Time{}
-	supervisor.startupDeadline = deadline
-	supervisor.setStateLocked(StateRetrying, started)
-	return supervisor.attemptID
-}
-
-func (supervisor *Supervisor) clearAttempt(attemptID uint64) {
-	supervisor.mu.Lock()
-	defer supervisor.mu.Unlock()
-	if supervisor.attemptID == attemptID {
-		supervisor.attemptCancel = nil
-		supervisor.startupDeadline = time.Time{}
-	}
+	supervisor.setStateLocked(StateRetrying)
 }
 
 func (supervisor *Supervisor) markReady(now time.Time) {
@@ -515,29 +414,8 @@ func (supervisor *Supervisor) markReady(now time.Time) {
 	supervisor.epoch++
 	supervisor.readySince = now
 	supervisor.nextRetryAt = time.Time{}
-	supervisor.startupDeadline = time.Time{}
 	supervisor.lastFailure = nil
-	supervisor.epochRequests = 0
-	supervisor.epochEvents = 0
-	supervisor.setStateLocked(StateReady, now)
-	supervisor.healthEpochs = append(supervisor.healthEpochs, HealthEpoch{ID: supervisor.epoch, StartedAt: now})
-}
-
-func (supervisor *Supervisor) closeReadyEpochLocked(now time.Time, code FailureCode, gap bool) {
-	if supervisor.readySince.IsZero() {
-		return
-	}
-	if len(supervisor.healthEpochs) > 0 {
-		epoch := &supervisor.healthEpochs[len(supervisor.healthEpochs)-1]
-		if epoch.EndedAt.IsZero() {
-			epoch.EndedAt = now
-			epoch.EndCode = code
-		}
-	}
-	supervisor.readySince = time.Time{}
-	if gap {
-		supervisor.gapSequence++
-	}
+	supervisor.setStateLocked(StateReady)
 }
 
 func (supervisor *Supervisor) recordObservation(observation Observation) {
@@ -551,22 +429,20 @@ func (supervisor *Supervisor) recordObservation(observation Observation) {
 	cloned := cloneObservation(observation)
 	if cloned.Request != nil {
 		supervisor.observedRequests++
-		supervisor.epochRequests++
 	} else {
 		supervisor.observedEvents++
-		supervisor.epochEvents++
 	}
-	supervisor.lastObservationAt = now
-	supervisor.lastObservation = &cloned
+	supervisor.ring[supervisor.ringTotal%observationRingCapacity] = SequencedObservation{
+		Sequence:    supervisor.ringTotal + 1,
+		Epoch:       supervisor.epoch,
+		ObservedAt:  now,
+		Observation: cloned,
+	}
+	supervisor.ringTotal++
 }
 
-func (supervisor *Supervisor) setStateLocked(state State, now time.Time) {
-	if supervisor.state == state {
-		return
-	}
+func (supervisor *Supervisor) setStateLocked(state State) {
 	supervisor.state = state
-	supervisor.stateSince = now
-	supervisor.transitionCount++
 }
 
 func (supervisor *Supervisor) waitForRetry(runContext context.Context, delay time.Duration) bool {
@@ -575,51 +451,14 @@ func (supervisor *Supervisor) waitForRetry(runContext context.Context, delay tim
 	select {
 	case <-runContext.Done():
 		return false
-	case <-supervisor.retryCh:
-		return true
 	case <-timer.C():
 		return true
 	}
 }
 
-func (supervisor *Supervisor) waitForManualRetry(runContext context.Context) bool {
-	select {
-	case <-runContext.Done():
-		return false
-	case <-supervisor.retryCh:
-		supervisor.consumeRetry()
-		now := supervisor.clock.Now().UTC()
-		supervisor.mu.Lock()
-		supervisor.lastFailure = nil
-		supervisor.consecutiveFailures = 0
-		supervisor.nextRetryAt = now
-		supervisor.startupDeadline = now.Add(supervisor.config.StartupTimeout)
-		supervisor.setStateLocked(StateRetrying, now)
-		supervisor.mu.Unlock()
-		return true
-	}
-}
-
-func (supervisor *Supervisor) consumeRetry() bool {
-	supervisor.mu.Lock()
-	defer supervisor.mu.Unlock()
-	if !supervisor.retryPending {
-		return false
-	}
-	supervisor.retryPending = false
-	select {
-	case <-supervisor.retryCh:
-	default:
-	}
-	return true
-}
-
-func (supervisor *Supervisor) outcomeForAttemptError(runContext, attemptContext context.Context, err error) attemptOutcome {
+func (supervisor *Supervisor) outcomeForAttemptError(runContext context.Context, err error) attemptOutcome {
 	if runContext.Err() != nil {
 		return attemptOutcome{stopped: true}
-	}
-	if attemptContext.Err() != nil && supervisor.consumeRetry() {
-		return attemptOutcome{manual: true}
 	}
 	return attemptOutcome{failure: failureFromError(err)}
 }

@@ -13,7 +13,6 @@ import (
 
 	"github.com/stripe/stripe-cli/pkg/coop"
 	"github.com/stripe/stripe-cli/pkg/coop/helpers"
-	"github.com/stripe/stripe-cli/pkg/coop/tui"
 )
 
 type agentInfo struct {
@@ -226,9 +225,6 @@ func (rc *coopRunCmd) runInTmuxSplitWithCommand(stripeBin string, blueprintID st
 		rc.abortStartedSession(session, "store creation failed")
 		return err
 	}
-	stopVerification := startOwnedCoopVerification(session)
-	defer stopVerification()
-
 	paneCmd, cleanup, err := buildPaneCmd(session)
 	if err != nil {
 		rc.abortStartedSession(session, "agent pane command failed")
@@ -245,7 +241,7 @@ func (rc *coopRunCmd) runInTmuxSplitWithCommand(stripeBin string, blueprintID st
 	}
 
 	if blueprintID != "" {
-		return tui.Run(store, session.ID, tui.WithSandboxClaimURL(coopSandboxClaimURL()))
+		return runCoopTUI(store, session.ID)
 	}
 
 	return runCoopTUIWait(store)
@@ -289,9 +285,6 @@ func (rc *coopRunCmd) runInNewTmuxWithCommand(stripeBin string, blueprintID stri
 			return err
 		}
 	}
-	stopVerification := startOwnedCoopVerification(session)
-	defer stopVerification()
-
 	tuiCmd := fmt.Sprintf("%s coop join", shellQuote(stripeBin))
 	if blueprintID == "" {
 		tuiCmd += " --wait"
@@ -371,8 +364,6 @@ func (rc *coopRunCmd) runFallbackWithCommand(stripeBin string, blueprintID strin
 	} else {
 		fmt.Printf("Open another terminal and run: %s\n", shellCommandWithCoopEnv("stripe coop join --wait"))
 	}
-	stopVerification := startOwnedCoopVerification(session)
-	defer stopVerification()
 	fmt.Println()
 
 	paneCmd, cleanup, err := buildPaneCmd(session)
@@ -416,5 +407,5 @@ func runCoopTUIWait(store *coop.Store) error {
 			existingIDs[id] = true
 		}
 	}
-	return tui.RunWaiting(store, existingIDs, tui.WithSandboxClaimURL(coopSandboxClaimURL()))
+	return runCoopTUIWaiting(store, existingIDs)
 }

@@ -117,10 +117,6 @@ type Config struct {
 	// OutCh is the channel to send logs and statuses to for processing in other packages
 	OutCh chan websocket.IElement
 
-	// WebSocketDialer, when non-nil, is used verbatim instead of the CLI's
-	// ambient proxy/Unix-socket-aware dialer.
-	WebSocketDialer websocket.Dialer
-
 	// WebSocketReadLimit bounds one inbound message before JSON decoding. Zero
 	// preserves the existing listen behavior.
 	WebSocketReadLimit int64
@@ -210,7 +206,6 @@ func (p *Proxy) Run(ctx context.Context) error {
 			session.WebSocketAuthorizedFeature,
 			&websocket.Config{
 				Log:                          p.cfg.Log,
-				Dialer:                       p.cfg.WebSocketDialer,
 				ConnectAttemptWait:           p.cfg.WebSocketConnectAttemptWait,
 				NoWSS:                        p.cfg.NoWSS,
 				ReadLimit:                    p.cfg.WebSocketReadLimit,
@@ -538,6 +533,14 @@ func Init(ctx context.Context, cfg *Config) (*Proxy, error) {
 // on unknown filters instead of relying on Init's interactive warning.
 func IsValidEventType(eventType string) bool {
 	return eventType == "*" || validEvents[eventType]
+}
+
+// IsThinEventType reports whether eventType belongs to the thin-event
+// namespace delivered through event destinations. The server is the source of
+// truth for individual thin event types; the generated local lists are
+// advisory and can lag behind newly introduced types.
+func IsThinEventType(eventType string) bool {
+	return strings.HasPrefix(eventType, "v1.") || strings.HasPrefix(eventType, "v2.")
 }
 
 // ExtractRequestData takes an interface with request data from a Stripe event payload

@@ -3,13 +3,141 @@ package observe
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/stripe/stripe-cli/pkg/coop/verification"
 )
+
+func testRequestObservation(index int) Observation {
+	return Observation{Request: &RequestObservation{
+		RequestID: fmt.Sprintf("req_%03d", index),
+		Method:    "POST",
+		Path:      "/v1/payment_intents",
+		Status:    200,
+	}}
+}
+
+func TestSupervisorRingRetainsBurstsAcrossPolls(t *testing.T) {
+	clock := newFakeClock()
+	connection := newFakeConnection(true)
+	supervisor := newTestSupervisor(t, defaultTestConfig(StreamLogsTail), newScriptedConnector(connectStep{connection: connection}), clock)
+	require.NoError(t, supervisor.Start(context.Background()))
+	waitForState(t, supervisor, StateReady)
+
+	observations, next, missed := supervisor.ObservationsSince(0)
+	assert.Empty(t, observations)
+	assert.Zero(t, next)
+	assert.Zero(t, missed)
+
+	const burst = 50
+	for index := 1; index <= burst; index++ {
+		connection.observations <- testRequestObservation(index)
+	}
+	waitForObservedRequests(t, supervisor, burst)
+
+	observations, next, missed = supervisor.ObservationsSince(0)
+	require.Len(t, observations, burst)
+	assert.EqualValues(t, burst, next)
+	assert.Zero(t, missed)
+	for index, sequenced := range observations {
+		assert.EqualValues(t, index+1, sequenced.Sequence)
+		assert.EqualValues(t, 1, sequenced.Epoch)
+		require.NotNil(t, sequenced.Observation.Request)
+		assert.Equal(t, fmt.Sprintf("req_%03d", index+1), sequenced.Observation.Request.RequestID)
+	}
+
+	drained, next, missed := supervisor.ObservationsSince(next)
+	assert.Empty(t, drained)
+	assert.EqualValues(t, burst, next)
+	assert.Zero(t, missed)
+	stopSupervisor(t, supervisor)
+}
+
+func TestSupervisorRingOverflowReportsMissed(t *testing.T) {
+	clock := newFakeClock()
+	connection := newFakeConnection(true)
+	supervisor := newTestSupervisor(t, defaultTestConfig(StreamLogsTail), newScriptedConnector(connectStep{connection: connection}), clock)
+	require.NoError(t, supervisor.Start(context.Background()))
+	waitForState(t, supervisor, StateReady)
+
+	const overflow = 10
+	const total = observationRingCapacity + overflow
+	for index := 1; index <= total; index++ {
+		connection.observations <- testRequestObservation(index)
+	}
+	waitForObservedRequests(t, supervisor, total)
+
+	observations, next, missed := supervisor.ObservationsSince(0)
+	require.Len(t, observations, observationRingCapacity)
+	assert.EqualValues(t, overflow, missed)
+	assert.EqualValues(t, total, next)
+	assert.EqualValues(t, overflow+1, observations[0].Sequence)
+	assert.Equal(t, fmt.Sprintf("req_%03d", overflow+1), observations[0].Observation.Request.RequestID)
+	last := observations[len(observations)-1]
+	assert.EqualValues(t, total, last.Sequence)
+	assert.Equal(t, fmt.Sprintf("req_%03d", total), last.Observation.Request.RequestID)
+	stopSupervisor(t, supervisor)
+}
+
+func TestSupervisorRingCarriesEpochAcrossReconnect(t *testing.T) {
+	clock := newFakeClock()
+	first := newFakeConnection(true)
+	second := newFakeConnection(true)
+	connector := newScriptedConnector(
+		connectStep{connection: first},
+		connectStep{connection: second},
+	)
+	supervisor := newTestSupervisor(t, defaultTestConfig(StreamLogsTail), connector, clock)
+	require.NoError(t, supervisor.Start(context.Background()))
+	waitForState(t, supervisor, StateReady)
+	first.observations <- testRequestObservation(1)
+	waitForObservedRequests(t, supervisor, 1)
+
+	first.disconnect(Failure{Code: FailureStreamClosed, Transient: true})
+	waitForState(t, supervisor, StateRetrying)
+	require.Eventually(t, func() bool { return clock.timerCount() == 1 }, 2*time.Second, time.Millisecond)
+	clock.Advance(time.Second)
+	secondReady := waitForState(t, supervisor, StateReady)
+	assert.EqualValues(t, 2, secondReady.Epoch)
+	second.observations <- testRequestObservation(2)
+	waitForObservedRequests(t, supervisor, 2)
+
+	observations, next, missed := supervisor.ObservationsSince(0)
+	require.Len(t, observations, 2)
+	assert.EqualValues(t, 2, next)
+	assert.Zero(t, missed)
+	assert.EqualValues(t, 1, observations[0].Sequence)
+	assert.EqualValues(t, 1, observations[0].Epoch)
+	assert.Equal(t, "req_001", observations[0].Observation.Request.RequestID)
+	assert.EqualValues(t, 2, observations[1].Sequence)
+	assert.EqualValues(t, 2, observations[1].Epoch)
+	assert.Equal(t, "req_002", observations[1].Observation.Request.RequestID)
+	stopSupervisor(t, supervisor)
+}
+
+func TestObservationsSinceCopiesDefensively(t *testing.T) {
+	clock := newFakeClock()
+	connection := newFakeConnection(true)
+	supervisor := newTestSupervisor(t, defaultTestConfig(StreamLogsTail), newScriptedConnector(connectStep{connection: connection}), clock)
+	require.NoError(t, supervisor.Start(context.Background()))
+	waitForState(t, supervisor, StateReady)
+	connection.observations <- testRequestObservation(1)
+	waitForObservedRequests(t, supervisor, 1)
+
+	observations, _, _ := supervisor.ObservationsSince(0)
+	require.Len(t, observations, 1)
+	observations[0].Observation.Request.RequestID = "mutated"
+	observations[0].Observation.Request.Status = 500
+
+	reread, _, _ := supervisor.ObservationsSince(0)
+	require.Len(t, reread, 1)
+	assert.Equal(t, "req_001", reread[0].Observation.Request.RequestID)
+	assert.Equal(t, 200, reread[0].Observation.Request.Status)
+	stopSupervisor(t, supervisor)
+}
 
 func TestSupervisorReadyUsesOnlyExplicitSessionInput(t *testing.T) {
 	clock := newFakeClock()
@@ -27,26 +155,17 @@ func TestSupervisorReadyUsesOnlyExplicitSessionInput(t *testing.T) {
 	assert.Equal(t, config.SessionID, request.SessionID)
 	assert.Equal(t, config.APIKey, request.APIKey)
 	assert.Equal(t, config.AccountID, request.AccountID)
+	assert.Equal(t, config.DeviceName, request.DeviceName)
 	assert.Equal(t, config.EventTypes, request.EventTypes)
 	assert.Equal(t, testStart.Add(config.StartupTimeout), request.Deadline)
 
-	summary := snapshot.Summary()
-	assert.True(t, summary.Healthy)
-	assert.True(t, summary.HealthyZeroActivity)
-	assert.False(t, summary.LimitedAssurance)
-	assert.Equal(t, CoverageHealthyNoActivity, summary.Coverage)
-
+	assert.Equal(t, config.SessionID, snapshot.SessionID)
+	assert.Equal(t, StreamListen, snapshot.Stream)
+	assert.Equal(t, testStart, snapshot.ReadySince)
+	assert.EqualValues(t, 1, snapshot.Epoch)
 	encoded, err := json.Marshal(snapshot)
 	require.NoError(t, err)
 	assert.NotContains(t, string(encoded), config.APIKey)
-	encoded, err = json.Marshal(summary)
-	require.NoError(t, err)
-	assert.NotContains(t, string(encoded), config.APIKey)
-
-	result, err := supervisor.AvailabilityResult("collector.listen:1", "collector.listen")
-	require.NoError(t, err)
-	assert.Equal(t, verification.StatusPassed, result.Status)
-	assert.False(t, result.FailsOpen())
 
 	stopSupervisor(t, supervisor)
 	assert.EqualValues(t, 1, connection.closeCount.Load())
@@ -80,8 +199,6 @@ func TestSupervisorRecordsOnlyBoundedSourceCompatibleFacts(t *testing.T) {
 	require.NoError(t, supervisor.Start(context.Background()))
 	waitForState(t, supervisor, StateReady)
 
-	window, err := supervisor.BeginCoverageWindow()
-	require.NoError(t, err)
 	connection.observations <- Observation{Event: &EventObservation{
 		EventID: "evt_example", EventType: "invoice.paid", AccountID: "acct_example",
 	}}
@@ -93,22 +210,18 @@ func TestSupervisorRecordsOnlyBoundedSourceCompatibleFacts(t *testing.T) {
 		return snapshot.ObservedEvents == 1 && snapshot.DroppedObservations == 1
 	}, 2*time.Second, time.Millisecond)
 
-	assessment, err := supervisor.FinishCoverageWindow(window)
-	require.NoError(t, err)
-	assert.True(t, assessment.ContinuousHealthy)
-	assert.False(t, assessment.ZeroActivity)
-	assert.False(t, assessment.AbsenceUsable)
-	assert.EqualValues(t, 1, assessment.ObservedEvents)
-
-	snapshot := supervisor.Snapshot()
-	assert.Equal(t, CoverageHealthyActivity, snapshot.Summary().Coverage)
-	require.NotNil(t, snapshot.LastObservation)
-	snapshot.LastObservation.Event.EventID = "mutated"
-	assert.Equal(t, "evt_example", supervisor.Snapshot().LastObservation.Event.EventID)
+	observations, next, missed := supervisor.ObservationsSince(0)
+	require.Len(t, observations, 1)
+	assert.EqualValues(t, 1, next)
+	assert.Zero(t, missed)
+	require.NotNil(t, observations[0].Observation.Event)
+	assert.Nil(t, observations[0].Observation.Request)
+	assert.Equal(t, "evt_example", observations[0].Observation.Event.EventID)
+	assert.Zero(t, supervisor.Snapshot().ObservedRequests)
 	stopSupervisor(t, supervisor)
 }
 
-func TestSupervisorReconnectCreatesHealthGapAndNewEpoch(t *testing.T) {
+func TestSupervisorReconnectCreatesNewEpoch(t *testing.T) {
 	clock := newFakeClock()
 	first := newFakeConnection(true)
 	second := newFakeConnection(true)
@@ -120,104 +233,51 @@ func TestSupervisorReconnectCreatesHealthGapAndNewEpoch(t *testing.T) {
 	require.NoError(t, supervisor.Start(context.Background()))
 	firstReady := waitForState(t, supervisor, StateReady)
 	assert.EqualValues(t, 1, firstReady.Epoch)
-	first.observations <- Observation{Request: &RequestObservation{
-		RequestID: "req_before_reconnect", Method: "POST", Path: "/v1/payment_intents", Status: 200,
-	}}
-	require.Eventually(t, func() bool {
-		return supervisor.Snapshot().ObservedRequests == 1
-	}, 2*time.Second, time.Millisecond)
+	first.observations <- testRequestObservation(1)
+	waitForObservedRequests(t, supervisor, 1)
 
-	window, err := supervisor.BeginCoverageWindow()
-	require.NoError(t, err)
 	clock.Advance(time.Second)
 	first.disconnect(Failure{Code: FailureStreamClosed, Transient: true})
 	retrying := waitForState(t, supervisor, StateRetrying)
 	require.NotNil(t, retrying.LastFailure)
 	assert.Equal(t, FailureStreamClosed, retrying.LastFailure.Code)
+	assert.True(t, retrying.LastFailure.Transient)
 	assert.Equal(t, testStart.Add(2*time.Second), retrying.NextRetryAt)
-	assert.EqualValues(t, 1, retrying.GapSequence)
-	assert.True(t, retrying.Summary().LimitedAssurance)
-
-	assessment, err := supervisor.FinishCoverageWindow(window)
-	require.NoError(t, err)
-	assert.False(t, assessment.ContinuousHealthy)
-	assert.True(t, assessment.ZeroActivity)
-	assert.False(t, assessment.AbsenceUsable)
-	assert.Equal(t, CoverageGapHealthChanged, assessment.GapReason)
-
-	result, err := supervisor.AvailabilityResult("collector.logs:retry", "collector.logs")
-	require.NoError(t, err)
-	assert.Equal(t, verification.StatusUnavailable, result.Status)
-	assert.True(t, result.FailsOpen())
+	assert.EqualValues(t, 1, retrying.ConsecutiveFailures)
+	assert.EqualValues(t, 1, retrying.Epoch)
+	assert.True(t, retrying.ReadySince.IsZero())
 
 	require.Eventually(t, func() bool { return clock.timerCount() == 1 }, 2*time.Second, time.Millisecond)
 	clock.Advance(time.Second)
 	secondReady := waitForState(t, supervisor, StateReady)
 	assert.EqualValues(t, 2, secondReady.Epoch)
 	assert.EqualValues(t, 1, secondReady.ObservedRequests)
-	assert.Zero(t, secondReady.EpochRequests)
-	assert.Equal(t, CoverageHealthyNoActivity, secondReady.Summary().Coverage)
-	epochs := supervisor.HealthEpochs()
-	require.Len(t, epochs, 2)
-	assert.Equal(t, FailureStreamClosed, epochs[0].EndCode)
-	assert.False(t, epochs[0].EndedAt.IsZero())
-	assert.True(t, epochs[1].EndedAt.IsZero())
-
-	window, err = supervisor.BeginCoverageWindow()
-	require.NoError(t, err)
-	assessment, err = supervisor.FinishCoverageWindow(window)
-	require.NoError(t, err)
-	assert.True(t, assessment.ContinuousHealthy)
-	assert.True(t, assessment.ZeroActivity)
-	assert.True(t, assessment.AbsenceUsable)
+	assert.Nil(t, secondReady.LastFailure)
+	// The failure streak resets only after a stable ready period, so the
+	// counter still reports the streak that preceded this reconnect.
+	assert.EqualValues(t, 1, secondReady.ConsecutiveFailures)
 	stopSupervisor(t, supervisor)
 }
 
-func TestPermanentFailureWaitsForManualRetry(t *testing.T) {
+func TestPermanentFailureBecomesUnhealthyUntilStopped(t *testing.T) {
 	clock := newFakeClock()
-	ready := newFakeConnection(true)
 	connector := newScriptedConnector(
-		connectStep{err: &ConnectorError{Failure: Failure{Code: FailureAuthenticationRejected}}},
-		connectStep{connection: ready},
+		connectStep{err: ConnectorError{Failure: Failure{Code: FailureAuthenticationRejected}}},
 	)
 	supervisor := newTestSupervisor(t, defaultTestConfig(StreamLogsTail), connector, clock)
 	require.NoError(t, supervisor.Start(context.Background()))
 	unhealthy := waitForState(t, supervisor, StateUnhealthy)
 	require.NotNil(t, unhealthy.LastFailure)
 	assert.Equal(t, FailureAuthenticationRejected, unhealthy.LastFailure.Code)
-	assert.True(t, unhealthy.Summary().LimitedAssurance)
+	assert.False(t, unhealthy.LastFailure.Transient)
 	assert.True(t, unhealthy.NextRetryAt.IsZero())
+	assert.True(t, unhealthy.ReadySince.IsZero())
 
-	result, err := supervisor.AvailabilityResult("collector.logs:auth", "collector.logs")
-	require.NoError(t, err)
-	assert.False(t, result.FailsOpen())
-	assert.False(t, result.Transient)
-	_, err = supervisor.BeginCoverageWindow()
-	assert.ErrorIs(t, err, ErrNotReady)
-
-	require.NoError(t, supervisor.RetryNow())
-	readySnapshot := waitForState(t, supervisor, StateReady)
-	assert.EqualValues(t, 1, readySnapshot.Epoch)
-	connector.waitForCalls(t, 2)
+	// The run loop parks until cancellation; no retry attempt may be scheduled.
+	assert.Zero(t, clock.timerCount())
 	stopSupervisor(t, supervisor)
-}
-
-func TestRetryNowCoalescesPendingSignals(t *testing.T) {
-	clock := newFakeClock()
-	supervisor := newTestSupervisor(t, defaultTestConfig(StreamLogsTail), newScriptedConnector(), clock)
-	supervisor.mu.Lock()
-	supervisor.running = true
-	supervisor.mu.Unlock()
-
-	require.NoError(t, supervisor.RetryNow())
-	require.NoError(t, supervisor.RetryNow())
-	supervisor.mu.Lock()
-	assert.True(t, supervisor.retryPending)
-	assert.Len(t, supervisor.retryCh, 1)
-	supervisor.running = false
-	supervisor.retryPending = false
-	<-supervisor.retryCh
-	supervisor.mu.Unlock()
+	assert.Equal(t, StateStopped, supervisor.Snapshot().State)
+	assert.Len(t, connector.Requests(), 1)
 }
 
 func TestStartupTimeoutFailsOpenAndStopPreventsLateReadiness(t *testing.T) {
@@ -230,12 +290,10 @@ func TestStartupTimeoutFailsOpenAndStopPreventsLateReadiness(t *testing.T) {
 	retrying := waitForFailure(t, supervisor, FailureStartupTimeout)
 	require.NotNil(t, retrying.LastFailure)
 	assert.Equal(t, FailureStartupTimeout, retrying.LastFailure.Code)
+	assert.True(t, retrying.LastFailure.Transient)
 	assert.EqualValues(t, 1, retrying.ConsecutiveFailures)
-	result, err := supervisor.AvailabilityResult("collector.logs:timeout", "collector.logs")
-	require.NoError(t, err)
-	assert.True(t, result.FailsOpen())
 	stopSupervisor(t, supervisor)
-	assert.Empty(t, supervisor.HealthEpochs())
+	assert.Equal(t, StateStopped, supervisor.Snapshot().State)
 
 	lateClock := newFakeClock()
 	lateConnection := newFakeConnection(false)
@@ -246,7 +304,7 @@ func TestStartupTimeoutFailsOpenAndStopPreventsLateReadiness(t *testing.T) {
 	stopSupervisor(t, late)
 	lateConnection.ready <- nil
 	assert.Equal(t, StateStopped, late.Snapshot().State)
-	assert.Empty(t, late.HealthEpochs())
+	assert.Zero(t, late.Snapshot().Epoch)
 	assert.EqualValues(t, 1, lateConnection.closeCount.Load())
 
 	lateConnectClock := newFakeClock()
@@ -258,6 +316,6 @@ func TestStartupTimeoutFailsOpenAndStopPreventsLateReadiness(t *testing.T) {
 	require.NoError(t, lateConnect.Start(context.Background()))
 	lateConnectConnector.waitForCalls(t, 1)
 	stopSupervisor(t, lateConnect)
-	assert.Empty(t, lateConnect.HealthEpochs())
+	assert.Equal(t, StateStopped, lateConnect.Snapshot().State)
 	assert.EqualValues(t, 1, lateConnectConnection.closeCount.Load())
 }

@@ -1,33 +1,28 @@
 # Co-op verification contract
 
-This package provides policy-neutral building blocks for future Co-op
-verification features. It is intentionally not imported by the current Co-op
-workflow, so adding it does not change session behavior or completion rules.
+This package defines the policy-neutral result contract for Co-op passive
+verification. Results are produced by the session-owned passive observer
+(`pkg/coop/observe`), run by the Co-op TUI process through
+`pkg/coop/verification/runtime`, and stored on session nodes as
+`SessionNode.VerificationResults`. They are advisory only: no result confirms,
+gates, reopens, or advances workflow.
 
 The contract includes:
 
 - opaque, validated `CheckID` and `ResultID` values;
-- `passed`, `failed`, `not_observed`, `unavailable`, and `skipped` statuses;
+- `passed`, `failed`, `inconclusive`, `not_observed`, `unavailable`, and
+  `skipped` statuses;
 - integration, application, collector, coverage, and safety failure domains;
 - safe, identifier, fingerprint, and sensitive evidence classifications;
-- a narrow fail-open predicate for transient, CLI-owned collector outages;
+- a narrow fail-open predicate (`Result.FailsOpen`) that is true only for a
+  transient, CLI-owned collector outage — a classification, never a pass;
 - versioned result envelopes with deterministic JSON serialization.
 
-`not_observed` means the relevant evidence was absent or ambiguous.
-`unavailable` means the evidence source could not be evaluated. Both are
-indeterminate and remain distinct from a pass. `skipped` records intentional
-non-execution and is not treated as indeterminate.
+`not_observed` means the expected activity was not seen during healthy
+coverage. `unavailable` means the evidence source could not be evaluated.
+Both are indeterminate and remain distinct from a pass.
 
-`Result.FailsOpen` is a classification primitive, not a workflow policy. It is
-true only for an `unavailable` result produced by the CLI, attributed to the
-collector, and marked transient. Consumers decide how to present or act on the
-result and must never rewrite it as `passed`.
-
-`ResultSet.MarshalDeterministic` validates the envelope and orders results by
-result ID and evidence by key without mutating caller-owned slices. IDs are
-durable API values: producers should persist and reuse them rather than build
-them from display text, timestamps, or random data.
-
-Evidence classes describe handling requirements only. They do not redact the
-`Value` field, prove a claim, or authorize displaying a value. Producers must
-keep credentials and other secret material out of durable result data.
+The `Sanitizer` and `UpsertResult` keep durable results bounded (at most 24
+per node, details ≤240 bytes) and strip credential material before results
+reach disk. `AgentSummaries` is the bounded, evidence-free projection shared
+with agent-facing command responses.

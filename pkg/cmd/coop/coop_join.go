@@ -8,7 +8,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
-	"github.com/stripe/stripe-cli/pkg/coop/tui"
 )
 
 type coopJoinCmd struct {
@@ -52,7 +51,7 @@ func (jc *coopJoinCmd) runJoinCmd(cmd *cobra.Command, args []string) error {
 				existingIDs[id] = true
 			}
 		}
-		return tui.RunWaiting(store, existingIDs, tui.WithSandboxClaimURL(coopSandboxClaimURL()))
+		return runCoopTUIWaiting(store, existingIDs)
 	}
 
 	var session *coop.Session
@@ -87,7 +86,7 @@ func (jc *coopJoinCmd) runJoinCmd(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 	}
 
-	return tui.Run(store, session.ID, tui.WithSandboxClaimURL(coopSandboxClaimURL()))
+	return runCoopTUI(store, session.ID)
 }
 
 type sessionChoice struct {

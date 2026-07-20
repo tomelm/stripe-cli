@@ -4,7 +4,6 @@ package runtime
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
@@ -50,10 +49,10 @@ type Store interface {
 	Update(id string, fn func(*coop.Session) error) (*coop.Session, error)
 }
 
-// Runner owns registered providers for the lifetime of one session.
+// Runner owns one provider for the lifetime of one session.
 type Runner struct {
 	store        Store
-	providers    []Provider
+	provider     Provider
 	sanitizer    core.Sanitizer
 	pollInterval time.Duration
 }
@@ -79,10 +78,11 @@ func WithPollInterval(interval time.Duration) Option {
 	}
 }
 
-// New constructs a Runner without starting providers.
-func New(store Store, options ...Option) *Runner {
+// New constructs a Runner for one provider without starting it.
+func New(store Store, provider Provider, options ...Option) *Runner {
 	runner := &Runner{
 		store:        store,
+		provider:     provider,
 		sanitizer:    core.NewSanitizer(),
 		pollInterval: defaultSessionPollInterval,
 	}
@@ -92,18 +92,9 @@ func New(store Store, options ...Option) *Runner {
 	return runner
 }
 
-// Register adds a provider to this Runner before Run is called.
-func (runner *Runner) Register(provider Provider) error {
-	if provider == nil {
-		return fmt.Errorf("verification provider is required")
-	}
-	runner.providers = append(runner.providers, provider)
-	return nil
-}
-
-// Run opens sessionID, starts every registered provider, and waits until all
-// providers finish, the caller cancels, or the session reaches a terminal state.
-// Provider errors are advisory and do not change the session lifecycle.
+// Run opens sessionID, starts the provider, and waits until it finishes, the
+// caller cancels, or the session reaches a terminal state. Provider errors are
+// advisory and do not change the session lifecycle.
 func (runner *Runner) Run(ctx context.Context, sessionID string) error {
 	if ctx == nil {
 		return fmt.Errorf("verification context is required")
@@ -115,7 +106,7 @@ func (runner *Runner) Run(ctx context.Context, sessionID string) error {
 	if err != nil {
 		return err
 	}
-	if session.Status != coop.SessionActive || len(runner.providers) == 0 {
+	if session.Status != coop.SessionActive || runner.provider == nil {
 		return nil
 	}
 
@@ -123,8 +114,6 @@ func (runner *Runner) Run(ctx context.Context, sessionID string) error {
 	runContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	var providers sync.WaitGroup
-	providers.Add(len(runner.providers))
 	done := make(chan struct{})
 	emit := func(nodeNumber int, result core.Result) error {
 		_, err := runner.store.Update(sessionID, func(current *coop.Session) error {
@@ -136,16 +125,9 @@ func (runner *Runner) Run(ctx context.Context, sessionID string) error {
 		})
 		return err
 	}
-	for _, registered := range runner.providers {
-		provider := registered
-		go func() {
-			defer providers.Done()
-			_ = provider.Run(runContext, cloneSession(providerSession), emit)
-		}()
-	}
 	go func() {
-		providers.Wait()
-		close(done)
+		defer close(done)
+		_ = runner.provider.Run(runContext, cloneSession(providerSession), emit)
 	}()
 
 	ticker := time.NewTicker(runner.pollInterval)
@@ -159,11 +141,11 @@ func (runner *Runner) Run(ctx context.Context, sessionID string) error {
 		case <-done:
 			return nil
 		case <-ticker.C:
+			// A transient store read failure must not end verification for the
+			// rest of the session; skip the poll instead.
 			current, err := runner.store.Read(sessionID)
 			if err != nil {
-				cancel()
-				<-done
-				return err
+				continue
 			}
 			if current.Status != coop.SessionActive || current.IsComplete() {
 				cancel()

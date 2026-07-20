@@ -1,8 +1,12 @@
-// Package observe provides transport-neutral passive Stripe stream collectors.
+// Package observe provides the passive Stripe stream collectors behind Co-op
+// session verification. It watches a session's expected API requests and
+// events over the CLI's in-process logs-tail and listen transports and reports
+// advisory, bounded results.
 //
 // The package accepts credentials and stream configuration only through an
-// explicit per-session Config. It never reads Stripe login state, environment
-// variables, configuration files, or credentials on its own.
+// explicit per-session Config; it never reads Stripe login state or
+// configuration files on its own. Transport routing follows the CLI's
+// standard HTTP and WebSocket paths.
 package observe
 
 import (
@@ -137,18 +141,17 @@ func (err ConnectorError) CollectorFailure() Failure {
 // Config is explicit per-session collector input. APIKey is kept in memory and
 // excluded from JSON. There is deliberately no fallback to implicit login.
 type Config struct {
-	SessionID          string        `json:"session_id"`
-	Stream             Stream        `json:"stream"`
-	APIKey             string        `json:"-"`
-	DeviceName         string        `json:"device_name"`
-	AccountID          string        `json:"account_id,omitempty"`
-	RequestMethods     []string      `json:"request_methods,omitempty"`
-	RequestPaths       []string      `json:"request_paths,omitempty"`
-	EventTypes         []string      `json:"event_types,omitempty"`
-	StartupTimeout     time.Duration `json:"startup_timeout"`
-	ObservationTimeout time.Duration `json:"observation_timeout"`
-	StableReadyPeriod  time.Duration `json:"stable_ready_period"`
-	Backoff            BackoffPolicy `json:"backoff"`
+	SessionID         string        `json:"session_id"`
+	Stream            Stream        `json:"stream"`
+	APIKey            string        `json:"-"`
+	DeviceName        string        `json:"device_name"`
+	AccountID         string        `json:"account_id,omitempty"`
+	RequestMethods    []string      `json:"request_methods,omitempty"`
+	RequestPaths      []string      `json:"request_paths,omitempty"`
+	EventTypes        []string      `json:"event_types,omitempty"`
+	StartupTimeout    time.Duration `json:"startup_timeout"`
+	StableReadyPeriod time.Duration `json:"stable_ready_period"`
+	Backoff           BackoffPolicy `json:"backoff"`
 }
 
 // Validate checks injected configuration without reading external state.
@@ -193,14 +196,13 @@ func (config Config) Validate() error {
 		if seenEvents[eventType] {
 			return fmt.Errorf("event_types[%d] %q is duplicated", index, eventType)
 		}
-		if config.Stream == StreamListen && !proxy.IsValidEventType(eventType) {
+		if config.Stream == StreamListen && !proxy.IsValidEventType(eventType) && !proxy.IsThinEventType(eventType) {
 			return fmt.Errorf("event_types[%d] %q is not a supported listen event", index, eventType)
 		}
 		seenEvents[eventType] = true
 	}
 	for name, value := range map[string]time.Duration{
 		"startup_timeout":     config.StartupTimeout,
-		"observation_timeout": config.ObservationTimeout,
 		"stable_ready_period": config.StableReadyPeriod,
 	} {
 		if value <= 0 || value > maxConfiguredDuration {
@@ -353,13 +355,8 @@ type Connection interface {
 	Close() error
 }
 
-var (
-	ErrAlreadyRunning = errors.New("passive observer is already running")
-	ErrNotRunning     = errors.New("passive observer is not running")
-	ErrNotReady       = errors.New("passive observer is not ready")
-	ErrUnknownWindow  = errors.New("unknown passive observer coverage window")
-	ErrWindowCapacity = errors.New("passive observer coverage window capacity reached")
-)
+// ErrAlreadyRunning reports a second Start on a running supervisor.
+var ErrAlreadyRunning = errors.New("passive observer is already running")
 
 func validateConfigText(field, value string, maxBytes int, allowEmpty bool) error {
 	if value == "" {

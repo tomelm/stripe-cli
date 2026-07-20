@@ -103,6 +103,9 @@ func (m Model) renderReviewCardWithMaxHeight(maxHeight int) string {
 	if verified := m.reviewVerificationLabel(target.nodeNumbers); verified != "" {
 		lines = append(lines, m.theme.MutedStyle.Render("Agent verified: ")+verified)
 	}
+	if observed := m.reviewPassiveLabel(target.nodeNumbers); observed != "" {
+		lines = append(lines, m.theme.MutedStyle.Render("Stripe observed: ")+observed)
+	}
 	if command := m.reviewCommandLabel(target.nodeNumbers); command != "" {
 		lines = append(lines, m.theme.MutedStyle.Render("Run: ")+command)
 	}

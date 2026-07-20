@@ -236,6 +236,9 @@ pkg/coop/
   blueprints/       — Embedded JSON blueprints
   colors/           — Sail Design System palette helpers
   followups/        — Built-in guided follow-up definitions
+  observe/          — Passive Stripe request/event observation (session-owned collectors)
+  verification/     — Advisory verification result contract + sanitizer
+  verification/runtime/ — Runs the passive observer for one session, persists results
 
 pkg/coop/tui/
   app.go            — tea.Program entry points
@@ -254,6 +257,8 @@ pkg/coop/tui/
   helpers.go        — Word wrap, formatting, browser open
   messages.go       — Custom message types
   theme.go          — Sail Design System colors
+  observer.go       — Session observer ownership (start on join/discovery, stop on exit)
+  passive.go        — Passive verification result rendering helpers
 
 pkg/coop/workflow/
   service.go        — Shared lifecycle operations for agent commands and TUI review actions
@@ -270,6 +275,7 @@ pkg/cmd/coop/
   coop_run.go       — Agent-facing session creator
   coop_agent.go     — Typed agent lifecycle commands
   coop_join.go      — TUI launcher
+  coop_observer.go  — Passive observation glue injected into the TUI
   coop_status.go    — Session status display
   coop_stop.go      — End session
   coop_recommend.go — Blueprint discovery

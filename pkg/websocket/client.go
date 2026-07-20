@@ -700,15 +700,6 @@ func NewClient(url string, webSocketID string, websocketAuthorizedFeature string
 	}
 }
 
-// NewDirectDialer returns a WebSocket dialer that never consults environment
-// proxy variables or STRIPE_CLI_UNIX_SOCKET.
-func NewDirectDialer() Dialer {
-	return &ws.Dialer{
-		HandshakeTimeout: 10 * time.Second,
-		Subprotocols:     subprotocols[:],
-	}
-}
-
 //
 // Private constants
 //

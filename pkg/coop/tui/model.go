@@ -69,6 +69,10 @@ type Model struct {
 
 	isDark  bool
 	focused bool // true when terminal has focus (default: true, updated via FocusMsg/BlurMsg)
+
+	// observer owns passive session observation for this TUI process. Held by
+	// pointer so bubbletea value copies of the model share one controller.
+	observer *observerController
 }
 
 func newThemedSpinner(t Theme) spinner.Model {
@@ -206,6 +210,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.waiting = false
 		m.waitingMessage = ""
 		m.sessionID = msg.sessionID
+		if m.observer != nil {
+			m.observer.Watch(msg.sessionID)
+		}
 		m.resetSessionViewState()
 		return m, m.loadSession()
 

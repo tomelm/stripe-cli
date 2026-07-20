@@ -1,12 +1,10 @@
 package observe
 
 import (
-	"fmt"
 	"regexp"
 	"sort"
 	"strings"
 
-	"github.com/stripe/stripe-cli/pkg/coop"
 	verificationruntime "github.com/stripe/stripe-cli/pkg/coop/verification/runtime"
 )
 
@@ -23,26 +21,16 @@ type EventFilter struct {
 	EventType  string `json:"event_type"`
 }
 
-// SessionFilters is the deterministic filter metadata derived from a session's
-// selected canonical blueprint.
+// SessionFilters is the deterministic filter metadata derived from the
+// session's stored node metadata.
 type SessionFilters struct {
 	Requests []RequestFilter `json:"requests"`
 	Events   []EventFilter   `json:"events"`
 }
 
-// FiltersForBlueprint loads the selected embedded blueprint and derives its
-// canonical filter metadata.
-func FiltersForBlueprint(blueprintID string) (SessionFilters, error) {
-	blueprint, err := coop.LoadBlueprint(blueprintID)
-	if err != nil {
-		return SessionFilters{}, fmt.Errorf("loading canonical blueprint filters: %w", err)
-	}
-	session := coop.NewSessionFromBlueprint(blueprint, "filter_metadata", nil, nil)
-	return FiltersForSession(verificationruntime.SessionMetadata(session)), nil
-}
-
-// FiltersForSession derives request and event filters without inspecting code
-// or making network requests.
+// FiltersForSession derives request and event filters from the immutable
+// session metadata handed to providers, without inspecting code or making
+// network requests.
 func FiltersForSession(session verificationruntime.Session) SessionFilters {
 	filters := SessionFilters{
 		Requests: []RequestFilter{},

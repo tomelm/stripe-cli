@@ -58,12 +58,6 @@ func (clock *fakeClock) Advance(duration time.Duration) {
 	}
 }
 
-func (clock *fakeClock) Set(now time.Time) {
-	clock.mu.Lock()
-	clock.now = now
-	clock.mu.Unlock()
-}
-
 func (clock *fakeClock) timerCount() int {
 	clock.mu.Lock()
 	defer clock.mu.Unlock()
@@ -205,13 +199,12 @@ func (connection *fakeConnection) disconnect(failure Failure) {
 
 func defaultTestConfig(stream Stream) Config {
 	return Config{
-		SessionID:          "session-1",
-		Stream:             stream,
-		APIKey:             "explicit-session-key",
-		DeviceName:         "test-device",
-		StartupTimeout:     5 * time.Second,
-		ObservationTimeout: 10 * time.Second,
-		StableReadyPeriod:  2 * time.Second,
+		SessionID:         "session-1",
+		Stream:            stream,
+		APIKey:            "explicit-session-key",
+		DeviceName:        "test-device",
+		StartupTimeout:    5 * time.Second,
+		StableReadyPeriod: 2 * time.Second,
 		Backoff: BackoffPolicy{
 			InitialDelay:   time.Second,
 			MaximumDelay:   8 * time.Second,
@@ -245,6 +238,13 @@ func waitForFailure(t *testing.T, supervisor *Supervisor, code FailureCode) Snap
 		return snapshot.LastFailure != nil && snapshot.LastFailure.Code == code
 	}, 2*time.Second, time.Millisecond)
 	return snapshot
+}
+
+func waitForObservedRequests(t *testing.T, supervisor *Supervisor, count uint64) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		return supervisor.Snapshot().ObservedRequests == count
+	}, 2*time.Second, time.Millisecond)
 }
 
 func stopSupervisor(t *testing.T, supervisor *Supervisor) {
