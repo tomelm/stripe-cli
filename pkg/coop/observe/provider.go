@@ -100,25 +100,36 @@ type providerTarget struct {
 	requests   []RequestFilter
 	events     []EventFilter
 
-	started          bool
-	actionStart      time.Time
-	attemptEpoch     uint64
-	covered          bool
-	gapReason        string
-	seenPassed       bool
-	seenFailed       bool
-	lastFailedStatus int
-	settleDeadline   time.Time
-	finalized        bool
-	final            bool
-	lastState        coop.NodeState
-	lastResultKey    string
+	// stepScoped targets (asyncHandler event nodes) observe from their step's
+	// start so events fired during earlier nodes in the step still count. They
+	// absorb silently while their node is pending.
+	stepScoped bool
+	// mirrorNodes are uiComponent nodes earlier in the same step with no
+	// filters of their own; an observed event is attributed to them as an
+	// advisory downstream pass.
+	mirrorNodes []int
+
+	started            bool
+	actionStart        time.Time
+	attemptEpoch       uint64
+	covered            bool
+	gapReason          string
+	seenPassed         bool
+	seenFailed         bool
+	lastFailedStatus   int
+	settleDeadline     time.Time
+	finalized          bool
+	final              bool
+	mirrorDelivered    bool
+	mirrorResetPending bool
+	lastState          coop.NodeState
+	lastResultKey      string
 }
 
 // Run owns collectors until cancellation or session completion.
 func (provider *Provider) Run(ctx context.Context, session verificationruntime.Session, emit verificationruntime.Emit) error {
 	filters := FiltersForSession(session)
-	targets := targetsForFilters(filters)
+	targets := targetsForFilters(filters, session)
 	if len(targets) == 0 {
 		return nil
 	}
@@ -225,6 +236,7 @@ func (provider *Provider) reconcile(
 			missed:   missed,
 		}
 	}
+	windows := stepWindows(session)
 	for _, target := range targets {
 		if collectors[target.stream] == nil {
 			continue
@@ -233,13 +245,35 @@ func (provider *Provider) reconcile(
 		if err != nil {
 			continue
 		}
-		target.reconcile(node, deliveries[target.stream], now, settle, force, emit)
+		target.reconcile(node, deliveries[target.stream], windows[target.nodeNumber], now, settle, force, emit)
 	}
+}
+
+// stepWindows maps each 1-based node number to the earliest StartedAt among
+// its step's nodes (zero when no node in the step has started). StartedAt is
+// never reset by reopen, so the window is stable for the session's life.
+func stepWindows(session *coop.Session) map[int]time.Time {
+	windows := make(map[int]time.Time, session.TotalNodes())
+	nodeNumber := 0
+	for _, step := range session.Steps {
+		var earliest time.Time
+		for _, node := range step.Nodes {
+			if node.StartedAt != nil && (earliest.IsZero() || node.StartedAt.Before(earliest)) {
+				earliest = node.StartedAt.UTC()
+			}
+		}
+		for range step.Nodes {
+			nodeNumber++
+			windows[nodeNumber] = earliest
+		}
+	}
+	return windows
 }
 
 func (target *providerTarget) reconcile(
 	node *coop.SessionNode,
 	delivery streamDelivery,
+	stepStart time.Time,
 	now time.Time,
 	settle time.Duration,
 	force bool,
@@ -250,22 +284,50 @@ func (target *providerTarget) reconcile(
 
 	switch state {
 	case coop.NodePending:
-		return
+		// Step-scoped targets absorb silently while their node is pending so
+		// events fired during earlier nodes in the step are not lost.
+		if !target.stepScoped || stepStart.IsZero() {
+			return
+		}
+		if !target.started {
+			target.beginAttempt(stepStart, delivery.snapshot)
+		}
+		target.absorb(delivery)
 	case coop.NodeActive:
 		if !target.started {
-			target.beginAttempt(node, delivery.snapshot, now, false)
+			target.beginAttempt(target.attemptStart(node, stepStart, now), delivery.snapshot)
 		} else if target.lastState != coop.NodeActive && target.lastState != coop.NodePending {
 			// The node was rejected in review and reopened; start a clean attempt.
-			target.beginAttempt(node, delivery.snapshot, now, true)
+			target.reopenAttempt(now, delivery.snapshot)
 		}
 		target.absorb(delivery)
 		target.emitOutcome(delivery.snapshot, false, emit)
-	case coop.NodeReview, coop.NodeDone:
+		target.emitMirrors(emit)
+	case coop.NodeReview:
+		// Review streams indefinitely: observations keep upgrading the result
+		// (indeterminate -> passed/failed, failed -> passed) until the human
+		// decides. Latch only when forced (session terminal or shutdown).
 		if target.finalized {
 			return
 		}
 		if !target.started {
-			target.beginAttempt(node, delivery.snapshot, now, false)
+			target.beginAttempt(target.attemptStart(node, stepStart, now), delivery.snapshot)
+		}
+		target.absorb(delivery)
+		if force {
+			target.finalized = target.emitOutcome(delivery.snapshot, true, emit)
+		} else {
+			target.emitOutcome(delivery.snapshot, false, emit)
+		}
+		target.emitMirrors(emit)
+	case coop.NodeDone:
+		// Done arms the settle window on entry (auto-confirm nodes reach Done
+		// without ever entering review), then latches one final result.
+		if target.finalized {
+			return
+		}
+		if !target.started {
+			target.beginAttempt(target.attemptStart(node, stepStart, now), delivery.snapshot)
 		}
 		target.absorb(delivery)
 		if target.settleDeadline.IsZero() {
@@ -276,6 +338,7 @@ func (target *providerTarget) reconcile(
 			// so a transient store failure retries on the next tick.
 			target.finalized = target.emitOutcome(delivery.snapshot, true, emit)
 		}
+		target.emitMirrors(emit)
 	case coop.NodeSkipped:
 		if !target.finalized {
 			target.finalized = target.emitResult(delivery.snapshot, verification.StatusSkipped, "Passive verification skipped with the node.", "", false, emit)
@@ -283,13 +346,21 @@ func (target *providerTarget) reconcile(
 	}
 }
 
-// beginAttempt starts one observation attempt. A reopened node observes from
-// now; a freshly activated node observes from its recorded start time.
-func (target *providerTarget) beginAttempt(node *coop.SessionNode, snapshot Snapshot, now time.Time, reopened bool) {
-	start := now
-	if !reopened && node.StartedAt != nil {
-		start = node.StartedAt.UTC()
+// attemptStart picks the observation window start for a fresh attempt:
+// step-scoped targets observe from their step's start, others from the node's
+// recorded start time.
+func (target *providerTarget) attemptStart(node *coop.SessionNode, stepStart, now time.Time) time.Time {
+	if target.stepScoped && !stepStart.IsZero() {
+		return stepStart
 	}
+	if node.StartedAt != nil {
+		return node.StartedAt.UTC()
+	}
+	return now
+}
+
+// beginAttempt starts one observation attempt from start.
+func (target *providerTarget) beginAttempt(start time.Time, snapshot Snapshot) {
 	target.started = true
 	target.actionStart = start
 	target.attemptEpoch = snapshot.Epoch
@@ -305,6 +376,16 @@ func (target *providerTarget) beginAttempt(node *coop.SessionNode, snapshot Snap
 	target.finalized = false
 	target.final = false
 	target.lastResultKey = ""
+}
+
+// reopenAttempt starts a clean attempt after a rejection reopened the node.
+// Delivered downstream mirrors are reset so stale attribution does not
+// survive a step redo.
+func (target *providerTarget) reopenAttempt(now time.Time, snapshot Snapshot) {
+	wasDelivered := target.mirrorDelivered
+	target.beginAttempt(now, snapshot)
+	target.mirrorDelivered = false
+	target.mirrorResetPending = wasDelivered
 }
 
 // absorb folds one poll's collector state into the current attempt.
@@ -387,10 +468,59 @@ func (target *providerTarget) emitOutcome(snapshot Snapshot, final bool, emit ve
 }
 
 func (target *providerTarget) passedDetail() string {
-	if target.stream == StreamLogsTail {
-		return "Matching API request observed on Stripe."
+	if target.stream != StreamLogsTail {
+		return "Matching event observed on Stripe; this does not confirm your application processed it."
 	}
-	return "Matching event observed on Stripe; this does not confirm your application processed it."
+	if target.seenFailed {
+		return fmt.Sprintf("Matching API request observed on Stripe (after earlier failed attempts, HTTP %s); this does not confirm it came from your application.", httpStatusClass(target.lastFailedStatus))
+	}
+	return "Matching API request observed on Stripe; this does not confirm it came from your application."
+}
+
+// mirrorDetail wordings for downstream uiComponent attribution.
+const (
+	mirrorPassedDetail = "Downstream event observed on Stripe; this does not confirm your application processed it."
+	mirrorResetDetail  = "No downstream event observed on Stripe yet."
+)
+
+// emitMirrors attributes an observed event to the step's earlier uiComponent
+// nodes as an advisory downstream pass, and clears stale attribution after a
+// reopened attempt. Failed writes retry on the next poll.
+func (target *providerTarget) emitMirrors(emit verificationruntime.Emit) {
+	if len(target.mirrorNodes) == 0 {
+		return
+	}
+	if target.mirrorResetPending {
+		if target.emitMirrorResults(verification.StatusNotObserved, mirrorResetDetail, emit) {
+			target.mirrorResetPending = false
+		}
+		return
+	}
+	if target.seenPassed && !target.mirrorDelivered {
+		if target.emitMirrorResults(verification.StatusPassed, mirrorPassedDetail, emit) {
+			target.mirrorDelivered = true
+		}
+	}
+}
+
+func (target *providerTarget) emitMirrorResults(status verification.Status, detail string, emit verificationruntime.Emit) bool {
+	delivered := true
+	for _, nodeNumber := range target.mirrorNodes {
+		result := verification.Result{
+			ID:      "passive.event.downstream",
+			CheckID: "passive.event.downstream",
+			Source:  verification.SourceCLI,
+			Status:  status,
+			Detail:  detail,
+		}
+		if status == verification.StatusNotObserved {
+			result.FailureDomain = verification.FailureDomainCoverage
+		}
+		if emit(nodeNumber, result) != nil {
+			delivered = false
+		}
+	}
+	return delivered
 }
 
 func httpStatusClass(status int) string {
@@ -470,7 +600,11 @@ func (target *providerTarget) filterCount() int {
 	return len(target.requests) + len(target.events)
 }
 
-func targetsForFilters(filters SessionFilters) []*providerTarget {
+func targetsForFilters(filters SessionFilters, session verificationruntime.Session) []*providerTarget {
+	nodes := make(map[int]verificationruntime.Node, len(session.Nodes))
+	for _, node := range session.Nodes {
+		nodes[node.Number] = node
+	}
 	byKey := make(map[string]*providerTarget)
 	var targets []*providerTarget
 	for _, filter := range filters.Requests {
@@ -487,13 +621,39 @@ func targetsForFilters(filters SessionFilters) []*providerTarget {
 		key := fmt.Sprintf("%s:%d", StreamListen, filter.NodeNumber)
 		target := byKey[key]
 		if target == nil {
-			target = &providerTarget{nodeNumber: filter.NodeNumber, stream: StreamListen}
+			target = &providerTarget{
+				nodeNumber: filter.NodeNumber,
+				stream:     StreamListen,
+				stepScoped: nodes[filter.NodeNumber].Type == coop.NodeAsyncHandler,
+			}
+			target.mirrorNodes = mirrorNodesFor(nodes, filter.NodeNumber)
 			byKey[key] = target
 			targets = append(targets, target)
 		}
 		target.events = append(target.events, filter)
 	}
 	return targets
+}
+
+// mirrorNodesFor returns the uiComponent nodes earlier in the same step that
+// carry no filters of their own; the async node's observed event is attributed
+// to them as advisory downstream evidence.
+func mirrorNodesFor(nodes map[int]verificationruntime.Node, asyncNumber int) []int {
+	async, ok := nodes[asyncNumber]
+	if !ok || async.Type != coop.NodeAsyncHandler {
+		return nil
+	}
+	var mirrors []int
+	for number := 1; number < asyncNumber; number++ {
+		node, ok := nodes[number]
+		if !ok || node.Step != async.Step || node.Type != coop.NodeUIComponent {
+			continue
+		}
+		if len(node.Requests) == 0 && len(node.Events) == 0 {
+			mirrors = append(mirrors, number)
+		}
+	}
+	return mirrors
 }
 
 func targetsUseStream(targets []*providerTarget, stream Stream) bool {

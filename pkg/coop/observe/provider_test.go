@@ -71,6 +71,43 @@ func providerRequestAndEventSession() *coop.Session {
 	return session
 }
 
+// providerUIEventSession is a single-step session with a uiComponent node
+// (node 1, no filters of its own) followed by an asyncHandler event node
+// (node 2), so mirror attribution has a downstream target.
+func providerUIEventSession() *coop.Session {
+	now := time.Now().UTC()
+	return &coop.Session{
+		SchemaVersion: coop.CurrentSessionSchemaVersion,
+		ID:            "provider_session",
+		Blueprint:     "provider-test",
+		Status:        coop.SessionActive,
+		Steps: []coop.SessionStep{{
+			StepDefinition: coop.StepDefinition{Key: "step-1", Title: "Handle the payment"},
+			Nodes: []coop.SessionNode{
+				{
+					NodeDefinition: coop.NodeDefinition{
+						Key:   "show-status",
+						Type:  coop.NodeUIComponent,
+						Title: "Show the payment status",
+					},
+					State: coop.NodePending,
+				},
+				{
+					NodeDefinition: coop.NodeDefinition{
+						Key:    "handle-success",
+						Type:   coop.NodeAsyncHandler,
+						Title:  "Handle payment success",
+						Events: []string{"payment_intent.succeeded"},
+					},
+					State: coop.NodePending,
+				},
+			},
+		}},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+}
+
 type providerFakeStore struct {
 	mu      sync.Mutex
 	session *coop.Session
@@ -172,11 +209,17 @@ type providerFakeCollector struct {
 }
 
 func newProviderFakeCollector() *providerFakeCollector {
+	return newProviderFakeCollectorForStream(StreamLogsTail)
+}
+
+// newProviderFakeCollectorForStream builds a ready fake collector reporting
+// the given stream so per-stream factories can drive each stream on its own.
+func newProviderFakeCollectorForStream(stream Stream) *providerFakeCollector {
 	ready := time.Now().UTC().Add(-time.Minute)
 	return &providerFakeCollector{
 		snapshot: Snapshot{
 			SessionID:  "provider_session",
-			Stream:     StreamLogsTail,
+			Stream:     stream,
 			State:      StateReady,
 			ReadySince: ready,
 			Epoch:      1,
@@ -239,6 +282,12 @@ func (collector *providerFakeCollector) setEpoch(epoch uint64) {
 	collector.snapshot.ReadySince = time.Now().UTC()
 }
 
+func (collector *providerFakeCollector) setReadySince(at time.Time) {
+	collector.mu.Lock()
+	defer collector.mu.Unlock()
+	collector.snapshot.ReadySince = at.UTC()
+}
+
 func (collector *providerFakeCollector) reportMissed(count uint64) {
 	collector.mu.Lock()
 	defer collector.mu.Unlock()
@@ -261,6 +310,17 @@ func providerStaticFactory(collector providerCollector) providerCollectorFactory
 	return func(Config) (providerCollector, error) { return collector, nil }
 }
 
+// providerStreamFactory routes each stream to its own fake collector so event
+// and request targets can be driven independently.
+func providerStreamFactory(collectors map[Stream]providerCollector) providerCollectorFactory {
+	return func(config Config) (providerCollector, error) {
+		if collector, ok := collectors[config.Stream]; ok {
+			return collector, nil
+		}
+		return nil, fmt.Errorf("no fake collector for stream %q", config.Stream)
+	}
+}
+
 type providerRun struct {
 	store    *providerFakeStore
 	log      *providerEmitLog
@@ -271,14 +331,31 @@ type providerRun struct {
 
 func providerStartRun(t *testing.T, session *coop.Session, config ProviderConfig, factory providerCollectorFactory) *providerRun {
 	t.Helper()
+	return providerStartRunWithEmit(t, session, config, factory, nil)
+}
+
+// providerStartRunWithEmit lets a test wrap the store-backed emit, for example
+// to inject transient write failures. A nil wrap keeps the plain store emit.
+func providerStartRunWithEmit(
+	t *testing.T,
+	session *coop.Session,
+	config ProviderConfig,
+	factory providerCollectorFactory,
+	wrap func(verificationruntime.Emit) verificationruntime.Emit,
+) *providerRun {
+	t.Helper()
 	store := newProviderFakeStore(session)
 	log := &providerEmitLog{}
 	provider := newProvider(store, config, factory)
 	ctx, cancel := context.WithCancel(context.Background())
 	run := &providerRun{store: store, log: log, cancel: cancel, finished: make(chan struct{})}
 	metadata := store.metadata()
+	emit := store.emit(log)
+	if wrap != nil {
+		emit = wrap(emit)
+	}
 	go func() {
-		run.err = provider.Run(ctx, metadata, store.emit(log))
+		run.err = provider.Run(ctx, metadata, emit)
 		close(run.finished)
 	}()
 	t.Cleanup(func() {
@@ -368,6 +445,22 @@ func providerMatchObservation(status int) Observation {
 	}}
 }
 
+func providerMatchEventObservation() Observation {
+	return Observation{Event: &EventObservation{
+		EventID:   "evt_match",
+		EventType: "payment_intent.succeeded",
+	}}
+}
+
+// Expected advisory wordings, spelled out independently of the production
+// constants so wording regressions fail these tests.
+const (
+	providerRequestPassedDetail = "Matching API request observed on Stripe; this does not confirm it came from your application."
+	providerEventPassedDetail   = "Matching event observed on Stripe; this does not confirm your application processed it."
+	providerMirrorPassedDetail  = "Downstream event observed on Stripe; this does not confirm your application processed it."
+	providerMirrorResetDetail   = "No downstream event observed on Stripe yet."
+)
+
 func TestProviderMissingCredentialsIsUnavailableAndFailOpen(t *testing.T) {
 	t.Parallel()
 
@@ -450,7 +543,7 @@ func TestProviderRequestPassesOnlyOn2xx(t *testing.T) {
 				assert.Equal(t, test.statusClass, providerEvidenceValue(result, "http_status_class"))
 				assert.Equal(t, "false", providerEvidenceValue(result, "matched"))
 			} else {
-				assert.Equal(t, "Matching API request observed on Stripe.", result.Detail)
+				assert.Equal(t, providerRequestPassedDetail, result.Detail)
 				assert.Empty(t, result.FailureDomain)
 				assert.Equal(t, "true", providerEvidenceValue(result, "matched"))
 			}
@@ -525,26 +618,26 @@ func TestProviderBurstWithinOnePollStillMatches(t *testing.T) {
 	}
 
 	result := providerWaitForResult(t, run.store, 1, "passive.request", verification.StatusPassed)
-	assert.Equal(t, "Matching API request observed on Stripe.", result.Detail)
+	assert.Equal(t, providerRequestPassedDetail, result.Detail)
 	assert.True(t, collector.startCalled())
 	run.end(t)
 }
 
-func TestProviderSettlingCapturesLateObservation(t *testing.T) {
+func TestProviderReviewCapturesLateObservation(t *testing.T) {
 	t.Parallel()
 
-	config := providerTestConfig()
-	config.SettleDuration = 250 * time.Millisecond
 	collector := newProviderFakeCollector()
-	run := providerStartRun(t, providerRequestSession(), config, providerStaticFactory(collector))
+	run := providerStartRun(t, providerRequestSession(), providerTestConfig(), providerStaticFactory(collector))
 	run.store.transition(t, 1, coop.NodeActive)
 	run.store.transition(t, 1, coop.NodeReview)
+	providerWaitForResultDetail(t, run.store, 1, "passive.request", "observed on Stripe yet")
 
-	// The matching request arrives only after the node left active.
+	// The matching request arrives only after the node reached review. Review
+	// streams indefinitely, so the observation still upgrades the result.
 	collector.push(providerMatchObservation(200), time.Now().UTC())
 
 	result := providerWaitForResult(t, run.store, 1, "passive.request", verification.StatusPassed)
-	assert.Equal(t, "Matching API request observed on Stripe.", result.Detail)
+	assert.Equal(t, providerRequestPassedDetail, result.Detail)
 	run.end(t)
 }
 
@@ -552,10 +645,12 @@ func TestProviderSettleExpiryFinalizesNotObserved(t *testing.T) {
 	t.Parallel()
 
 	collector := newProviderFakeCollector()
-	run := providerStartRun(t, providerRequestSession(), providerTestConfig(), providerStaticFactory(collector))
+	run := providerStartRun(t, providerRequestAndEventSession(), providerTestConfig(), providerStaticFactory(collector))
 	run.store.transition(t, 1, coop.NodeActive)
-	run.store.transition(t, 1, coop.NodeReview)
+	run.store.transition(t, 1, coop.NodeDone)
 
+	// Node 2 stays pending, so the session is not terminal: the final result
+	// must come from the Done settle window expiring, not from a forced stop.
 	result := providerWaitForResultDetail(t, run.store, 1, "passive.request", "during coverage")
 	assert.Equal(t, verification.StatusNotObserved, result.Status)
 	assert.Equal(t, verification.FailureDomainCoverage, result.FailureDomain)
@@ -591,12 +686,18 @@ func TestProviderRejectedNodeReopensAndPasses(t *testing.T) {
 	run := providerStartRun(t, providerRequestSession(), providerTestConfig(), providerStaticFactory(collector))
 	run.store.transition(t, 1, coop.NodeActive)
 	run.store.transition(t, 1, coop.NodeReview)
-	finalized := providerWaitForResultDetail(t, run.store, 1, "passive.request", "during coverage")
-	assert.Equal(t, verification.StatusNotObserved, finalized.Status)
+	streaming := providerWaitForResultDetail(t, run.store, 1, "passive.request", "observed on Stripe yet")
+	assert.Equal(t, verification.StatusNotObserved, streaming.Status)
 
-	// Rejection reopens the node; the provider starts a clean attempt.
+	// Let the provider observe the review state so the rejection registers as
+	// review -> active, then wait for the reopened attempt's fresh streaming
+	// emission before pushing the match.
+	time.Sleep(20 * providerTestConfig().PollInterval)
+	emitted := len(run.log.all())
 	run.store.transition(t, 1, coop.NodeActive)
-	providerWaitForResultDetail(t, run.store, 1, "passive.request", "observed on Stripe yet")
+	require.Eventually(t, func() bool {
+		return len(run.log.all()) > emitted
+	}, 2*time.Second, 5*time.Millisecond)
 	collector.push(providerMatchObservation(200), time.Now().UTC())
 	providerWaitForResult(t, run.store, 1, "passive.request", verification.StatusPassed)
 
@@ -731,4 +832,423 @@ func TestProviderCollectorStartFailureIsVisibleUnavailable(t *testing.T) {
 	assert.Contains(t, result.Detail, "Passive collector unavailable")
 	assert.Equal(t, verification.FailureDomainCollector, result.FailureDomain)
 	run.end(t)
+}
+
+// providerStartTwoStreamRun starts a request+event session with a dedicated
+// fake collector per stream.
+func providerStartTwoStreamRun(t *testing.T) (*providerRun, *providerFakeCollector, *providerFakeCollector) {
+	t.Helper()
+	requestCollector := newProviderFakeCollector()
+	eventCollector := newProviderFakeCollectorForStream(StreamListen)
+	factory := providerStreamFactory(map[Stream]providerCollector{
+		StreamLogsTail: requestCollector,
+		StreamListen:   eventCollector,
+	})
+	run := providerStartRun(t, providerRequestAndEventSession(), providerTestConfig(), factory)
+	return run, requestCollector, eventCollector
+}
+
+// providerStartMirrorRun starts a uiComponent+asyncHandler session over the
+// listen stream only, optionally wrapping the store emit.
+func providerStartMirrorRun(t *testing.T, wrap func(verificationruntime.Emit) verificationruntime.Emit) (*providerRun, *providerFakeCollector) {
+	t.Helper()
+	eventCollector := newProviderFakeCollectorForStream(StreamListen)
+	factory := providerStreamFactory(map[Stream]providerCollector{StreamListen: eventCollector})
+	run := providerStartRunWithEmit(t, providerUIEventSession(), providerTestConfig(), factory, wrap)
+	return run, eventCollector
+}
+
+func TestProviderReviewAbsorbsAfterOldSettleWindow(t *testing.T) {
+	t.Parallel()
+
+	config := providerTestConfig()
+	collector := newProviderFakeCollector()
+	run := providerStartRun(t, providerRequestSession(), config, providerStaticFactory(collector))
+	run.store.transition(t, 1, coop.NodeActive)
+	run.store.transition(t, 1, coop.NodeReview)
+	providerWaitForResultDetail(t, run.store, 1, "passive.request", "observed on Stripe yet")
+
+	// Wait far past the old settle window: review must keep streaming instead
+	// of latching a final absence claim.
+	time.Sleep(4 * config.SettleDuration)
+	results := run.store.results(1)
+	require.Len(t, results, 1)
+	assert.Equal(t, verification.StatusNotObserved, results[0].Status)
+	assert.Contains(t, results[0].Detail, "observed on Stripe yet")
+	for _, result := range run.log.all() {
+		assert.NotContains(t, result.Detail, "during coverage")
+	}
+
+	collector.push(providerMatchObservation(200), time.Now().UTC())
+	result := providerWaitForResult(t, run.store, 1, "passive.request", verification.StatusPassed)
+	assert.Equal(t, providerRequestPassedDetail, result.Detail)
+	run.end(t)
+}
+
+func TestProviderReviewFailedUpgradesToPassed(t *testing.T) {
+	t.Parallel()
+
+	collector := newProviderFakeCollector()
+	run := providerStartRun(t, providerRequestSession(), providerTestConfig(), providerStaticFactory(collector))
+	startedAt := run.store.transition(t, 1, coop.NodeActive)
+	run.store.transition(t, 1, coop.NodeReview)
+
+	collector.push(providerMatchObservation(404), startedAt.Add(time.Millisecond))
+	failed := providerWaitForResult(t, run.store, 1, "passive.request", verification.StatusFailed)
+	assert.Equal(t, verification.FailureDomainIntegration, failed.FailureDomain)
+
+	collector.push(providerMatchObservation(200), startedAt.Add(2*time.Millisecond))
+	passed := providerWaitForResult(t, run.store, 1, "passive.request", verification.StatusPassed)
+	assert.Contains(t, passed.Detail, "after earlier failed attempts")
+	assert.Equal(t, "Matching API request observed on Stripe (after earlier failed attempts, HTTP 4xx); this does not confirm it came from your application.", passed.Detail)
+	run.end(t)
+}
+
+func TestProviderReviewNeverDowngradesPassed(t *testing.T) {
+	t.Parallel()
+
+	collector := newProviderFakeCollector()
+	run := providerStartRun(t, providerRequestSession(), providerTestConfig(), providerStaticFactory(collector))
+	run.store.transition(t, 1, coop.NodeActive)
+	run.store.transition(t, 1, coop.NodeReview)
+	collector.push(providerMatchObservation(200), time.Now().UTC())
+	providerWaitForResult(t, run.store, 1, "passive.request", verification.StatusPassed)
+
+	// A coverage break after the pass must not downgrade positive evidence.
+	collector.setEpoch(2)
+	time.Sleep(20 * providerTestConfig().PollInterval)
+
+	results := run.store.results(1)
+	require.Len(t, results, 1)
+	assert.Equal(t, verification.StatusPassed, results[0].Status)
+	for _, result := range run.log.all() {
+		assert.NotEqual(t, verification.StatusInconclusive, result.Status)
+	}
+	run.end(t)
+}
+
+func TestProviderReviewIndeterminateRefinesToInconclusive(t *testing.T) {
+	t.Parallel()
+
+	collector := newProviderFakeCollector()
+	run := providerStartRun(t, providerRequestSession(), providerTestConfig(), providerStaticFactory(collector))
+	run.store.transition(t, 1, coop.NodeActive)
+	run.store.transition(t, 1, coop.NodeReview)
+	streaming := providerWaitForResultDetail(t, run.store, 1, "passive.request", "observed on Stripe yet")
+	assert.Equal(t, verification.StatusNotObserved, streaming.Status)
+
+	collector.setEpoch(2)
+	refined := providerWaitForResult(t, run.store, 1, "passive.request", verification.StatusInconclusive)
+	assert.Equal(t, verification.FailureDomainCoverage, refined.FailureDomain)
+	assert.Equal(t, coverageGapHealthChanged, providerEvidenceValue(refined, "coverage_gap"))
+
+	results := run.store.results(1)
+	require.Len(t, results, 1)
+	assert.Equal(t, verification.StatusInconclusive, results[0].Status)
+	run.end(t)
+}
+
+func TestProviderAutoConfirmDoneSettleCapturesLateObservation(t *testing.T) {
+	t.Parallel()
+
+	config := providerTestConfig()
+	config.SettleDuration = 250 * time.Millisecond
+	collector := newProviderFakeCollector()
+	run := providerStartRun(t, providerRequestAndEventSession(), config, providerStaticFactory(collector))
+	run.store.transition(t, 1, coop.NodeActive)
+	run.store.transition(t, 1, coop.NodeDone)
+
+	// Auto-confirm nodes reach Done without ever entering review; the settle
+	// window armed on entry still captures the late observation.
+	collector.push(providerMatchObservation(200), time.Now().UTC())
+
+	result := providerWaitForResult(t, run.store, 1, "passive.request", verification.StatusPassed)
+	assert.Equal(t, providerRequestPassedDetail, result.Detail)
+	run.end(t)
+}
+
+func TestProviderObservationAfterDoneLatchIgnored(t *testing.T) {
+	t.Parallel()
+
+	collector := newProviderFakeCollector()
+	run := providerStartRun(t, providerRequestAndEventSession(), providerTestConfig(), providerStaticFactory(collector))
+	run.store.transition(t, 1, coop.NodeActive)
+	run.store.transition(t, 1, coop.NodeDone)
+	final := providerWaitForResultDetail(t, run.store, 1, "passive.request", "during coverage")
+	assert.Equal(t, verification.StatusNotObserved, final.Status)
+
+	// The Done latch has fired; later observations must not change anything.
+	collector.push(providerMatchObservation(200), time.Now().UTC())
+	time.Sleep(20 * providerTestConfig().PollInterval)
+
+	results := run.store.results(1)
+	require.Len(t, results, 1)
+	assert.Equal(t, verification.StatusNotObserved, results[0].Status)
+	assert.Contains(t, results[0].Detail, "during coverage")
+	for _, result := range run.log.all() {
+		if result.ID == "passive.request" {
+			assert.NotEqual(t, verification.StatusPassed, result.Status)
+		}
+	}
+	run.end(t)
+}
+
+func TestProviderCancelMidReviewForceFinalizes(t *testing.T) {
+	t.Parallel()
+
+	collector := newProviderFakeCollector()
+	run := providerStartRun(t, providerRequestSession(), providerTestConfig(), providerStaticFactory(collector))
+	run.store.transition(t, 1, coop.NodeActive)
+	run.store.transition(t, 1, coop.NodeReview)
+	providerWaitForResultDetail(t, run.store, 1, "passive.request", "observed on Stripe yet")
+
+	// Cancellation forces one final reconcile while the node is still in
+	// review, so the persisted result must carry the final wording.
+	run.cancel()
+	require.NoError(t, run.wait(t))
+	assert.True(t, collector.stopCalled())
+
+	results := run.store.results(1)
+	require.Len(t, results, 1)
+	assert.Equal(t, verification.StatusNotObserved, results[0].Status)
+	assert.Contains(t, results[0].Detail, "No matching API request was observed on Stripe during coverage.")
+	assert.Equal(t, verification.FailureDomainCoverage, results[0].FailureDomain)
+}
+
+func TestProviderStepScopedEventCountsObservationFromEarlierNode(t *testing.T) {
+	t.Parallel()
+
+	run, _, eventCollector := providerStartTwoStreamRun(t)
+
+	stepStart := run.store.transition(t, 1, coop.NodeActive)
+	observedAt := stepStart.Add(time.Millisecond)
+	eventCollector.push(providerMatchEventObservation(), observedAt)
+
+	// Let the pending async target absorb the event silently first.
+	time.Sleep(10 * providerTestConfig().PollInterval)
+	assert.Empty(t, run.store.results(2))
+
+	activatedAt := run.store.transition(t, 2, coop.NodeActive)
+	require.True(t, observedAt.Before(activatedAt), "the event must predate the async node's activation")
+
+	result := providerWaitForResult(t, run.store, 2, "passive.event", verification.StatusPassed)
+	assert.Equal(t, providerEventPassedDetail, result.Detail)
+	assert.Equal(t, "true", providerEvidenceValue(result, "matched"))
+	run.end(t)
+}
+
+func TestProviderStepScopedPendingAbsorbEmitsNothing(t *testing.T) {
+	t.Parallel()
+
+	run, _, eventCollector := providerStartTwoStreamRun(t)
+
+	stepStart := run.store.transition(t, 1, coop.NodeActive)
+	eventCollector.push(providerMatchEventObservation(), stepStart.Add(time.Millisecond))
+
+	// The async node never activates; silent absorption must not emit.
+	time.Sleep(20 * providerTestConfig().PollInterval)
+	assert.Empty(t, run.store.results(2))
+	for _, result := range run.log.all() {
+		assert.NotEqual(t, verification.ResultID("passive.event"), result.ID)
+	}
+	run.end(t)
+}
+
+func TestProviderStepScopedLateJoinCoverageHonesty(t *testing.T) {
+	t.Parallel()
+
+	run, _, eventCollector := providerStartTwoStreamRun(t)
+	// The listen collector only became ready after the step starts below:
+	// absence of an event is a coverage gap, never a clean not-observed claim.
+	eventCollector.setReadySince(time.Now().UTC().Add(time.Hour))
+
+	run.store.transition(t, 1, coop.NodeActive)
+	run.store.transition(t, 1, coop.NodeDone)
+	run.store.transition(t, 2, coop.NodeActive)
+	run.store.transition(t, 2, coop.NodeDone)
+	require.NoError(t, run.wait(t))
+
+	results := run.store.results(2)
+	require.Len(t, results, 1)
+	assert.Equal(t, verification.StatusInconclusive, results[0].Status)
+	assert.Equal(t, verification.FailureDomainCoverage, results[0].FailureDomain)
+	assert.Equal(t, coverageGapHealthChanged, providerEvidenceValue(results[0], "coverage_gap"))
+	assert.Contains(t, results[0].Detail, "incomplete")
+	for _, result := range run.log.all() {
+		if result.ID == "passive.event" {
+			assert.NotEqual(t, verification.StatusNotObserved, result.Status)
+		}
+	}
+}
+
+func TestProviderStepScopedReopenRestartsWindowAtReject(t *testing.T) {
+	t.Parallel()
+
+	run, _, eventCollector := providerStartTwoStreamRun(t)
+
+	run.store.transition(t, 1, coop.NodeActive)
+	run.store.transition(t, 2, coop.NodeActive)
+	eventCollector.push(providerMatchEventObservation(), time.Now().UTC())
+	providerWaitForResult(t, run.store, 2, "passive.event", verification.StatusPassed)
+
+	run.store.transition(t, 2, coop.NodeReview)
+	time.Sleep(20 * providerTestConfig().PollInterval)
+
+	// Rejection restarts the observation window at the reopen time: the
+	// already-consumed event must not re-fire, so streaming not-observed
+	// replaces the pass until a fresh event arrives.
+	run.store.transition(t, 2, coop.NodeActive)
+	reopened := providerWaitForResult(t, run.store, 2, "passive.event", verification.StatusNotObserved)
+	assert.Contains(t, reopened.Detail, "No matching event observed on Stripe yet.")
+
+	eventCollector.push(providerMatchEventObservation(), time.Now().UTC())
+	result := providerWaitForResult(t, run.store, 2, "passive.event", verification.StatusPassed)
+	assert.Equal(t, providerEventPassedDetail, result.Detail)
+	run.end(t)
+}
+
+func TestProviderRequestTargetsRemainNodeScoped(t *testing.T) {
+	t.Parallel()
+
+	collector := newProviderFakeCollector()
+	run := providerStartRun(t, providerRequestSession(), providerTestConfig(), providerStaticFactory(collector))
+
+	// The matching request predates the node's activation; request targets
+	// stay node-scoped, so it must not count.
+	collector.push(providerMatchObservation(200), time.Now().UTC().Add(-10*time.Millisecond))
+	startedAt := run.store.transition(t, 1, coop.NodeActive)
+	require.False(t, startedAt.IsZero())
+
+	streaming := providerWaitForResultDetail(t, run.store, 1, "passive.request", "observed on Stripe yet")
+	assert.Equal(t, verification.StatusNotObserved, streaming.Status)
+	time.Sleep(20 * providerTestConfig().PollInterval)
+
+	results := run.store.results(1)
+	require.Len(t, results, 1)
+	assert.Equal(t, verification.StatusNotObserved, results[0].Status)
+	for _, result := range run.log.all() {
+		assert.NotEqual(t, verification.StatusPassed, result.Status)
+	}
+	run.end(t)
+}
+
+func TestTargetsForFiltersMarksOnlyAsyncHandlerListenTargetsStepScoped(t *testing.T) {
+	t.Parallel()
+
+	session := verificationruntime.Session{
+		ID: "targets_session",
+		Nodes: []verificationruntime.Node{
+			{Number: 1, Step: 0, Type: coop.NodeAPIRequest, Requests: []verificationruntime.Request{{Method: "POST", Path: "/v1/payment_intents"}}},
+			{Number: 2, Step: 0, Type: coop.NodeAsyncHandler, Events: []string{"payment_intent.succeeded"}},
+			{Number: 3, Step: 1, Type: coop.NodeUIComponent, Events: []string{"checkout.session.completed"}},
+		},
+	}
+	targets := targetsForFilters(FiltersForSession(session), session)
+	require.Len(t, targets, 3)
+
+	byKey := make(map[string]*providerTarget, len(targets))
+	for _, target := range targets {
+		byKey[fmt.Sprintf("%s:%d", target.stream, target.nodeNumber)] = target
+	}
+	require.Contains(t, byKey, "logs_tail:1")
+	require.Contains(t, byKey, "listen:2")
+	require.Contains(t, byKey, "listen:3")
+	assert.False(t, byKey["logs_tail:1"].stepScoped, "request targets stay node-scoped")
+	assert.True(t, byKey["listen:2"].stepScoped, "asyncHandler listen targets are step-scoped")
+	assert.False(t, byKey["listen:3"].stepScoped, "non-asyncHandler listen targets stay node-scoped")
+}
+
+func TestProviderMirrorEmitsDownstreamPassedOnUIComponent(t *testing.T) {
+	t.Parallel()
+
+	run, eventCollector := providerStartMirrorRun(t, nil)
+
+	run.store.transition(t, 2, coop.NodeActive)
+	eventCollector.push(providerMatchEventObservation(), time.Now().UTC())
+	providerWaitForResult(t, run.store, 2, "passive.event", verification.StatusPassed)
+
+	mirror := providerWaitForResult(t, run.store, 1, "passive.event.downstream", verification.StatusPassed)
+	assert.Equal(t, verification.CheckID("passive.event.downstream"), mirror.CheckID)
+	assert.Equal(t, verification.SourceCLI, mirror.Source)
+	assert.Equal(t, providerMirrorPassedDetail, mirror.Detail)
+	assert.Empty(t, mirror.FailureDomain)
+	run.end(t)
+}
+
+func TestProviderMirrorRetriesFailedWrite(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	failures := 0
+	wrap := func(next verificationruntime.Emit) verificationruntime.Emit {
+		return func(nodeNumber int, result verification.Result) error {
+			if result.ID == "passive.event.downstream" {
+				mu.Lock()
+				first := failures == 0
+				if first {
+					failures++
+				}
+				mu.Unlock()
+				if first {
+					return errors.New("injected mirror write failure")
+				}
+			}
+			return next(nodeNumber, result)
+		}
+	}
+	run, eventCollector := providerStartMirrorRun(t, wrap)
+
+	run.store.transition(t, 2, coop.NodeActive)
+	eventCollector.push(providerMatchEventObservation(), time.Now().UTC())
+	providerWaitForResult(t, run.store, 2, "passive.event", verification.StatusPassed)
+
+	// The first mirror write failed; the next poll must retry and deliver.
+	mirror := providerWaitForResult(t, run.store, 1, "passive.event.downstream", verification.StatusPassed)
+	assert.Equal(t, providerMirrorPassedDetail, mirror.Detail)
+	mu.Lock()
+	assert.Equal(t, 1, failures, "the first mirror write must have been rejected")
+	mu.Unlock()
+	run.end(t)
+}
+
+func TestProviderMirrorResetsOnReopenedAttempt(t *testing.T) {
+	t.Parallel()
+
+	run, eventCollector := providerStartMirrorRun(t, nil)
+
+	run.store.transition(t, 2, coop.NodeActive)
+	eventCollector.push(providerMatchEventObservation(), time.Now().UTC())
+	providerWaitForResult(t, run.store, 2, "passive.event", verification.StatusPassed)
+	providerWaitForResult(t, run.store, 1, "passive.event.downstream", verification.StatusPassed)
+
+	run.store.transition(t, 2, coop.NodeReview)
+	time.Sleep(20 * providerTestConfig().PollInterval)
+
+	// Rejecting the async node reopens the attempt; stale downstream
+	// attribution must be withdrawn.
+	run.store.transition(t, 2, coop.NodeActive)
+	reset := providerWaitForResult(t, run.store, 1, "passive.event.downstream", verification.StatusNotObserved)
+	assert.Equal(t, providerMirrorResetDetail, reset.Detail)
+	assert.Equal(t, verification.FailureDomainCoverage, reset.FailureDomain)
+
+	reopened := providerWaitForResult(t, run.store, 2, "passive.event", verification.StatusNotObserved)
+	assert.Contains(t, reopened.Detail, "observed on Stripe yet")
+	run.end(t)
+}
+
+func TestMirrorNodesForSelectsPriorUIComponentsInStep(t *testing.T) {
+	t.Parallel()
+
+	nodes := map[int]verificationruntime.Node{
+		1: {Number: 1, Step: 0, Type: coop.NodeUIComponent},
+		2: {Number: 2, Step: 0, Type: coop.NodeUIComponent, Events: []string{"payment_intent.succeeded"}},
+		3: {Number: 3, Step: 1, Type: coop.NodeUIComponent},
+		4: {Number: 4, Step: 0, Type: coop.NodeUIComponent, Requests: []verificationruntime.Request{{Method: "GET", Path: "/v1/customers"}}},
+		5: {Number: 5, Step: 0, Type: coop.NodeAsyncHandler, Events: []string{"payment_intent.succeeded"}},
+		6: {Number: 6, Step: 0, Type: coop.NodeUIComponent},
+	}
+
+	assert.Equal(t, []int{1}, mirrorNodesFor(nodes, 5), "only the same-step prior uiComponent without filters mirrors")
+	assert.Nil(t, mirrorNodesFor(nodes, 1), "non-asyncHandler nodes have no mirrors")
+	assert.Nil(t, mirrorNodesFor(nodes, 99), "unknown nodes have no mirrors")
 }
