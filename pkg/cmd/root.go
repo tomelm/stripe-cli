@@ -281,6 +281,9 @@ func init() {
 		TestModeAPIKey: func() (string, error) {
 			return Config.Profile.GetAPIKey(false)
 		},
+		TestModePublishableKey: func() (string, error) {
+			return Config.Profile.GetPublishableKey(false)
+		},
 		AIAgentHelpAnnotationKey: AIAgentHelpAnnotationKey,
 	}))
 	rootCmd.AddCommand(newPluginCmd().cmd)
