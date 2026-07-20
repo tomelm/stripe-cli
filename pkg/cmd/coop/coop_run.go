@@ -204,6 +204,8 @@ If a node includes review_prompt, that is the baseline acceptance check shown to
 
 If a node asks you to understand the project, scan files, identify the tech stack, and summarize what you found. This helps you adapt the remaining nodes to the developer's actual setup. Don't ask the developer questions you can answer by reading the code.
 
+Command responses may include "verification_results": the CLI passively watches this Stripe account's API requests and events and reports what it observed for each node. Statuses: "passed" = matching activity was observed on Stripe; "failed" = your Stripe API call was observed but errored — fix it and run report-work again before await-review (start-work on the node reopens it); "not_observed" = no matching activity yet (for webhook nodes the event may simply not have fired — trigger the flow or use "stripe trigger"); "inconclusive"/"unavailable" = the observation infrastructure could not watch reliably — not a problem with your code, ignore it. These results are advisory: they never block you, but treat a "failed" as a strong signal to fix before requesting review.
+
 Agent lifecycle commands (use this session id: %s):
 1. stripe coop agent start-work --session=%s --step=<n> --note="<what you're about to do>"
 2. Write the code and run it to verify it works

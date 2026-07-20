@@ -255,12 +255,16 @@ func (request ConnectRequest) String() string {
 }
 
 // RequestObservation is the bounded logs-tail metadata retained by the
-// collector. Query strings, headers, bodies, and response bodies are excluded.
+// collector. Query strings, headers, bodies, and response bodies are
+// excluded; ErrorCode/ErrorParam carry only Stripe's already-redacted error
+// classification, never error messages.
 type RequestObservation struct {
-	RequestID string `json:"request_id"`
-	Method    string `json:"method"`
-	Path      string `json:"path"`
-	Status    int    `json:"status"`
+	RequestID  string `json:"request_id"`
+	Method     string `json:"method"`
+	Path       string `json:"path"`
+	Status     int    `json:"status"`
+	ErrorCode  string `json:"error_code,omitempty"`
+	ErrorParam string `json:"error_param,omitempty"`
 }
 
 // EventObservation is the bounded listen metadata retained by the collector.
@@ -303,6 +307,16 @@ func (observation Observation) validateFor(stream Stream) error {
 		}
 		if request.Status < 100 || request.Status > 599 {
 			return fmt.Errorf("request status must be between 100 and 599")
+		}
+		if request.ErrorCode != "" {
+			if err := validateConfigText("error_code", request.ErrorCode, 128, false); err != nil {
+				return err
+			}
+		}
+		if request.ErrorParam != "" {
+			if err := validateConfigText("error_param", request.ErrorParam, 128, false); err != nil {
+				return err
+			}
 		}
 		return nil
 	}

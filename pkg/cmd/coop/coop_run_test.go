@@ -166,3 +166,15 @@ func TestCoopStartKeepsNotFoundGuidance(t *testing.T) {
 	assert.Contains(t, err.Error(), "not found")
 	assert.Contains(t, err.Error(), "stripe coop recommend")
 }
+
+func TestAgentInstructionsDocumentVerificationResults(t *testing.T) {
+	instructions := sessionLifecycleInstructions("You are testing.", &coop.Session{ID: "coop_123"})
+
+	assert.Contains(t, instructions, `Command responses may include "verification_results"`)
+	assert.Contains(t, instructions, `"failed" = your Stripe API call was observed but errored`)
+	assert.Contains(t, instructions, "run report-work again before await-review")
+	assert.Contains(t, instructions, "These results are advisory: they never block you")
+
+	full := agentInstructions(&coop.Blueprint{ID: "one-time-payment", Title: "One-time payment"}, &coop.Session{ID: "coop_123"})
+	assert.Contains(t, full, `"verification_results"`)
+}

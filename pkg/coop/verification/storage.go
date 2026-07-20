@@ -127,6 +127,26 @@ func (sanitizer Sanitizer) Prepare(result Result) (Result, error) {
 	return prepared, nil
 }
 
+// PruneResults removes results not accepted by keep, dropping the set
+// entirely when nothing remains.
+func PruneResults(set **ResultSet, keep func(Result) bool) {
+	if *set == nil {
+		return
+	}
+	var kept []Result
+	for _, result := range (*set).Results {
+		if keep(result) {
+			kept = append(kept, result)
+		}
+	}
+	if len(kept) == 0 {
+		*set = nil
+		return
+	}
+	updated := NewResultSet(kept...)
+	*set = &updated
+}
+
 // Summary is the concise, evidence-free result projection returned to agents.
 type Summary struct {
 	ID      ResultID `json:"id"`

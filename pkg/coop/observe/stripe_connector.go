@@ -464,7 +464,16 @@ func stripeObservation(stream Stream, value any) (Observation, error) {
 		if err != nil {
 			return observation, connectorFailure(FailureConnectorInvalid, false)
 		}
-		observation.Request = &RequestObservation{RequestID: payload.RequestID, Method: strings.ToUpper(payload.Method), Path: path, Status: payload.Status}
+		observation.Request = &RequestObservation{
+			RequestID: payload.RequestID,
+			Method:    strings.ToUpper(payload.Method),
+			Path:      path,
+			Status:    payload.Status,
+			// Stripe's request-log error fields are already redacted
+			// classifications; the free-text message is never retained.
+			ErrorCode:  boundedObservationText(payload.Error.Code),
+			ErrorParam: boundedObservationText(payload.Error.Param),
+		}
 	case *logtailing.EventPayload:
 		if payload == nil {
 			return observation, connectorFailure(FailureConnectorInvalid, false)
@@ -497,6 +506,16 @@ func stripeObservation(stream Stream, value any) (Observation, error) {
 		return Observation{}, connectorFailure(FailureConnectorInvalid, false)
 	}
 	return observation, nil
+}
+
+// boundedObservationText returns value only when it satisfies the bounded
+// observation text rules; a malformed optional field must never invalidate an
+// otherwise-good observation.
+func boundedObservationText(value string) string {
+	if validateConfigText("value", value, 128, false) != nil {
+		return ""
+	}
+	return value
 }
 
 func normalizedRequestPath(raw string) (string, error) {

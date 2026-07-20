@@ -170,7 +170,61 @@ func TestReviewCardShowsStripeObservedLabel(t *testing.T) {
 	card := m.renderReviewCard()
 
 	assertContainsPlain(t, card, "Stripe observed: ")
-	assertContainsPlain(t, card, "1 observed on Stripe · 1 not observed")
+	assertContainsPlain(t, card, "1 confirmed · 1 not seen")
+}
+
+// passiveUnavailableTestResult builds an unavailable passive result with the
+// collector failure domain and an explicit transient flag.
+func passiveUnavailableTestResult(id string, detail string, transient bool) verification.Result {
+	result := passiveTestResult(id, verification.StatusUnavailable, detail)
+	result.FailureDomain = verification.FailureDomainCollector
+	result.Transient = transient
+	return result
+}
+
+func TestPassiveResultsSuppressUnavailableOnPendingNodes(t *testing.T) {
+	set := verification.NewResultSet(
+		passiveUnavailableTestResult("passive.request", "Passive verification is not running.", false),
+	)
+
+	pending := &coop.SessionNode{State: coop.NodePending, VerificationResults: &set}
+	assert.Empty(t, passiveResults(pending), "pending nodes hide unavailability noise")
+
+	active := &coop.SessionNode{State: coop.NodeActive, VerificationResults: &set}
+	results := passiveResults(active)
+	require.Len(t, results, 1, "active nodes keep persistent unavailability visible")
+	assert.Equal(t, verification.ResultID("passive.request"), results[0].ID)
+}
+
+func TestPassiveResultsSuppressTransientUnavailable(t *testing.T) {
+	transientSet := verification.NewResultSet(
+		passiveUnavailableTestResult("passive.request", "Observer is still starting.", true),
+	)
+	active := &coop.SessionNode{State: coop.NodeActive, VerificationResults: &transientSet}
+	assert.Empty(t, passiveResults(active), "transient unavailability is never rendered")
+
+	persistentSet := verification.NewResultSet(
+		passiveUnavailableTestResult("passive.request", "Observer stopped.", false),
+	)
+	active = &coop.SessionNode{State: coop.NodeActive, VerificationResults: &persistentSet}
+	require.Len(t, passiveResults(active), 1, "persistent unavailability stays visible on active nodes")
+}
+
+func TestReviewPassiveLabelOmitsUnavailable(t *testing.T) {
+	m := testModel()
+	m.session.Steps[0].Nodes[0].State = coop.NodeReview
+	m.session.Steps[0].Nodes[1].State = coop.NodeReview
+	mixed := verification.NewResultSet(
+		passiveTestResult("passive.request", verification.StatusPassed, ""),
+		passiveTestResult("passive.event", verification.StatusNotObserved, "No matching event observed on Stripe yet."),
+		passiveUnavailableTestResult("passive.event.downstream", "Passive verification is not running.", false),
+	)
+	m.session.Steps[0].Nodes[0].VerificationResults = &mixed
+
+	label := m.reviewPassiveLabel([]int{1, 2})
+
+	assert.Equal(t, "1 confirmed · 1 not seen", label)
+	assert.NotContains(t, label, "unavailable")
 }
 
 func TestReviewPassiveLabelEmptyWithoutResults(t *testing.T) {

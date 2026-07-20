@@ -117,6 +117,7 @@ type providerTarget struct {
 	seenPassed         bool
 	seenFailed         bool
 	lastFailedStatus   int
+	lastErrorCode      string
 	settleDeadline     time.Time
 	finalized          bool
 	final              bool
@@ -299,6 +300,8 @@ func (target *providerTarget) reconcile(
 		} else if target.lastState != coop.NodeActive && target.lastState != coop.NodePending {
 			// The node was rejected in review and reopened; start a clean attempt.
 			target.reopenAttempt(now, delivery.snapshot)
+		} else if target.rejectionClearedResult(node) {
+			target.reopenAttempt(now, delivery.snapshot)
 		}
 		target.absorb(delivery)
 		target.emitOutcome(delivery.snapshot, false, emit)
@@ -312,6 +315,8 @@ func (target *providerTarget) reconcile(
 		}
 		if !target.started {
 			target.beginAttempt(target.attemptStart(node, stepStart, now), delivery.snapshot)
+		} else if target.rejectionClearedResult(node) {
+			target.reopenAttempt(now, delivery.snapshot)
 		}
 		target.absorb(delivery)
 		if force {
@@ -372,10 +377,27 @@ func (target *providerTarget) beginAttempt(start time.Time, snapshot Snapshot) {
 	target.seenPassed = false
 	target.seenFailed = false
 	target.lastFailedStatus = 0
+	target.lastErrorCode = ""
 	target.settleDeadline = time.Time{}
 	target.finalized = false
 	target.final = false
 	target.lastResultKey = ""
+}
+
+// rejectionClearedResult detects a rejection whose review->active round trip
+// fell entirely between polls: the workflow clears the node's stored passive
+// results on rejection, so a previously persisted result that has vanished is
+// itself the reopen signal.
+func (target *providerTarget) rejectionClearedResult(node *coop.SessionNode) bool {
+	if target.lastResultKey == "" || node.VerificationResults == nil {
+		return target.lastResultKey != "" && node.VerificationResults == nil
+	}
+	for _, result := range node.VerificationResults.Results {
+		if result.ID == target.resultID() {
+			return false
+		}
+	}
+	return true
 }
 
 // reopenAttempt starts a clean attempt after a rejection reopened the node.
@@ -428,6 +450,7 @@ func (target *providerTarget) match(observation Observation) {
 			} else {
 				target.seenFailed = true
 				target.lastFailedStatus = observation.Request.Status
+				target.lastErrorCode = observation.Request.ErrorCode
 			}
 			return
 		}
@@ -453,7 +476,7 @@ func (target *providerTarget) emitOutcome(snapshot Snapshot, final bool, emit ve
 	case target.seenPassed:
 		return target.emitResult(snapshot, verification.StatusPassed, target.passedDetail(), "", false, emit)
 	case target.seenFailed:
-		detail := fmt.Sprintf("Matching API request observed on Stripe but it failed (HTTP %s).", httpStatusClass(target.lastFailedStatus))
+		detail := fmt.Sprintf("Matching API request observed on Stripe but it failed (HTTP %s%s).", httpStatusClass(target.lastFailedStatus), errorCodeSuffix(target.lastErrorCode))
 		return target.emitResult(snapshot, verification.StatusFailed, detail, "", false, emit)
 	case snapshot.State != StateReady:
 		transient := snapshot.LastFailure == nil || snapshot.LastFailure.Transient
@@ -523,6 +546,13 @@ func (target *providerTarget) emitMirrorResults(status verification.Status, deta
 	return delivered
 }
 
+func errorCodeSuffix(code string) string {
+	if code == "" {
+		return ""
+	}
+	return ", " + code
+}
+
 func httpStatusClass(status int) string {
 	switch {
 	case status >= 500:
@@ -565,13 +595,16 @@ func (target *providerTarget) emitResult(
 	case verification.StatusFailed:
 		result.FailureDomain = verification.FailureDomainIntegration
 		result.Evidence = append(result.Evidence, verification.Evidence{Key: "http_status_class", Class: verification.EvidenceSafe, Value: httpStatusClass(target.lastFailedStatus)})
+		if target.lastErrorCode != "" {
+			result.Evidence = append(result.Evidence, verification.Evidence{Key: "error_code", Class: verification.EvidenceSafe, Value: target.lastErrorCode})
+		}
 	case verification.StatusUnavailable:
 		result.FailureDomain = verification.FailureDomainCollector
 		result.Transient = transient
 	case verification.StatusInconclusive, verification.StatusNotObserved:
 		result.FailureDomain = verification.FailureDomainCoverage
 	}
-	key := fmt.Sprintf("%s|%s|%d|%t|%t|%d|%s|%t|%t", status, snapshot.State, snapshot.Epoch, target.seenPassed, target.seenFailed, target.lastFailedStatus, gap, transient, target.final)
+	key := fmt.Sprintf("%s|%s|%d|%t|%t|%d|%s|%s|%t|%t", status, snapshot.State, snapshot.Epoch, target.seenPassed, target.seenFailed, target.lastFailedStatus, target.lastErrorCode, gap, transient, target.final)
 	if key == target.lastResultKey {
 		return true
 	}

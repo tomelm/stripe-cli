@@ -253,11 +253,44 @@ func (s *Service) RequestChanges(sessionID string, nodeNumbers []int, note strin
 				node, _ = session.NodeByNumber(nodeNumber)
 			}
 			node.RejectionNote = note
+			// Capture the passive observations that likely motivated the
+			// rejection, then clear them so the redo starts from a clean
+			// attempt even if the observer is not running.
+			node.RejectionObserved = passiveRejectionSummary(node)
+			verification.PruneResults(&node.VerificationResults, func(result verification.Result) bool {
+				return !isPassiveResult(result)
+			})
 			node.Implementation = nil
 			node.Verifications = nil
 		}
 		return nil
 	})
+}
+
+func isPassiveResult(result verification.Result) bool {
+	return result.Source == verification.SourceCLI && strings.HasPrefix(string(result.ID), "passive.")
+}
+
+// passiveRejectionSummary condenses the node's non-passing passive
+// observations into one feedback line for the agent. Passing observations are
+// omitted — they carry no correction signal.
+func passiveRejectionSummary(node *coop.SessionNode) string {
+	if node.VerificationResults == nil {
+		return ""
+	}
+	var details []string
+	for _, result := range node.VerificationResults.Results {
+		if !isPassiveResult(result) {
+			continue
+		}
+		switch result.Status {
+		case verification.StatusFailed, verification.StatusNotObserved:
+			if result.Detail != "" && len(details) < 2 {
+				details = append(details, result.Detail)
+			}
+		}
+	}
+	return strings.Join(details, " ")
 }
 
 func (s *Service) AwaitReview(sessionID string, nodeNumber int) (coop.CommandResponse, error) {
@@ -326,7 +359,12 @@ func (s *Service) awaitStepReview(sessionID, stepTitle string, stepIndex, nodeNu
 	deadline := s.now().Add(s.awaitTimeout)
 	for {
 		if s.now().After(deadline) {
-			return timeoutResponse(sessionID, nodeNumber), nil
+			session, err := s.store.Read(sessionID)
+			var node *coop.SessionNode
+			if err == nil {
+				node, _ = session.NodeByNumber(nodeNumber)
+			}
+			return nodeVerificationResponse(timeoutResponse(sessionID, nodeNumber), node), nil
 		}
 		s.sleep(500 * time.Millisecond)
 		if err := s.store.WriteHeartbeat(sessionID); err != nil {
@@ -343,15 +381,18 @@ func (s *Service) awaitStepReview(sessionID, stepTitle string, stepIndex, nodeNu
 			if activeNode != nil && activeNode.RejectionNote != "" {
 				msg += fmt.Sprintf("\nFeedback: %s", activeNode.RejectionNote)
 			}
+			if activeNode != nil && activeNode.RejectionObserved != "" {
+				msg += fmt.Sprintf("\nStripe observed: %s", activeNode.RejectionObserved)
+			}
 			msg += "\nRedo the step from the first affected node."
-			return coop.CommandResponse{
+			return nodeVerificationResponse(coop.CommandResponse{
 				OK:        true,
 				SessionID: session.ID,
 				Node:      activeNodeNumber,
 				State:     "rejected",
 				Message:   msg,
 				Next:      fmt.Sprintf("stripe coop agent start-work --session=%s --step=%d --note=%s", session.ID, activeNodeNumber, quoteArg("Redoing: "+activeNode.Title)),
-			}, nil
+			}, activeNode), nil
 		}
 		if session.StepHasReview(stepIndex) {
 			continue
@@ -364,33 +405,33 @@ func (s *Service) reportWorkResponse(session *coop.Session, node *coop.SessionNo
 	if targetState == coop.NodeReview {
 		step, stepIndex, _, err := session.StepByNodeNumber(nodeNumber)
 		if err == nil && !session.StepReadyForReview(stepIndex) {
-			return nodeVerificationResponse(coop.CommandResponse{
+			return steerOnPassiveFailure(nodeVerificationResponse(coop.CommandResponse{
 				OK:        true,
 				SessionID: session.ID,
 				Node:      nodeNumber,
 				State:     string(coop.NodeReview),
 				Message:   fmt.Sprintf("Ready: %s. Continue the step before asking for human review.", node.Title),
 				Next:      nextInStepOrStatus(session, stepIndex, nodeNumber),
-			}, node)
+			}, node), session, node, nodeNumber)
 		}
 		if err == nil {
-			return nodeVerificationResponse(coop.CommandResponse{
+			return steerOnPassiveFailure(nodeVerificationResponse(coop.CommandResponse{
 				OK:        true,
 				SessionID: session.ID,
 				Node:      nodeNumber,
 				State:     string(coop.NodeReview),
 				Message:   fmt.Sprintf("Step ready for review: %s. Run relevant checks, keep useful servers running, share local URLs or test data, then await review.", step.Title),
 				Next:      fmt.Sprintf("stripe coop agent await-review --session=%s --step=%d", session.ID, nodeNumber),
-			}, node)
+			}, node), session, node, nodeNumber)
 		}
-		return nodeVerificationResponse(coop.CommandResponse{
+		return steerOnPassiveFailure(nodeVerificationResponse(coop.CommandResponse{
 			OK:        true,
 			SessionID: session.ID,
 			Node:      nodeNumber,
 			State:     string(coop.NodeReview),
 			Message:   fmt.Sprintf("Ready for review: %s", node.Title),
 			Next:      fmt.Sprintf("stripe coop agent await-review --session=%s --step=%d", session.ID, nodeNumber),
-		}, node)
+		}, node), session, node, nodeNumber)
 	}
 
 	msg := fmt.Sprintf("Completed: %s", node.Title)
@@ -412,6 +453,27 @@ func nodeVerificationResponse(response coop.CommandResponse, node *coop.SessionN
 	if node != nil {
 		response.VerificationResults = verification.AgentSummaries(node.VerificationResults)
 	}
+	return response
+}
+
+func hasFailedPassiveResult(summaries []verification.Summary) bool {
+	for _, summary := range summaries {
+		if summary.Status == verification.StatusFailed && strings.HasPrefix(string(summary.ID), "passive.") {
+			return true
+		}
+	}
+	return false
+}
+
+// steerOnPassiveFailure redirects the agent to fix a Stripe-observed failing
+// request before asking for human review. Advisory: it changes the suggested
+// next command, never the node state.
+func steerOnPassiveFailure(response coop.CommandResponse, session *coop.Session, node *coop.SessionNode, nodeNumber int) coop.CommandResponse {
+	if !hasFailedPassiveResult(response.VerificationResults) {
+		return response
+	}
+	response.Message += " Stripe observed a failing API request for this node — fix it and run report-work again before requesting review (start-work reopens the node)."
+	response.Next = fmt.Sprintf("stripe coop agent start-work --session=%s --step=%d --note=%s", session.ID, nodeNumber, quoteArg("Fixing: "+node.Title))
 	return response
 }
 
@@ -455,7 +517,7 @@ func alreadyMovedResponse(session *coop.Session, nodeNumber int, state coop.Node
 
 func confirmedResponse(session *coop.Session, nodeNumber int) coop.CommandResponse {
 	node, _ := session.NodeByNumber(nodeNumber)
-	return nodeVerificationResponse(coop.CommandResponse{
+	response := nodeVerificationResponse(coop.CommandResponse{
 		OK:        true,
 		SessionID: session.ID,
 		Node:      nodeNumber,
@@ -463,6 +525,10 @@ func confirmedResponse(session *coop.Session, nodeNumber int) coop.CommandRespon
 		Message:   fmt.Sprintf("Node %d confirmed by developer. Proceed to next node.", nodeNumber),
 		Next:      nextAfterNode(session, nodeNumber),
 	}, node)
+	if hasFailedPassiveResult(response.VerificationResults) {
+		response.Message += " Note: Stripe observed a failing API request on this node; consider fixing it before continuing."
+	}
+	return response
 }
 
 func timeoutResponse(sessionID string, nodeNumber int) coop.CommandResponse {

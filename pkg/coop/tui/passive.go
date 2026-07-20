@@ -9,7 +9,11 @@ import (
 )
 
 // passiveResults returns the CLI-owned passive observation results for a node
-// in display order: the request result first, then the event result.
+// in display order: the request result first, then event results.
+//
+// Unavailability noise is demoted for display only (agent-facing summaries
+// keep everything): pending nodes show no unavailable results, and transient
+// unavailability (collector still starting) is never rendered.
 func passiveResults(node *coop.SessionNode) []verification.Result {
 	if node == nil || node.VerificationResults == nil {
 		return nil
@@ -17,6 +21,9 @@ func passiveResults(node *coop.SessionNode) []verification.Result {
 	var requests, others []verification.Result
 	for _, result := range node.VerificationResults.Results {
 		if result.Source != verification.SourceCLI || !strings.HasPrefix(string(result.ID), "passive.") {
+			continue
+		}
+		if result.Status == verification.StatusUnavailable && (node.State == coop.NodePending || result.Transient) {
 			continue
 		}
 		if result.ID == "passive.request" {
@@ -60,7 +67,7 @@ func passiveResultLine(result verification.Result) string {
 // reviewPassiveLabel aggregates passive observation state for the nodes under
 // review into one bounded line.
 func (m Model) reviewPassiveLabel(nodeNumbers []int) string {
-	var observed, failed, notObserved, inconclusive, unavailable int
+	var observed, failed, notObserved, inconclusive int
 	for _, nodeNumber := range nodeNumbers {
 		node, err := m.session.NodeByNumber(nodeNumber)
 		if err != nil {
@@ -76,27 +83,24 @@ func (m Model) reviewPassiveLabel(nodeNumbers []int) string {
 				notObserved++
 			case verification.StatusInconclusive:
 				inconclusive++
-			case verification.StatusUnavailable:
-				unavailable++
 			}
 		}
 	}
 	var parts []string
 	if observed > 0 {
-		parts = append(parts, pluralCount(observed, "observed on Stripe"))
+		parts = append(parts, pluralCount(observed, "confirmed"))
 	}
 	if failed > 0 {
-		parts = append(parts, pluralCount(failed, "observed but failed"))
+		parts = append(parts, pluralCount(failed, "failed"))
 	}
 	if notObserved > 0 {
-		parts = append(parts, pluralCount(notObserved, "not observed"))
+		parts = append(parts, pluralCount(notObserved, "not seen"))
 	}
 	if inconclusive > 0 {
 		parts = append(parts, pluralCount(inconclusive, "inconclusive"))
 	}
-	if unavailable > 0 {
-		parts = append(parts, pluralCount(unavailable, "unavailable"))
-	}
+	// Unavailability is infrastructure state, not review signal; the review
+	// card omits it (the Checks tab still shows persistent unavailability).
 	return strings.Join(parts, " · ")
 }
 

@@ -103,8 +103,11 @@ type SessionNode struct {
 	Verifications       []Verification          `json:"verifications,omitempty"`
 	VerificationResults *verification.ResultSet `json:"verification_results,omitempty"`
 	RejectionNote       string                  `json:"rejection_note,omitempty"`
-	StartedAt           *time.Time              `json:"started_at,omitempty"`
-	CompletedAt         *time.Time              `json:"completed_at,omitempty"`
+	// RejectionObserved is the passive-observation summary captured when the
+	// node was rejected, folded into the agent's rejection feedback.
+	RejectionObserved string     `json:"rejection_observed,omitempty"`
+	StartedAt         *time.Time `json:"started_at,omitempty"`
+	CompletedAt       *time.Time `json:"completed_at,omitempty"`
 }
 
 // SessionStep groups nodes under a titled step.

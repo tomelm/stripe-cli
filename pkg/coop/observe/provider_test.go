@@ -1252,3 +1252,43 @@ func TestMirrorNodesForSelectsPriorUIComponentsInStep(t *testing.T) {
 	assert.Nil(t, mirrorNodesFor(nodes, 1), "non-asyncHandler nodes have no mirrors")
 	assert.Nil(t, mirrorNodesFor(nodes, 99), "unknown nodes have no mirrors")
 }
+
+// mutate applies an arbitrary change to the stored session under lock.
+func (store *providerFakeStore) mutate(fn func(*coop.Session)) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	fn(store.session)
+}
+
+func TestProviderRejectionClearedResultTriggersReopen(t *testing.T) {
+	t.Parallel()
+
+	collector := newProviderFakeCollector()
+	run := providerStartRun(t, providerRequestSession(), providerTestConfig(), providerStaticFactory(collector))
+	startedAt := run.store.transition(t, 1, coop.NodeActive)
+	collector.push(providerMatchObservation(201), startedAt.Add(time.Millisecond))
+	passed := providerWaitForResult(t, run.store, 1, "passive.request", verification.StatusPassed)
+	require.Equal(t, verification.StatusPassed, passed.Status)
+	run.store.transition(t, 1, coop.NodeReview)
+	time.Sleep(20 * providerTestConfig().PollInterval)
+
+	// Simulate a rejection whose review->active->review round trip fell
+	// between polls: the workflow cleared our stored result but the provider
+	// never observed the node in the active state.
+	run.store.mutate(func(session *coop.Session) {
+		node, err := session.NodeByNumber(1)
+		if err != nil {
+			panic(err)
+		}
+		node.VerificationResults = nil
+	})
+
+	// The vanished result is itself the reopen signal: a fresh attempt
+	// re-emits a streaming result and can pass again.
+	providerWaitForResult(t, run.store, 1, "passive.request", verification.StatusNotObserved)
+
+	collector.push(providerMatchObservation(200), time.Now().UTC())
+	providerWaitForResult(t, run.store, 1, "passive.request", verification.StatusPassed)
+
+	run.end(t)
+}
