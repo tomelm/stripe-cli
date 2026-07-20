@@ -3,13 +3,17 @@ package coopcmd
 import (
 	"errors"
 	"fmt"
+	"net/url"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
 	"github.com/stripe/stripe-cli/pkg/coop/followups"
 	"github.com/stripe/stripe-cli/pkg/coop/helpers"
+	"github.com/stripe/stripe-cli/pkg/coop/uicheck"
 	"github.com/stripe/stripe-cli/pkg/coop/workflow"
+	"github.com/stripe/stripe-cli/pkg/stripe"
 )
 
 type coopAgentCmd struct {
@@ -27,6 +31,9 @@ type coopAgentActionCmd struct {
 	snippet string
 	check   string
 	passed  bool
+
+	outcome    string
+	journeyURL string
 
 	completed string
 	action    string
@@ -79,11 +86,17 @@ func newCoopAgentReportWorkCmd() *coopAgentActionCmd {
 			if err != nil {
 				return outputAgentError(err)
 			}
+			outcome, err := parseOutcomeFlag(c.outcome)
+			if err != nil {
+				return outputAgentError(err)
+			}
 			resp, err := service.ReportWork(c.session, c.step, workflow.ReportWorkInput{
-				File:    c.file,
-				Lines:   c.lines,
-				Snippet: c.snippet,
-				Note:    c.note,
+				File:       c.file,
+				Lines:      c.lines,
+				Snippet:    c.snippet,
+				Note:       c.note,
+				Outcome:    outcome,
+				JourneyURL: c.journeyURL,
 			}, false)
 			return outputAgentResponse(resp, err)
 		},
@@ -93,7 +106,23 @@ func newCoopAgentReportWorkCmd() *coopAgentActionCmd {
 	c.cmd.Flags().StringVar(&c.lines, "lines", "", "Line range, e.g. 1-15")
 	c.cmd.Flags().StringVar(&c.snippet, "snippet", "", "Code snippet")
 	c.cmd.Flags().StringVar(&c.note, "note", "", "Implementation summary")
+	c.cmd.Flags().StringVar(&c.outcome, "outcome", "", "Journey outcome binding as <role>=<object id>, e.g. checkout_session=cs_123")
+	c.cmd.Flags().StringVar(&c.journeyURL, "journey-url", "", "URL the developer opens to complete the journey")
 	return c
+}
+
+// parseOutcomeFlag parses --outcome <role>=<object id>.
+func parseOutcomeFlag(value string) (*workflow.OutcomeInput, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
+	role, id, ok := strings.Cut(value, "=")
+	role = strings.TrimSpace(role)
+	id = strings.TrimSpace(id)
+	if !ok || role == "" || id == "" {
+		return nil, fmt.Errorf("--outcome must be <role>=<object id>, e.g. checkout_session=cs_123")
+	}
+	return &workflow.OutcomeInput{Role: role, ID: id}, nil
 }
 
 func newCoopAgentReportCheckCmd() *coopAgentActionCmd {
@@ -197,7 +226,34 @@ func newWorkflowService() (*workflow.Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating store: %w", err)
 	}
-	return workflow.NewService(store), nil
+	return workflow.NewService(store, workflow.WithUIVerifier(newUIVerifier())), nil
+}
+
+// newUIVerifier builds the confirm-time outcome checker. When no test-mode
+// key is available (not logged in, live-mode key, misconfiguration) the
+// checker runs with a nil reader and every check resolves unavailable, which
+// fails open to an explicit human attestation — never a wedged session.
+func newUIVerifier() workflow.UIVerifier {
+	return uicheck.NewChecker(newOutcomeReader())
+}
+
+func newOutcomeReader() uicheck.Reader {
+	if options.TestModeAPIKey == nil {
+		return nil
+	}
+	apiKey, err := options.TestModeAPIKey()
+	if err != nil || apiKey == "" {
+		return nil
+	}
+	baseURL, err := url.Parse(stripe.DefaultAPIBaseURL)
+	if err != nil {
+		return nil
+	}
+	reader, err := uicheck.NewStripeReader(&stripe.Client{BaseURL: baseURL, APIKey: apiKey}, apiKey)
+	if err != nil {
+		return nil
+	}
+	return reader
 }
 
 func runCoopNextAction(sessionID, completed string) error {

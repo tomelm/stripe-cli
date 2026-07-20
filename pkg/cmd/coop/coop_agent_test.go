@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
+	"github.com/stripe/stripe-cli/pkg/coop/workflow"
 )
 
 func setupAgentCommandTest(t *testing.T) (*coop.Store, *coop.Session) {
@@ -298,6 +299,59 @@ func TestCoopAgentStartFollowupRejectsUnknownAction(t *testing.T) {
 	assert.False(t, resp.OK)
 	assert.Contains(t, resp.Error, `guided action "unknown" not found`)
 	assert.Equal(t, "stripe coop agent start-followup --session=<session> --action=deploy", resp.Hint)
+}
+
+func TestParseOutcomeFlag(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    *workflow.OutcomeInput
+		wantErr string
+	}{
+		{
+			name: "empty value is not an error and has no binding",
+			want: nil,
+		},
+		{
+			name:  "role and id",
+			value: "checkout_session=cs_1x3",
+			want:  &workflow.OutcomeInput{Role: "checkout_session", ID: "cs_1x3"},
+		},
+		{
+			name:    "missing equals sign",
+			value:   "cs_123",
+			wantErr: "--outcome must be",
+		},
+		{
+			name:    "missing role",
+			value:   "=cs_123",
+			wantErr: "--outcome must be",
+		},
+		{
+			name:    "missing id",
+			value:   "role=",
+			wantErr: "--outcome must be",
+		},
+		{
+			name:  "whitespace around role and id is trimmed",
+			value: " role = id ",
+			want:  &workflow.OutcomeInput{Role: "role", ID: "id"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseOutcomeFlag(tt.value)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				assert.Nil(t, got)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }
 
 type nextActionErrorStore struct {

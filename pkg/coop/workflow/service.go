@@ -2,12 +2,15 @@
 package workflow
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
 	"github.com/stripe/stripe-cli/pkg/coop/helpers"
+	"github.com/stripe/stripe-cli/pkg/coop/uicheck"
 )
 
 const AwaitTimeout = 10 * time.Minute
@@ -19,12 +22,20 @@ type Store interface {
 	RemoveHeartbeat(id string) error
 }
 
+// UIVerifier performs a bounded one-shot outcome check for a node. ran is
+// false when the node has nothing checkable (no gated binding). Implemented
+// by uicheck's checker; nil disables confirm-time re-checks.
+type UIVerifier interface {
+	CheckNow(ctx context.Context, session *coop.Session, nodeNumber int) (obs uicheck.Observation, ran bool, err error)
+}
+
 type Service struct {
 	store        Store
 	fetchSnippet func(path, method string, params interface{}, language string) (string, error)
 	now          func() time.Time
 	sleep        func(time.Duration)
 	awaitTimeout time.Duration
+	uiVerifier   UIVerifier
 }
 
 type Option func(*Service)
@@ -52,6 +63,15 @@ func WithAwaitTimeout(timeout time.Duration) Option {
 	}
 }
 
+// WithUIVerifier enables a bounded confirm-time re-check of pending journey
+// outcomes, closing the window between the human completing the journey and
+// the background observer's next poll.
+func WithUIVerifier(verifier UIVerifier) Option {
+	return func(s *Service) {
+		s.uiVerifier = verifier
+	}
+}
+
 func NewService(store Store, opts ...Option) *Service {
 	s := &Service{
 		store:        store,
@@ -71,6 +91,11 @@ type ReportWorkInput struct {
 	Lines   string
 	Snippet string
 	Note    string
+
+	// Outcome binds a machine-verified journey to a Stripe object id; nil
+	// keeps an existing binding (and blocks when a gated node has none).
+	Outcome    *OutcomeInput
+	JourneyURL string
 }
 
 func (s *Service) StartWork(sessionID string, nodeNumber int, note string) (coop.CommandResponse, error) {
@@ -104,6 +129,12 @@ func (s *Service) StartWork(sessionID string, nodeNumber int, note string) (coop
 			resp.SDKExample = snippet
 		}
 	}
+	if expectation, ok := uicheck.DeriveExpectation(session, nodeNumber); ok && expectation.Gated() {
+		resp.UIOutcome = &coop.UIOutcomeSummary{Role: expectation.Role, Expect: expectation.Summary}
+		resp.Next = fmt.Sprintf(
+			"stripe coop agent report-work --session=%s --step=%d --file=<path> --note=\"<what you did>\" --outcome %s=<the %s id your journey completes> --journey-url=<url the developer opens>",
+			session.ID, nodeNumber, expectation.Role, expectation.Role)
+	}
 	return resp, nil
 }
 
@@ -117,22 +148,32 @@ func (s *Service) ReportWork(sessionID string, nodeNumber int, input ReportWorkI
 		if err != nil {
 			return err
 		}
+		expectation, derivable := uicheck.DeriveExpectation(session, nodeNumber)
+		gated := derivable && expectation.Gated()
+		if gated {
+			if err := applyOutcomeBinding(node, expectation, input, s.now()); err != nil {
+				return err
+			}
+		}
+		if gated && node.State == coop.NodeReview {
+			// Idempotent re-report while the journey is awaited: the binding
+			// was replaced or kept above; refresh evidence, no transition.
+			targetState = coop.NodeReview
+			applyImplementation(node, input)
+			node.Activity = ""
+			return nil
+		}
 		targetState = coop.NodeReview
-		if autoConfirm || node.AutoConfirm {
+		// A gated journey can never ride auto-confirm to done: the outcome
+		// has not happened yet when work is reported.
+		if (autoConfirm || node.AutoConfirm) && !gated {
 			targetState = coop.NodeDone
 		}
 		if err := session.TransitionNode(nodeNumber, targetState); err != nil {
 			return err
 		}
 		node, _ = session.NodeByNumber(nodeNumber)
-		if input.File != "" || input.Snippet != "" || input.Note != "" {
-			node.Implementation = &coop.Implementation{
-				File:    input.File,
-				Lines:   input.Lines,
-				Snippet: input.Snippet,
-				Note:    input.Note,
-			}
-		}
+		applyImplementation(node, input)
 		node.Activity = ""
 		if session.IsComplete() {
 			session.Status = coop.SessionCompleted
@@ -140,10 +181,41 @@ func (s *Service) ReportWork(sessionID string, nodeNumber int, input ReportWorkI
 		return nil
 	})
 	if err != nil {
-		return errorResponse(err, fmt.Sprintf("stripe coop agent start-work --session=%s --step=%d", sessionID, nodeNumber)), nil
+		return reportWorkErrorResponse(err, sessionID, nodeNumber), nil
 	}
 	node, _ := session.NodeByNumber(nodeNumber)
 	return s.reportWorkResponse(session, node, nodeNumber, targetState), nil
+}
+
+func applyImplementation(node *coop.SessionNode, input ReportWorkInput) {
+	if input.File != "" || input.Snippet != "" || input.Note != "" {
+		node.Implementation = &coop.Implementation{
+			File:    input.File,
+			Lines:   input.Lines,
+			Snippet: input.Snippet,
+			Note:    input.Note,
+		}
+	}
+}
+
+// reportWorkErrorResponse maps outcome-binding errors to a self-describing
+// corrective command so a blocked report is self-healing for the agent.
+func reportWorkErrorResponse(err error, sessionID string, nodeNumber int) coop.CommandResponse {
+	role := ""
+	var required *ErrOutcomeRequired
+	var invalid *ErrOutcomeInvalid
+	switch {
+	case errors.As(err, &required):
+		role = required.Role
+	case errors.As(err, &invalid):
+		role = invalid.Role
+	}
+	if role != "" {
+		return errorResponse(err, fmt.Sprintf(
+			"stripe coop agent report-work --session=%s --step=%d --file=<path> --note=\"<what you did>\" --outcome %s=<id> --journey-url=<url the developer opens>",
+			sessionID, nodeNumber, role))
+	}
+	return errorResponse(err, fmt.Sprintf("stripe coop agent start-work --session=%s --step=%d", sessionID, nodeNumber))
 }
 
 func (s *Service) ReportCheck(sessionID string, nodeNumber int, check string, passed bool) (coop.CommandResponse, error) {
@@ -209,6 +281,16 @@ func (s *Service) Skip(sessionID string, nodeNumber int, note string) (coop.Comm
 }
 
 func (s *Service) ConfirmReview(sessionID string, nodeNumbers []int) (*coop.Session, error) {
+	return s.ConfirmReviewContext(context.Background(), sessionID, nodeNumbers)
+}
+
+// ConfirmReviewContext confirms review nodes. For uiComponent nodes with a
+// still-unresolved journey outcome it first runs a bounded one-shot re-check
+// (network outside the store lock), then gates: pending or failed outcomes
+// block the whole confirm with a typed error; unavailable and unverifiable
+// outcomes convert to recorded human attestations.
+func (s *Service) ConfirmReviewContext(ctx context.Context, sessionID string, nodeNumbers []int) (*coop.Session, error) {
+	s.recheckPendingOutcomes(ctx, sessionID, nodeNumbers)
 	return s.store.Update(sessionID, func(session *coop.Session) error {
 		if err := requireActiveSession(session); err != nil {
 			return err
@@ -221,6 +303,11 @@ func (s *Service) ConfirmReview(sessionID string, nodeNumbers []int) (*coop.Sess
 			if node.State == coop.NodeDone || node.State == coop.NodeSkipped {
 				continue
 			}
+			if node.Type == coop.NodeUIComponent {
+				if err := gateUIConfirm(node, nodeNumber, s.now()); err != nil {
+					return err
+				}
+			}
 			if err := session.TransitionNode(nodeNumber, coop.NodeDone); err != nil {
 				return err
 			}
@@ -230,6 +317,35 @@ func (s *Service) ConfirmReview(sessionID string, nodeNumbers []int) (*coop.Sess
 		}
 		return nil
 	})
+}
+
+// recheckPendingOutcomes runs the one-shot verifier for any target node whose
+// outcome is still pending or unavailable and persists what it finds. All
+// network happens here, outside the store lock; failures leave the stored
+// status untouched and the gate decides from that.
+func (s *Service) recheckPendingOutcomes(ctx context.Context, sessionID string, nodeNumbers []int) {
+	if s.uiVerifier == nil {
+		return
+	}
+	session, err := s.store.Read(sessionID)
+	if err != nil {
+		return
+	}
+	for _, nodeNumber := range nodeNumbers {
+		node, err := session.NodeByNumber(nodeNumber)
+		if err != nil || node.State != coop.NodeReview || node.UIOutcome == nil {
+			continue
+		}
+		status := node.UIOutcome.Status
+		if status != coop.UIOutcomePending && status != coop.UIOutcomeUnavailable {
+			continue
+		}
+		obs, ran, err := s.uiVerifier.CheckNow(ctx, session, nodeNumber)
+		if err != nil || !ran {
+			continue
+		}
+		_, _ = uicheck.ApplyObservation(s.store, sessionID, nodeNumber, node.UIOutcome.ObjectID, obs, s.now())
+	}
 }
 
 func (s *Service) RequestChanges(sessionID string, nodeNumbers []int, note string) (*coop.Session, error) {
@@ -254,6 +370,48 @@ func (s *Service) RequestChanges(sessionID string, nodeNumbers []int, note strin
 			node.RejectionNote = note
 			node.Implementation = nil
 			node.Verifications = nil
+			node.UIOutcome = nil
+		}
+		return nil
+	})
+}
+
+// AttestOutcome records an explicit human attestation for uiComponent nodes
+// whose journey cannot be machine-checked (attestation tier, or a check that
+// is unavailable). It refuses nodes with a live observable outcome — you
+// cannot attest your way past a working check.
+func (s *Service) AttestOutcome(sessionID string, nodeNumbers []int) (*coop.Session, error) {
+	return s.store.Update(sessionID, func(session *coop.Session) error {
+		if err := requireActiveSession(session); err != nil {
+			return err
+		}
+		for _, nodeNumber := range nodeNumbers {
+			node, err := session.NodeByNumber(nodeNumber)
+			if err != nil {
+				return err
+			}
+			if node.Type != coop.NodeUIComponent || node.State != coop.NodeReview {
+				continue
+			}
+			resolved := s.now()
+			switch {
+			case node.UIOutcome == nil:
+				node.UIOutcome = &coop.UIOutcome{
+					Status:     coop.UIOutcomeAttested,
+					AttestedBy: "human-review",
+					Detail:     "no machine-checkable Stripe outcome for this journey; attested by the developer",
+					ResolvedAt: &resolved,
+				}
+			case node.UIOutcome.Status == coop.UIOutcomeUnavailable:
+				node.UIOutcome.Status = coop.UIOutcomeAttested
+				node.UIOutcome.AttestedBy = "human-review"
+				node.UIOutcome.Detail = "machine check unavailable (" + node.UIOutcome.Detail + "); attested by the developer"
+				node.UIOutcome.ResolvedAt = &resolved
+			case node.UIOutcome.Status == coop.UIOutcomeAttested:
+				// Already attested; idempotent.
+			default:
+				return fmt.Errorf("step %d has a machine-checkable outcome (%s) — complete the journey instead of attesting", nodeNumber, node.UIOutcome.Expect)
+			}
 		}
 		return nil
 	})
@@ -272,7 +430,7 @@ func (s *Service) AwaitReview(sessionID string, nodeNumber int) (coop.CommandRes
 		return errorResponse(err, "stripe coop status"), nil
 	}
 
-	if node.AutoConfirm && node.State == coop.NodeReview {
+	if node.AutoConfirm && node.State == coop.NodeReview && !uiGateBlocks(node) {
 		return s.autoConfirm(sessionID, nodeNumber)
 	}
 	if node.State == coop.NodeReview {
@@ -324,7 +482,11 @@ func (s *Service) awaitStepReview(sessionID, stepTitle string, stepIndex, nodeNu
 	deadline := s.now().Add(s.awaitTimeout)
 	for {
 		if s.now().After(deadline) {
-			return timeoutResponse(sessionID, nodeNumber), nil
+			resp := timeoutResponse(sessionID, nodeNumber)
+			if session, err := s.store.Read(sessionID); err == nil && stepHasPendingJourney(session, stepIndex) {
+				resp.Message += " The developer still needs to complete the journey in their browser (outcome pending). Keep any servers running and re-run await-review."
+			}
+			return resp, nil
 		}
 		s.sleep(500 * time.Millisecond)
 		if err := s.store.WriteHeartbeat(sessionID); err != nil {
@@ -360,35 +522,32 @@ func (s *Service) awaitStepReview(sessionID, stepTitle string, stepIndex, nodeNu
 
 func (s *Service) reportWorkResponse(session *coop.Session, node *coop.SessionNode, nodeNumber int, targetState coop.NodeState) coop.CommandResponse {
 	if targetState == coop.NodeReview {
-		step, stepIndex, _, err := session.StepByNodeNumber(nodeNumber)
-		if err == nil && !session.StepReadyForReview(stepIndex) {
-			return coop.CommandResponse{
-				OK:        true,
-				SessionID: session.ID,
-				Node:      nodeNumber,
-				State:     string(coop.NodeReview),
-				Message:   fmt.Sprintf("Ready: %s. Continue the step before asking for human review.", node.Title),
-				Next:      nextInStepOrStatus(session, stepIndex, nodeNumber),
-			}
-		}
-		if err == nil {
-			return coop.CommandResponse{
-				OK:        true,
-				SessionID: session.ID,
-				Node:      nodeNumber,
-				State:     string(coop.NodeReview),
-				Message:   fmt.Sprintf("Step ready for review: %s. Run relevant checks, keep useful servers running, share local URLs or test data, then await review.", step.Title),
-				Next:      fmt.Sprintf("stripe coop agent await-review --session=%s --step=%d", session.ID, nodeNumber),
-			}
-		}
-		return coop.CommandResponse{
+		resp := coop.CommandResponse{
 			OK:        true,
 			SessionID: session.ID,
 			Node:      nodeNumber,
 			State:     string(coop.NodeReview),
-			Message:   fmt.Sprintf("Ready for review: %s", node.Title),
-			Next:      fmt.Sprintf("stripe coop agent await-review --session=%s --step=%d", session.ID, nodeNumber),
+			UIOutcome: uiOutcomeSummary(node),
 		}
+		step, stepIndex, _, err := session.StepByNodeNumber(nodeNumber)
+		switch {
+		case err == nil && !session.StepReadyForReview(stepIndex):
+			resp.Message = fmt.Sprintf("Ready: %s. Continue the step before asking for human review.", node.Title)
+			resp.Next = nextInStepOrStatus(session, stepIndex, nodeNumber)
+		case err == nil:
+			resp.Message = fmt.Sprintf("Step ready for review: %s. Run relevant checks, keep useful servers running, share local URLs or test data, then await review.", step.Title)
+			resp.Next = fmt.Sprintf("stripe coop agent await-review --session=%s --step=%d", session.ID, nodeNumber)
+		default:
+			resp.Message = fmt.Sprintf("Ready for review: %s", node.Title)
+			resp.Next = fmt.Sprintf("stripe coop agent await-review --session=%s --step=%d", session.ID, nodeNumber)
+		}
+		if resp.UIOutcome != nil && resp.UIOutcome.Status == string(coop.UIOutcomePending) {
+			resp.Message = fmt.Sprintf(
+				"Outcome pending: the developer will now complete the journey in their browser. The CLI is watching Stripe for: %s (bound to %s). "+
+					"Do NOT wait for the webhook event yourself, do NOT poll the API, and do NOT use 'stripe trigger' — fixture events create a new object and cannot satisfy the bound check. %s",
+				resp.UIOutcome.Expect, resp.UIOutcome.ObjectID, resp.Message)
+		}
+		return resp
 	}
 
 	msg := fmt.Sprintf("Completed: %s", node.Title)

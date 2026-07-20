@@ -12,6 +12,7 @@ import (
 type Options struct {
 	ConfigFolder             func() string
 	SandboxClaimURL          func() string
+	TestModeAPIKey           func() (string, error)
 	AIAgentHelpAnnotationKey string
 }
 

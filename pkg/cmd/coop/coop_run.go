@@ -196,7 +196,7 @@ BEFORE YOU START — ensure you have API access:
 Each node has a description that tells you what to do. Follow the description — it's the source of truth. The node type is a hint about the general category:
 - "apiRequest": Usually means writing code that calls a Stripe API. Run it and verify the response.
 - "asyncHandler": Set up a webhook handler. Use "stripe listen --forward-to localhost:<port>/webhook" to test.
-- "uiComponent": Build frontend code or configure something user-facing. Verify it works.
+- "uiComponent": Build frontend code or configure something user-facing. If the start-work response includes a "ui_outcome" role, this journey is machine-verified: at report-work you MUST pass --outcome <role>=<object id> with the Stripe object the developer's journey completes (for example the Checkout Session your code redirects to), and --journey-url with the URL in YOUR APP the developer opens to start the journey (not the Stripe-hosted URL). After report-work the developer completes the journey in their own browser and the CLI watches Stripe for the real result — never claim the journey succeeded yourself, never wait for the webhook on the CLI's behalf, and never simulate it with "stripe trigger" (fixture events create a different object and cannot satisfy the bound check).
 - "cliCommand": Run a CLI command (e.g. stripe projects init, stripe projects deploy). Report the output.
 - "testHelper": Verify something works end-to-end. Run the flow and confirm the expected outcome.
 
