@@ -173,7 +173,11 @@ func TestDerivedStagesMatchBlueprints(t *testing.T) {
 			{"create-account-chapter.create-account", []StageResourceDeclaration{
 				role("connected_account", ResourceAccount, ResourceCreated),
 			}},
-			{"create-account-chapter.create-account-link", nil},
+			// Account links are ephemeral (no creation role), but the request
+			// references the connected account, which derives a reuse check.
+			{"create-account-chapter.create-account-link", []StageResourceDeclaration{
+				role("connected_account", ResourceAccount, ResourceReused),
+			}},
 			{"create-account-chapter.onboard-account", nil},
 			{"accept-embedded-payments-chapter.create-checkout-session", []StageResourceDeclaration{
 				role("checkout_session", ResourceCheckoutSession, ResourceCreated),

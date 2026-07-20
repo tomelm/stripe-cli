@@ -140,7 +140,6 @@ var linkParams = map[string]bool{
 	"account":           true,
 	"cardholder":        true,
 	"card":              true,
-	"test_clock":        true,
 	"financial_account": true,
 }
 
@@ -151,6 +150,9 @@ var nodeRefPattern = regexp.MustCompile(`\$\{node\.([^:}]+):([^}]*)\}`)
 type derivedStage struct {
 	declaration StageDeclaration
 	run         func(*stageCtx)
+	// connectContext marks sessions that create a connected account, whose
+	// objects the platform-scoped reader may legitimately be unable to read.
+	connectContext bool
 }
 
 // DeriveStage returns the derived role declarations for one node, used by
@@ -200,7 +202,8 @@ func deriveStage(session *coop.Session, nodeNumber int) (derivedStage, bool) {
 	}
 	checkers := builder.checkers
 	return derivedStage{
-		declaration: declaration,
+		declaration:    declaration,
+		connectContext: builder.sessionCreates(ResourceAccount) || builder.sessionCreates(ResourceV2CoreAccount),
 		run: func(c *stageCtx) {
 			for _, check := range checkers {
 				check(c)
@@ -256,6 +259,7 @@ func (b *stageBuilder) deriveFromRequest(node *coop.SessionNode) {
 		b.deriveReusedRefs(node)
 		return
 	}
+	defer b.deriveReusedRefs(node)
 
 	// Sub-resource POSTs: the path itself references an earlier node's object.
 	if parentRole, parentType, suffix, ok := b.subResource(path); ok {
@@ -283,6 +287,20 @@ func (b *stageBuilder) deriveFromRequest(node *coop.SessionNode) {
 				}
 			})
 			return
+		case BestEffortResourceType(parentType):
+			// v2 sub-resource actions (rates, components, live version)
+			// cannot be read back; declare the gap explicitly.
+			nodeKey := b.nodeID[strings.LastIndex(b.nodeID, ".")+1:]
+			action := suffix
+			if action == "" {
+				action = "update"
+			}
+			detail := "the " + action + " change on " + parentRole + " is v2 billing state this CLI cannot read; it is unavailable, not verified"
+			b.check(func(c *stageCtx) {
+				c.reused(parentRole)
+				c.unverifiable(pathToken(strings.ToLower(nodeKey)), detail)
+			})
+			return
 		default:
 			// Generic action on the parent object: re-observe it and derive
 			// linkage from any identity references in the action params (for
@@ -292,23 +310,8 @@ func (b *stageBuilder) deriveFromRequest(node *coop.SessionNode) {
 					b.paramChecks(c, parent, parentType, flatParams)
 				}
 			})
-			b.deriveReusedRefs(node)
-			return
-		case BestEffortResourceType(parentType):
-			// v2 sub-resource actions (rates, components, live version)
-			// cannot be read back; declare the gap explicitly.
-			nodeKey := b.nodeID[strings.LastIndex(b.nodeID, ".")+1:]
-			detail := "the " + suffix + " change on " + parentRole + " is v2 billing state this CLI cannot read; it is unavailable, not verified"
-			b.check(func(c *stageCtx) {
-				c.reused(parentRole)
-				c.unverifiable(pathToken(strings.ToLower(nodeKey)), detail)
-			})
-			b.deriveReusedRefs(node)
 			return
 		}
-		b.check(func(c *stageCtx) { c.reused(parentRole) })
-		b.deriveReusedRefs(node)
-		return
 	}
 }
 
@@ -343,7 +346,10 @@ func (b *stageBuilder) paramChecks(c *stageCtx, entry observed, createdType Reso
 			c.expectPositive(entry, "amount")
 		}
 	case ResourceCheckoutSession:
-		if hasParamPrefix(flatParams, "line_items") {
+		// Only payment mode guarantees a positive amount due at checkout:
+		// subscription-mode sessions with trials or metered prices settle $0
+		// today, and setup mode has no amount at all.
+		if hasParamPrefix(flatParams, "line_items") && flatParams["mode"] == "payment" {
 			c.expectPositive(entry, "amount_total")
 		}
 	case ResourceInvoiceItem:
@@ -354,7 +360,9 @@ func (b *stageBuilder) paramChecks(c *stageCtx, entry observed, createdType Reso
 }
 
 // deriveReusedRefs adds reuse declarations and existence checks for every
-// ${node.X:...} reference in the node's request.
+// ${node.X:...} reference in the node's request. Observation is cached per
+// role at run time, so a role also observed by an event bundle or creation
+// check is still fetched exactly once.
 func (b *stageBuilder) deriveReusedRefs(node *coop.SessionNode) {
 	if node.Request == nil {
 		return
@@ -370,9 +378,6 @@ func (b *stageBuilder) deriveReusedRefs(node *coop.SessionNode) {
 			continue
 		}
 		seen[role] = true
-		if _, alreadyDeclared := b.roles[role]; alreadyDeclared {
-			continue
-		}
 		roleCopy := role
 		b.check(func(c *stageCtx) { c.reused(roleCopy) })
 	}

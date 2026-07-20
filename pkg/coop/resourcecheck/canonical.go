@@ -60,9 +60,17 @@ func eventPrimaryType(event string) (ResourceType, bool) {
 }
 
 // deriveFromEvents turns an asyncHandler node's event names into terminal
-// state checks on the reported objects.
+// state checks on the reported objects. Alias event families (treasury
+// inbound transfers are announced under two prefixes) are deduplicated so a
+// node listing both derives one set of checks.
 func (b *stageBuilder) deriveFromEvents(node *coop.SessionNode) {
+	handled := map[string]bool{}
 	for _, event := range node.Events {
+		family := strings.TrimPrefix(event, "treasury.")
+		if handled[family] {
+			continue
+		}
+		handled[family] = true
 		switch {
 		case event == "checkout.session.completed":
 			b.deriveCheckoutCompleted()
@@ -229,8 +237,10 @@ func (b *stageBuilder) deriveV2Event(event string) {
 	})
 }
 
-// creationParams returns the flattened request params of the nearest node
-// (anywhere in the session) that creates the given type.
+// creationParams returns the flattened request params of the last node in
+// blueprint order that creates the given type. Every current blueprint has
+// at most one creator per type per flow; if that changes, resolution should
+// follow the awaiting node's ${node.X} reference chain instead.
 func (b *stageBuilder) creationParams(resourceType ResourceType) map[string]any {
 	var params map[string]any
 	for stepIndex := range b.session.Steps {

@@ -82,10 +82,11 @@ func (verifier *ReportVerifier) Verify(ctx context.Context, request ReportReques
 	defer cancel()
 
 	c := &stageCtx{
-		ctx:     runContext,
-		request: request,
-		roles:   stage.declaration.Resources,
-		refs:    map[string][]ReportReference{},
+		ctx:            runContext,
+		request:        request,
+		roles:          stage.declaration.Resources,
+		refs:           map[string][]ReportReference{},
+		connectContext: stage.connectContext,
 	}
 	if verifier == nil || verifier.reader == nil || verifier.account.Mode != ModeTest {
 		for _, role := range c.roles {

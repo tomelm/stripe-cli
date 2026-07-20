@@ -147,10 +147,19 @@ func (s *Service) StartWork(sessionID string, nodeNumber int, note string) (coop
 	}
 	if declaration, ok := resourcecheck.DeriveStage(session, nodeNumber); ok {
 		resp.StripeResourceRoles = make([]coop.StripeResourceRole, 0, len(declaration.Resources))
+		// The Next template must show the flags report-work will require, or
+		// an agent following it literally is guaranteed a blocked first report.
+		requiredFlags := ""
 		for _, resource := range declaration.Resources {
 			resp.StripeResourceRoles = append(resp.StripeResourceRoles, coop.StripeResourceRole{
 				Role: resource.Role, Type: string(resource.Type), Lifecycle: string(resource.Lifecycle),
 			})
+			if !resourcecheck.BestEffortResourceType(resource.Type) {
+				requiredFlags += fmt.Sprintf(" --stripe-resource %s=<id>", resource.Role)
+			}
+		}
+		if requiredFlags != "" {
+			resp.Next = fmt.Sprintf("stripe coop agent report-work --session=%s --step=%d --file=<path> --note=\"<what you did>\"%s", session.ID, nodeNumber, requiredFlags)
 		}
 	}
 	if node.Type == coop.NodeAPIRequest && node.Request != nil {
@@ -193,13 +202,22 @@ func (s *Service) ReportWorkContext(ctx context.Context, sessionID string, nodeN
 		prospectiveTarget = coop.NodeDone
 	}
 	if node.State != coop.NodeActive {
-		return errorResponse(reportTransitionError(node.State, nodeNumber, prospectiveTarget), startWorkHint), nil
+		// The hint must match the state: suggesting start-work on a review
+		// node would actually reopen it (review -> active is the redo edge).
+		hint := startWorkHint
+		switch node.State {
+		case coop.NodeReview:
+			hint = fmt.Sprintf("stripe coop agent await-review --session=%s --step=%d", sessionID, nodeNumber)
+		case coop.NodeDone, coop.NodeSkipped:
+			hint = fmt.Sprintf("stripe coop status --session=%s", sessionID)
+		}
+		return errorResponse(reportTransitionError(node.State, nodeNumber, prospectiveTarget), hint), nil
 	}
 	replacedRoles, replacements, err := stripeResourceReplacements(snapshot, nodeNumber, input.StripeResources)
 	if err != nil {
 		return errorResponse(err, startWorkHint), nil
 	}
-	prospective := supersedeStripeResources(snapshot.StripeResources, replacedRoles, replacements)
+	prospective := supersedeStripeResources(snapshot.StripeResources, replacedRoles, nodeNumber, replacements)
 	startedAtSnapshot := cloneTime(node.StartedAt)
 
 	// Run the bounded, read-only Stripe pass before any state change and
@@ -243,7 +261,7 @@ func (s *Service) ReportWorkContext(ctx context.Context, sessionID string, nodeN
 		if currentNode.State != coop.NodeActive || !timesEqual(currentNode.StartedAt, startedAtSnapshot) {
 			return errReportSuperseded
 		}
-		current.StripeResources = supersedeStripeResources(current.StripeResources, replacedRoles, replacements)
+		current.StripeResources = supersedeStripeResources(current.StripeResources, replacedRoles, nodeNumber, replacements)
 		if verifierRan {
 			currentNode.VerificationResults = nil
 			for _, result := range resultSet.Results {
@@ -307,7 +325,7 @@ func reportTransitionError(state coop.NodeState, nodeNumber int, target coop.Nod
 // replacement references. A corrected report supersedes every earlier
 // reference for a re-reported role, so stale IDs from prior attempts cannot
 // keep feeding verification.
-func stripeResourceReplacements(session *coop.Session, nodeNumber int, inputs []StripeResourceInput) (map[string]struct{}, []coop.StripeResourceReference, error) {
+func stripeResourceReplacements(session *coop.Session, nodeNumber int, inputs []StripeResourceInput) (map[string]supersedeMode, []coop.StripeResourceReference, error) {
 	if len(inputs) == 0 {
 		return nil, nil, nil
 	}
@@ -320,22 +338,26 @@ func stripeResourceReplacements(session *coop.Session, nodeNumber int, inputs []
 		roles[resource.Role] = resource.Type
 	}
 	seen := make(map[string]struct{}, len(inputs))
-	replacedRoles := make(map[string]struct{}, len(inputs))
+	replacedRoles := make(map[string]supersedeMode, len(inputs))
 	replacements := make([]coop.StripeResourceReference, 0, len(inputs))
 	declaredRoles := make([]string, 0, len(declaration.Resources))
 	for _, resource := range declaration.Resources {
 		declaredRoles = append(declaredRoles, resource.Role)
 	}
 	sort.Strings(declaredRoles)
+	lifecycles := make(map[string]resourcecheck.ResourceLifecycle, len(declaration.Resources))
+	for _, resource := range declaration.Resources {
+		lifecycles[resource.Role] = resource.Lifecycle
+	}
 	for _, input := range inputs {
 		resourceType, exists := roles[input.Role]
 		if !exists {
 			// Never echo the supplied role: a swapped flag can put a secret in
-			// the role position. The declared list comes from the overlay.
-			return nil, nil, fmt.Errorf("a reported --stripe-resource role is not declared for this blueprint stage (declared roles: %s)", strings.Join(declaredRoles, ", "))
+			// the role position. The declared list comes from the derived stage.
+			return nil, nil, fmt.Errorf("a reported --stripe-resource role is not declared for this node (declared roles: %s)", strings.Join(declaredRoles, ", "))
 		}
 		if _, err := resourcecheck.NewResourceRef(resourceType, input.ID); err != nil {
-			// input.Role is safe to echo here: it matched a declared overlay role.
+			// input.Role is safe to echo here: it matched a declared role.
 			return nil, nil, fmt.Errorf("Stripe resource ID for role %q is invalid", input.Role)
 		}
 		key := input.Role + "\x00" + input.ID
@@ -343,7 +365,7 @@ func stripeResourceReplacements(session *coop.Session, nodeNumber int, inputs []
 			continue
 		}
 		seen[key] = struct{}{}
-		replacedRoles[input.Role] = struct{}{}
+		replacedRoles[input.Role] = supersedeScope(lifecycles[input.Role])
 		replacements = append(replacements, coop.StripeResourceReference{
 			Role: input.Role, Type: string(resourceType), ID: input.ID, ReportedNode: nodeNumber,
 		})
@@ -351,17 +373,38 @@ func stripeResourceReplacements(session *coop.Session, nodeNumber int, inputs []
 	return replacedRoles, replacements, nil
 }
 
-// supersedeStripeResources drops every existing reference whose role is being
-// re-reported and appends the replacements. References for roles not present
-// in this report are retained for reuse by later stages.
-func supersedeStripeResources(existing []coop.StripeResourceReference, replacedRoles map[string]struct{}, replacements []coop.StripeResourceReference) []coop.StripeResourceReference {
+// supersedeScope decides how far a re-report replaces earlier references.
+// Reporting at a role's CREATION node replaces only that node's own earlier
+// attempt: other nodes creating the same type keep their objects. Reporting a
+// REUSED role replaces the role session-wide, which is how an agent repairs a
+// dead retained reference without human help.
+func supersedeScope(lifecycle resourcecheck.ResourceLifecycle) supersedeMode {
+	if lifecycle == resourcecheck.ResourceCreated {
+		return supersedeOwnNode
+	}
+	return supersedeSessionWide
+}
+
+type supersedeMode int
+
+const (
+	supersedeOwnNode supersedeMode = iota
+	supersedeSessionWide
+)
+
+// supersedeStripeResources drops the existing references displaced by this
+// report (per supersedeScope) and appends the replacements. References for
+// roles not present in this report are retained for reuse by later stages.
+func supersedeStripeResources(existing []coop.StripeResourceReference, replacedRoles map[string]supersedeMode, nodeNumber int, replacements []coop.StripeResourceReference) []coop.StripeResourceReference {
 	if len(replacedRoles) == 0 {
 		return existing
 	}
 	merged := make([]coop.StripeResourceReference, 0, len(existing)+len(replacements))
 	for _, reference := range existing {
-		if _, replaced := replacedRoles[reference.Role]; replaced {
-			continue
+		if mode, replaced := replacedRoles[reference.Role]; replaced {
+			if mode == supersedeSessionWide || reference.ReportedNode == nodeNumber {
+				continue
+			}
 		}
 		merged = append(merged, reference)
 	}
@@ -416,9 +459,15 @@ func blockedReportResponse(session *coop.Session, node *coop.SessionNode, nodeNu
 			if len(lines) >= verification.MaxAgentFacingResults {
 				break
 			}
-			if result.Status == verification.StatusFailed && result.Detail != "" {
-				lines = append(lines, result.Detail)
+			if result.Status != verification.StatusFailed || result.Detail == "" {
+				continue
 			}
+			// Missing roles already have a bullet with exact flag syntax
+			// above; the verifier's parallel result would only repeat it.
+			if len(missing) > 0 && strings.HasPrefix(result.Detail, "no Stripe resource ID was reported for role") {
+				continue
+			}
+			lines = append(lines, result.Detail)
 		}
 	}
 	message := "Stripe resource verification failed; the node stays active. Fix the integration or the reported IDs, then re-run report-work with the corrected --stripe-resource flags."
@@ -450,13 +499,17 @@ func (s *Service) supersededReportResponse(sessionID string, nodeNumber int) coo
 	if node.State != coop.NodeActive {
 		return alreadyMovedResponse(session, nodeNumber, node.State)
 	}
+	message := "Re-run report-work so the corrected attempt is verified."
+	if node.RejectionNote != "" {
+		message = "The developer requested changes.\nFeedback: " + node.RejectionNote + "\nAddress the feedback, then re-run report-work."
+	}
 	return coop.CommandResponse{
 		OK:        false,
 		SessionID: session.ID,
 		Node:      nodeNumber,
 		State:     string(coop.NodeActive),
 		Error:     "node was reopened while Stripe verification was running; verification results were discarded",
-		Message:   "Re-run report-work so the corrected attempt is verified.",
+		Message:   message,
 		Next:      fmt.Sprintf("stripe coop agent report-work --session=%s --step=%d --file=<path> --note=%s", session.ID, nodeNumber, quoteArg("<what you did>")),
 	}
 }
@@ -595,7 +648,7 @@ func (s *Service) RequestChanges(sessionID string, nodeNumbers []int, note strin
 				// correction: reset the action window so an in-flight report's
 				// StartedAt guard supersedes it and the corrected attempt gets
 				// a fresh window.
-				now := time.Now().UTC()
+				now := s.now().UTC()
 				node.StartedAt = &now
 			}
 			node.RejectionNote = note
@@ -655,9 +708,31 @@ func (s *Service) AwaitReview(sessionID string, nodeNumber int) (coop.CommandRes
 		}
 		return s.awaitStepReview(session.ID, step.Title, stepIndex, nodeNumber)
 	}
-	// Node is not in review (auto-confirm handled above, review handled in the
-	// block above): it has already moved on. Review always waits at step
-	// granularity via awaitStepReview.
+	if node.State == coop.NodeActive {
+		// Success semantics here would steer the agent to the NEXT node while
+		// this one is unfinished (or verification-blocked). Point it back.
+		message := fmt.Sprintf("Node %d is still active — finish the work and report it before awaiting review.", nodeNumber)
+		if node.VerificationResults != nil {
+			for _, result := range node.VerificationResults.Results {
+				if result.Status == verification.StatusFailed {
+					message = fmt.Sprintf("Node %d is still active because Stripe resource verification failed. Fix the reported issues and re-run report-work.", nodeNumber)
+					break
+				}
+			}
+		}
+		return nodeVerificationResponse(coop.CommandResponse{
+			OK:        false,
+			SessionID: session.ID,
+			Node:      nodeNumber,
+			State:     string(coop.NodeActive),
+			Error:     "node is not awaiting review",
+			Message:   message,
+			Next:      fmt.Sprintf("stripe coop agent report-work --session=%s --step=%d --file=<path> --note=%s", session.ID, nodeNumber, quoteArg("<what you did>")),
+		}, node), nil
+	}
+	// Node is done or skipped (auto-confirm and review handled above): it has
+	// already moved on. Review always waits at step granularity via
+	// awaitStepReview.
 	return alreadyMovedResponse(session, nodeNumber, node.State), nil
 }
 

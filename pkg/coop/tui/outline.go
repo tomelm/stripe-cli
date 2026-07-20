@@ -8,6 +8,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
+	"github.com/stripe/stripe-cli/pkg/coop/verification"
 )
 
 func (m Model) renderStepList() string {
@@ -289,6 +290,11 @@ func (m Model) renderNodeLine(node coop.SessionNode, idx int, includedInStepRevi
 			}
 		}
 		annText = "Agent working: " + node.Activity + elapsed
+		if nodeHasFailedVerification(node) {
+			// The agent is in a repair loop; without this the outline shows
+			// only the stale start-work note while nothing seems to happen.
+			annText = "Agent fixing: Stripe verification found a mismatch" + elapsed
+		}
 		annStyle = func(s string) string { return m.theme.DimmedStyle.Render(s) }
 	case node.State == coop.NodeSkipped && node.Activity != "":
 		annText = "— " + node.Activity
@@ -347,4 +353,18 @@ func (m Model) nodeIcon(node coop.SessionNode) string {
 	default:
 		return m.theme.MutedStyle.Render("○")
 	}
+}
+
+// nodeHasFailedVerification reports whether the node's persisted verification
+// results contain a deterministic contradiction the agent is repairing.
+func nodeHasFailedVerification(node coop.SessionNode) bool {
+	if node.VerificationResults == nil {
+		return false
+	}
+	for _, result := range node.VerificationResults.Results {
+		if result.Status == verification.StatusFailed {
+			return true
+		}
+	}
+	return false
 }

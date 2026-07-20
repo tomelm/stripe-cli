@@ -21,6 +21,14 @@ type stageCtx struct {
 	roles   []StageResourceDeclaration
 	refs    map[string][]ReportReference
 	results []verification.Result
+	// connectContext is true when the session creates a connected account:
+	// objects may then legitimately live on that account, unreadable by the
+	// platform-scoped reader, so a 404 cannot be treated as a contradiction.
+	connectContext bool
+	// observations caches each role's pass so a role referenced by multiple
+	// derived checks (request refs plus event bundles) is fetched and scored
+	// exactly once.
+	observations map[string][]observed
 }
 
 // observed is one reported reference plus its fetched payload. A nil payload
@@ -87,11 +95,18 @@ func (c *stageCtx) observeRole(role string, lifecycle ResourceLifecycle) []obser
 		c.unavailableResult("internal:"+roleToken(role), "internal check/table mismatch for role "+role+"; this check did not run")
 		return nil
 	}
+	if cached, seen := c.observations[role]; seen {
+		return cached
+	}
 	references := c.refs[role]
 	results := make([]observed, 0, len(references))
 	for _, reference := range references {
 		results = append(results, c.observeReference(reference, lifecycle))
 	}
+	if c.observations == nil {
+		c.observations = map[string][]observed{}
+	}
+	c.observations[role] = results
 	return results
 }
 
@@ -130,7 +145,14 @@ func (c *stageCtx) observeReference(reference ReportReference, lifecycle Resourc
 	payload, err := c.fetchByID(reference)
 	switch {
 	case errors.Is(err, ErrNotFound):
-		c.failedResult(resultID, "the reported "+reference.Role+" was not found in the test-mode account")
+		if c.connectContext && reference.Type != ResourceAccount {
+			// The session creates a connected account, and this reader is
+			// scoped to the platform account: the object may legitimately
+			// live on the connected account, so absence is not evidence.
+			c.unavailableResult(resultID, "the reported "+reference.Role+" was not found on the platform account; it may live on the connected account, which this CLI cannot read — it is unavailable, not verified")
+			return entry
+		}
+		c.failedResult(resultID, "the reported "+reference.Role+" was not found in the test-mode account; if your application created it, confirm the app uses the same test-mode account as `stripe whoami`")
 		return entry
 	case errors.Is(err, ErrUnauthorized):
 		c.unavailableResult(resultID, "Stripe authentication is not authorized for the expected account; "+reference.Role+" was not verified")
@@ -194,6 +216,11 @@ func (c *stageCtx) fetchFeatureByList(featureID string) (map[string]any, error) 
 	payload, err := c.reader.GetObject(c.ctx, "/v1/entitlements/features", url.Values{
 		"limit": {strconv.Itoa(MaxListLimit)},
 	})
+	if errors.Is(err, ErrNotFound) {
+		// A 404 on the LIST endpoint means the entitlements API is
+		// unavailable for this account, not that the feature is absent.
+		return nil, ErrUnavailable
+	}
 	if err != nil {
 		return nil, err
 	}
