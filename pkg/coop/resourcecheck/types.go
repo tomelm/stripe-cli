@@ -54,35 +54,6 @@ const (
 	ResourceV2ServiceAction           ResourceType = "v2.billing.service_action"
 )
 
-// bestEffortTypes cannot be reliably read with standard credentials (the v2
-// preview families). Reads pass or degrade to unavailable, never fail, and
-// the workflow must not treat a missing reference for such a role as an
-// agent error.
-var bestEffortTypes = map[ResourceType]bool{
-	ResourceV2PricingPlan:             true,
-	ResourceV2RateCard:                true,
-	ResourceV2MeteredItem:             true,
-	ResourceV2LicensedItem:            true,
-	ResourceV2LicenseFee:              true,
-	ResourceV2PricingPlanSubscription: true,
-	ResourceV2CoreAccount:             true,
-	ResourceV2OutboundSetupIntent:     true,
-	ResourceV2InboundTransfer:         true,
-	ResourceV2ServiceAction:           true,
-}
-
-// BestEffortResourceType reports whether reads for this type may be
-// unsupported by the account's credentials or API version.
-func BestEffortResourceType(resourceType ResourceType) bool {
-	return bestEffortTypes[resourceType]
-}
-
-// windowCheckable reports whether the type exposes a creation timestamp the
-// action-window check can use. Features have none; v2 reads are best-effort.
-func windowCheckable(resourceType ResourceType) bool {
-	return resourceType != ResourceEntitlementFeature && !bestEffortTypes[resourceType]
-}
-
 // AccountContext binds every read to one explicit test-mode Stripe account.
 // It deliberately contains no API key or other credential material.
 type AccountContext struct {

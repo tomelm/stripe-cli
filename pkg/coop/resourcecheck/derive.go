@@ -25,6 +25,27 @@ import (
 // Structural literals in params (mode, collection_method, controller.*) are
 // compared exactly; application-chosen values (amounts, currency, fees) are
 // only required to be positive and consistent between linked objects.
+//
+// Worked example — the invoice-payments blueprint's create-invoice node:
+//
+//	{ "type": "apiRequest",
+//	  "request": { "method": "post", "path": "/v1/invoices", "params": {
+//	    "collection_method": "send_invoice",
+//	    "customer": "${node.set-up-chapter.create-customer:id}",
+//	    "days_until_due": 30 } } }
+//
+// derives, with no other configuration:
+//
+//	roles:  invoice (created)               <- POST /v1/invoices (signal 1)
+//	        customer (reused)               <- ${node...create-customer:id} (signal 2)
+//	checks: invoice exists, is test mode, was created during this node
+//	        invoice.collection_method == "send_invoice"   <- structural literal
+//	        invoice.customer links to the reported customer ID
+//	        customer exists in test mode
+//	(days_until_due is application-adjustable and deliberately unchecked.)
+//
+// start-work advertises those roles to the agent; report-work requires an ID
+// for each and runs the checks before the node can move to review.
 
 // ResourceLifecycle states what a role means at one node: created resources
 // are checked against the node's action window when first reported; reused
@@ -49,84 +70,6 @@ type StageResourceDeclaration struct {
 type StageDeclaration struct {
 	NodeID    string
 	Resources []StageResourceDeclaration
-}
-
-// creationPaths maps exact POST paths to the object type they create.
-// Ephemeral or unfetchable objects (account links, test clocks) are absent on
-// purpose: nothing useful can be verified about them later.
-var creationPaths = map[string]ResourceType{
-	"/v1/products":                    ResourceProduct,
-	"/v1/customers":                   ResourceCustomer,
-	"/v1/checkout/sessions":           ResourceCheckoutSession,
-	"/v1/invoices":                    ResourceInvoice,
-	"/v1/invoiceitems":                ResourceInvoiceItem,
-	"/v1/payment_intents":             ResourcePaymentIntent,
-	"/v1/payment_methods":             ResourcePaymentMethod,
-	"/v1/prices":                      ResourcePrice,
-	"/v1/setup_intents":               ResourceSetupIntent,
-	"/v1/subscriptions":               ResourceSubscription,
-	"/v1/billing/meters":              ResourceBillingMeter,
-	"/v1/entitlements/features":       ResourceEntitlementFeature,
-	"/v1/accounts":                    ResourceAccount,
-	"/v1/issuing/cardholders":         ResourceIssuingCardholder,
-	"/v1/issuing/cards":               ResourceIssuingCard,
-	"/v1/treasury/financial_accounts": ResourceTreasuryFinancialAccount,
-	"/v1/treasury/inbound_transfers":  ResourceTreasuryInboundTransfer,
-
-	"/v2/billing/pricing_plans":                   ResourceV2PricingPlan,
-	"/v2/billing/rate_cards":                      ResourceV2RateCard,
-	"/v2/billing/metered_items":                   ResourceV2MeteredItem,
-	"/v2/billing/licensed_items":                  ResourceV2LicensedItem,
-	"/v2/billing/license_fees":                    ResourceV2LicenseFee,
-	"/v2/billing/pricing_plan_subscriptions":      ResourceV2PricingPlanSubscription,
-	"/v2/billing/service_actions":                 ResourceV2ServiceAction,
-	"/v2/core/accounts":                           ResourceV2CoreAccount,
-	"/v2/money_management/outbound_setup_intents": ResourceV2OutboundSetupIntent,
-	"/v2/money_management/inbound_transfers":      ResourceV2InboundTransfer,
-}
-
-// roleNames gives each type its stable agent-facing role name.
-var roleNames = map[ResourceType]string{
-	ResourceProduct:                   "product",
-	ResourceCustomer:                  "customer",
-	ResourceCheckoutSession:           "checkout_session",
-	ResourceInvoice:                   "invoice",
-	ResourceInvoiceItem:               "invoice_item",
-	ResourcePaymentIntent:             "payment_intent",
-	ResourcePaymentMethod:             "payment_method",
-	ResourcePrice:                     "price",
-	ResourceSetupIntent:               "setup_intent",
-	ResourceSubscription:              "subscription",
-	ResourceBillingMeter:              "meter",
-	ResourceEntitlementFeature:        "feature",
-	ResourceAccount:                   "connected_account",
-	ResourceIssuingCardholder:         "cardholder",
-	ResourceIssuingCard:               "card",
-	ResourceTreasuryFinancialAccount:  "financial_account",
-	ResourceTreasuryInboundTransfer:   "inbound_transfer",
-	ResourceV2PricingPlan:             "pricing_plan",
-	ResourceV2RateCard:                "rate_card",
-	ResourceV2MeteredItem:             "metered_item",
-	ResourceV2LicensedItem:            "licensed_item",
-	ResourceV2LicenseFee:              "license_fee",
-	ResourceV2PricingPlanSubscription: "pricing_plan_subscription",
-	ResourceV2CoreAccount:             "core_account",
-	ResourceV2OutboundSetupIntent:     "outbound_setup_intent",
-	ResourceV2InboundTransfer:         "v2_inbound_transfer",
-	ResourceV2ServiceAction:           "service_action",
-}
-
-// structuralParams are request parameters that select the integration
-// pattern rather than an application-chosen value: when the blueprint sets
-// them as literals, the created object must match exactly. Parameter path
-// and object field path coincide for all of them.
-var structuralParams = map[ResourceType][]string{
-	ResourceCheckoutSession:   {"mode"},
-	ResourceInvoice:           {"collection_method"},
-	ResourceAccount:           {"controller.fees.payer", "controller.losses.payments", "controller.requirement_collection"},
-	ResourceBillingMeter:      {"default_aggregation.formula"},
-	ResourceIssuingCardholder: {"type", "status"},
-	ResourceIssuingCard:       {"type", "status"},
 }
 
 // linkParams are request parameters that, when set from a ${node.X:id}
@@ -318,7 +261,7 @@ func (b *stageBuilder) deriveFromRequest(node *coop.SessionNode) {
 // paramChecks derives field checks on a created object from the blueprint's
 // literal and reference parameters.
 func (b *stageBuilder) paramChecks(c *stageCtx, entry observed, createdType ResourceType, flatParams map[string]any) {
-	for _, field := range structuralParams[createdType] {
+	for _, field := range resourceProfiles[createdType].structuralParams {
 		if value, present := flatParams[field]; present {
 			if text, isText := value.(string); isText && !strings.Contains(text, "${") {
 				c.expectString(entry, field, text)

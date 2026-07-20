@@ -194,11 +194,11 @@ func (c *stageCtx) observeReference(reference ReportReference, lifecycle Resourc
 }
 
 func (c *stageCtx) fetchByID(reference ReportReference) (map[string]any, error) {
-	descriptor, ok := supportedResourceDescriptors[reference.Type]
-	if !ok || descriptor.retrievePath == "" {
+	profile, ok := resourceProfiles[reference.Type]
+	if !ok || profile.retrievePath == "" {
 		return nil, ErrUnavailable
 	}
-	path := strings.ReplaceAll(descriptor.retrievePath, "{id}", url.PathEscape(reference.ID))
+	path := strings.ReplaceAll(profile.retrievePath, "{id}", url.PathEscape(reference.ID))
 	payload, err := c.reader.GetObject(c.ctx, path, nil)
 	if err != nil {
 		return nil, err

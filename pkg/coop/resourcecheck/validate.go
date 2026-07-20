@@ -39,7 +39,7 @@ var (
 )
 
 func validateResourceRef(ref ResourceRef) error {
-	descriptor, ok := supportedResourceDescriptors[ref.Type]
+	profile, ok := resourceProfiles[ref.Type]
 	if !ok {
 		return errors.New("resource type is not supported")
 	}
@@ -48,7 +48,7 @@ func validateResourceRef(ref ResourceRef) error {
 	}
 	compatible := false
 	matchedPrefix := ""
-	for _, prefix := range descriptor.idPrefixes {
+	for _, prefix := range profile.idPrefixes {
 		if strings.HasPrefix(ref.ID, prefix) {
 			compatible = true
 			matchedPrefix = prefix
