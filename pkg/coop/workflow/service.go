@@ -231,12 +231,9 @@ func (s *Service) ReportWorkContext(ctx context.Context, sessionID string, nodeN
 		})
 		if verifyErr != nil {
 			set = verification.NewResultSet(verification.Result{
-				ID:            "resource.provider",
-				CheckID:       resourcecheck.CheckResourceExists,
-				Source:        verification.SourceCLI,
-				Status:        verification.StatusUnavailable,
-				FailureDomain: verification.FailureDomainCollector,
-				Detail:        "Stripe resource verification was unavailable",
+				ID:     "provider",
+				Status: verification.StatusUnavailable,
+				Detail: "Stripe resource verification was unavailable",
 			})
 		}
 		resultSet = set
@@ -404,13 +401,11 @@ func missingStageRoles(declaration resourcecheck.StageDeclaration, references []
 }
 
 // hasBlockingResult reports whether the verification pass produced a
-// deterministic contradiction (see resourcecheck.DeterministicContradiction):
-// failed results and not_observed existence results block for agent repair;
-// cascaded not_observed results on linkage/entitlement checks and every
-// unavailable result fail open.
+// deterministic contradiction. The whole policy lives in the status: failed
+// blocks for agent repair, unavailable fails open, passed is a pass.
 func hasBlockingResult(set verification.ResultSet) bool {
 	for _, result := range set.Results {
-		if resourcecheck.DeterministicContradiction(result) {
+		if result.Status == verification.StatusFailed {
 			return true
 		}
 	}
@@ -430,7 +425,7 @@ func blockedReportResponse(session *coop.Session, node *coop.SessionNode, nodeNu
 			if len(lines) >= verification.MaxAgentFacingResults {
 				break
 			}
-			if resourcecheck.DeterministicContradiction(result) && result.Detail != "" {
+			if result.Status == verification.StatusFailed && result.Detail != "" {
 				lines = append(lines, result.Detail)
 			}
 		}

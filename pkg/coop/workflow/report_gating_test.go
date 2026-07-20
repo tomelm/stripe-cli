@@ -78,11 +78,11 @@ func TestMissingDeclaredRoleBlocksWithoutCredentials(t *testing.T) {
 	assert.Equal(t, coop.NodeActive, node.State)
 }
 
-func TestCascadedNotObservedDoesNotBlock(t *testing.T) {
-	t.Run("linkage not_observed fails open", func(t *testing.T) {
+func TestStatusAloneDeterminesBlocking(t *testing.T) {
+	t.Run("unavailable fails open", func(t *testing.T) {
 		store, session := frozenSessionStore(t, "one-time-payment", "session_cascade_link")
 		verifier := &scriptedResourceVerifier{verify: func(resourcecheck.ReportRequest) (verification.ResultSet, error) {
-			return verification.NewResultSet(notObservedGatingResult("resource.link", resourcecheck.CheckResourceLinkage)), nil
+			return verification.NewResultSet(unavailableGatingResult("resource.link")), nil
 		}}
 		service := newGatingService(store, verifier)
 
@@ -95,10 +95,10 @@ func TestCascadedNotObservedDoesNotBlock(t *testing.T) {
 		assert.Equal(t, coop.NodeReview, storedNode(t, store, session.ID, 2).State)
 	})
 
-	t.Run("existence not_observed blocks", func(t *testing.T) {
+	t.Run("failed blocks", func(t *testing.T) {
 		store, session := frozenSessionStore(t, "one-time-payment", "session_cascade_exists")
 		verifier := &scriptedResourceVerifier{verify: func(resourcecheck.ReportRequest) (verification.ResultSet, error) {
-			return verification.NewResultSet(notObservedGatingResult("resource.product", resourcecheck.CheckResourceExists)), nil
+			return verification.NewResultSet(failedGatingResult("resource.product", "the reported product could not be observed")), nil
 		}}
 		service := newGatingService(store, verifier)
 
@@ -211,7 +211,7 @@ func TestReportSupersededGuard(t *testing.T) {
 		node := storedNode(t, store, session.ID, 2)
 		require.NotNil(t, node.VerificationResults)
 		require.Len(t, node.VerificationResults.Results, 1)
-		assert.Equal(t, verification.ResultID("resource.winner"), node.VerificationResults.Results[0].ID)
+		assert.Equal(t, "resource.winner", node.VerificationResults.Results[0].ID)
 		assert.ElementsMatch(t, []string{"product=prod_winner123"}, sessionReferenceLabels(t, store, session.ID))
 	})
 
@@ -339,30 +339,24 @@ func (verifier *scriptedResourceVerifier) Verify(_ context.Context, request reso
 
 func passedGatingResult(id string) verification.Result {
 	return verification.Result{
-		ID: verification.ResultID(id), CheckID: resourcecheck.CheckResourceExists, Source: verification.SourceCLI,
-		Status: verification.StatusPassed, Detail: "resource state observed",
+		ID:     id,
+		Status: verification.StatusPassed,
+		Detail: "resource state observed",
 	}
 }
 
 func failedGatingResult(id, detail string) verification.Result {
 	return verification.Result{
-		ID: verification.ResultID(id), CheckID: resourcecheck.CheckResourceField, Source: verification.SourceCLI,
-		Status: verification.StatusFailed, FailureDomain: verification.FailureDomainIntegration, Detail: detail,
-	}
-}
-
-func notObservedGatingResult(id string, checkID verification.CheckID) verification.Result {
-	return verification.Result{
-		ID: verification.ResultID(id), CheckID: checkID, Source: verification.SourceCLI,
-		Status: verification.StatusNotObserved, FailureDomain: verification.FailureDomainIntegration,
-		Detail: "resource state could not be observed",
+		ID:     id,
+		Status: verification.StatusFailed,
+		Detail: detail,
 	}
 }
 
 func unavailableGatingResult(id string) verification.Result {
 	return verification.Result{
-		ID: verification.ResultID(id), CheckID: resourcecheck.CheckResourceExists, Source: verification.SourceCLI,
-		Status: verification.StatusUnavailable, FailureDomain: verification.FailureDomainCollector,
+		ID:     id,
+		Status: verification.StatusUnavailable,
 		Detail: "Stripe resource verification was unavailable",
 	}
 }

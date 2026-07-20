@@ -402,9 +402,9 @@ func TestRenderReviewCardShowsAutomaticStripeResourceResults(t *testing.T) {
 	m.session.Steps[0].Nodes[0].State = coop.NodeReview
 	m.session.Steps[0].Nodes[1].State = coop.NodeDone
 	results := verification.NewResultSet(
-		verification.Result{ID: "resource.exists:product", CheckID: "stripe.resource.exists", Source: verification.SourceCLI, Status: verification.StatusPassed, Detail: "product current state observed"},
-		verification.Result{ID: "resource.linkage:checkout-product", CheckID: "stripe.resource.linkage", Source: verification.SourceCLI, Status: verification.StatusFailed, FailureDomain: verification.FailureDomainIntegration, Detail: "resource link does not match"},
-		verification.Result{ID: "resource.exists:price", CheckID: "stripe.resource.exists", Source: verification.SourceCLI, Status: verification.StatusUnavailable, FailureDomain: verification.FailureDomainCollector, Detail: "Stripe authentication is unavailable"},
+		verification.Result{ID: "resource.exists:product", Status: verification.StatusPassed, Detail: "product current state observed"},
+		verification.Result{ID: "resource.linkage:checkout-product", Status: verification.StatusFailed, Detail: "resource link does not match"},
+		verification.Result{ID: "resource.exists:price", Status: verification.StatusUnavailable, Detail: "Stripe authentication is unavailable"},
 	)
 	m.session.Steps[0].Nodes[0].VerificationResults = &results
 	m.selectionCursor = 0
@@ -421,10 +421,9 @@ func TestRenderReviewCardShowsAutomaticStripeResourceResults(t *testing.T) {
 func TestRenderDetailShowsDistinctStatusSymbols(t *testing.T) {
 	m := testModel()
 	results := verification.NewResultSet(
-		verification.Result{ID: "resource.exists:product", CheckID: "stripe.resource.exists", Source: verification.SourceCLI, Status: verification.StatusPassed, Detail: "product current state observed"},
-		verification.Result{ID: "resource.field.active:product", CheckID: "stripe.resource.field", Source: verification.SourceCLI, Status: verification.StatusFailed, FailureDomain: verification.FailureDomainIntegration, Detail: "field active does not match"},
-		verification.Result{ID: "resource.exists:meter", CheckID: "stripe.resource.exists", Source: verification.SourceCLI, Status: verification.StatusUnavailable, FailureDomain: verification.FailureDomainCollector, Detail: "the CLI cannot read this v2 resource"},
-		verification.Result{ID: "resource.linkage:checkout-product", CheckID: "stripe.resource.linkage", Source: verification.SourceCLI, Status: verification.StatusNotObserved, Detail: "linkage was not checked"},
+		verification.Result{ID: "resource.exists:product", Status: verification.StatusPassed, Detail: "product current state observed"},
+		verification.Result{ID: "resource.field.active:product", Status: verification.StatusFailed, Detail: "field active does not match"},
+		verification.Result{ID: "resource.exists:meter", Status: verification.StatusUnavailable, Detail: "the CLI cannot read this v2 resource"},
 	)
 	m.session.Steps[0].Nodes[0].VerificationResults = &results
 	m.selectionCursor = 0
@@ -438,7 +437,6 @@ func TestRenderDetailShowsDistinctStatusSymbols(t *testing.T) {
 	assert.Contains(t, plain, "✓ Stripe resource passed")
 	assert.Contains(t, plain, "✗ Stripe resource failed")
 	assert.Contains(t, plain, "! Stripe resource unavailable")
-	assert.Contains(t, plain, "· Stripe resource not observed")
 	// The unavailable line must surface its detail so the human can see which
 	// portion of the blueprint went unverified.
 	assert.Contains(t, plain, "cannot read this v2 resource")
@@ -450,8 +448,8 @@ func TestRenderReviewCardShowsTruncationMarker(t *testing.T) {
 	m.session.Steps[0].Nodes[0].State = coop.NodeReview
 	m.session.Steps[0].Nodes[1].State = coop.NodeDone
 	results := verification.NewResultSet(
-		verification.Result{ID: "resource.exists:product", CheckID: "stripe.resource.exists", Source: verification.SourceCLI, Status: verification.StatusPassed, Detail: "product current state observed"},
-		verification.Result{ID: "resource.coverage:truncated", CheckID: "stripe.resource.coverage", Source: verification.SourceCLI, Status: verification.StatusNotObserved, FailureDomain: verification.FailureDomainCoverage, Detail: "3 verification results were dropped by the per-node result cap; treat coverage as incomplete"},
+		verification.Result{ID: "resource.exists:product", Status: verification.StatusPassed, Detail: "product current state observed"},
+		verification.Result{ID: "resource.coverage:truncated", Status: verification.StatusUnavailable, Detail: "3 verification results were dropped by the per-node result cap; treat coverage as incomplete"},
 	)
 	m.session.Steps[0].Nodes[0].VerificationResults = &results
 	m.selectionCursor = 0
@@ -460,7 +458,7 @@ func TestRenderReviewCardShowsTruncationMarker(t *testing.T) {
 
 	assertContainsPlain(t, card, "Stripe resources:")
 	assertContainsPlain(t, card, "1 passed")
-	assertContainsPlain(t, card, "1 not observed")
+	assertContainsPlain(t, card, "1 unavailable")
 
 	m.expanded = true
 	m.detailTab = 2 // Checks

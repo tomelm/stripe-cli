@@ -1,17 +1,15 @@
 // Package resourcecheck performs bounded, read-only checks of agent-reported
 // Stripe resources for the six frozen Co-op evaluation blueprints.
 //
-// ReportVerifier is the production entry point: report-work hands it the
-// session's reported role/ID references for one blueprint stage, and it runs
-// the stage's overlay declarations (existence, field, linkage, entitlement,
-// and product-feature checks) through Checker. Checker executes primitives
-// against an injected read-only Reader; StripeReader is the concrete adapter
-// over the Stripe CLI request performer. It accepts an explicit process-local
-// credential and account context and never reads profile or environment
-// secrets. No layer retries or mutates Stripe state. Every read receives a
-// package-enforced deadline, live-mode metadata is a safety failure, and
-// unavailable collection fails open rather than passing. Observations mint
-// in-memory provenance capabilities only after a passed CLI result; linkage
-// checks require those capabilities rather than trusting caller-supplied
-// target IDs.
+// The design is deliberately flat. StripeReader.GetObject is the only Stripe
+// surface: one bounded GET with a pinned API version that authorizes the
+// injected test-mode credential against the expected account before reading.
+// stages.go declares which roles each blueprint node works with (start-work
+// advertises them; report-work requires them). checks.go holds one imperative
+// function per stage that reads like the stage's checklist: fetch the
+// reported objects, compare the blueprint's literal values, and confirm
+// linkage between reported IDs. Results carry the whole policy in their
+// status — failed is a deterministic contradiction that keeps the node active
+// for agent repair, unavailable could not be checked and fails open to human
+// review, and neither is ever presented as a pass.
 package resourcecheck

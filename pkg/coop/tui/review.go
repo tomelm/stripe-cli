@@ -267,7 +267,7 @@ func (m Model) reviewResourceVerificationLabel(nodeNumbers []int) string {
 		}
 	}
 	var labels []string
-	for _, status := range []string{"passed", "failed", "not_observed", "unavailable"} {
+	for _, status := range []string{"passed", "failed", "unavailable"} {
 		if counts[status] == 0 {
 			continue
 		}

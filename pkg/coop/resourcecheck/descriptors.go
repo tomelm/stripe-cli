@@ -1,29 +1,31 @@
 package resourcecheck
 
+// resourceDescriptor is the trusted, package-owned identity and retrieval
+// contract for one resource type. Callers cannot register arbitrary types.
+// v2 billing IDs have no spec-confirmed prefixes; the empty prefix keeps
+// charset and placeholder validation without asserting a family marker.
+// Features have no retrieve path: they resolve through one bounded list page.
 type resourceDescriptor struct {
-	idPrefixes []string
+	idPrefixes   []string
+	retrievePath string // "{id}" is replaced with the URL-escaped resource ID
 }
 
-// supportedResourceDescriptors is the trusted, package-owned type/identity
-// contract. Callers cannot register arbitrary types or compatible prefixes.
 var supportedResourceDescriptors = map[ResourceType]resourceDescriptor{
-	ResourceAccount:            {idPrefixes: []string{"acct_"}},
-	ResourceBillingMeter:       {idPrefixes: []string{"mtr_"}},
-	ResourceCheckoutSession:    {idPrefixes: []string{"cs_"}},
-	ResourceCustomer:           {idPrefixes: []string{"cus_"}},
-	ResourceInvoice:            {idPrefixes: []string{"in_"}},
-	ResourceInvoiceItem:        {idPrefixes: []string{"ii_"}},
+	ResourceAccount:            {idPrefixes: []string{"acct_"}, retrievePath: "/v1/accounts/{id}"},
+	ResourceBillingMeter:       {idPrefixes: []string{"mtr_"}, retrievePath: "/v1/billing/meters/{id}"},
+	ResourceCheckoutSession:    {idPrefixes: []string{"cs_"}, retrievePath: "/v1/checkout/sessions/{id}"},
+	ResourceCustomer:           {idPrefixes: []string{"cus_"}, retrievePath: "/v1/customers/{id}"},
+	ResourceInvoice:            {idPrefixes: []string{"in_"}, retrievePath: "/v1/invoices/{id}"},
+	ResourceInvoiceItem:        {idPrefixes: []string{"ii_"}, retrievePath: "/v1/invoiceitems/{id}"},
 	ResourceEntitlementFeature: {idPrefixes: []string{"feat_"}},
-	ResourcePaymentIntent:      {idPrefixes: []string{"pi_"}},
-	ResourceProduct:            {idPrefixes: []string{"prod_"}},
-	ResourceSubscription:       {idPrefixes: []string{"sub_"}},
+	ResourcePaymentIntent:      {idPrefixes: []string{"pi_"}, retrievePath: "/v1/payment_intents/{id}"},
+	ResourceProduct:            {idPrefixes: []string{"prod_"}, retrievePath: "/v1/products/{id}"},
+	ResourceSubscription:       {idPrefixes: []string{"sub_"}, retrievePath: "/v1/subscriptions/{id}"},
 
-	// v2 billing IDs have no spec-confirmed prefixes; the empty prefix keeps
-	// charset and placeholder validation without asserting a family marker.
-	ResourceV2PricingPlan:             {idPrefixes: []string{""}},
-	ResourceV2RateCard:                {idPrefixes: []string{""}},
-	ResourceV2MeteredItem:             {idPrefixes: []string{""}},
-	ResourceV2LicensedItem:            {idPrefixes: []string{""}},
-	ResourceV2LicenseFee:              {idPrefixes: []string{""}},
-	ResourceV2PricingPlanSubscription: {idPrefixes: []string{""}},
+	ResourceV2PricingPlan:             {idPrefixes: []string{""}, retrievePath: "/v2/billing/pricing_plans/{id}"},
+	ResourceV2RateCard:                {idPrefixes: []string{""}, retrievePath: "/v2/billing/rate_cards/{id}"},
+	ResourceV2MeteredItem:             {idPrefixes: []string{""}, retrievePath: "/v2/billing/metered_items/{id}"},
+	ResourceV2LicensedItem:            {idPrefixes: []string{""}, retrievePath: "/v2/billing/licensed_items/{id}"},
+	ResourceV2LicenseFee:              {idPrefixes: []string{""}, retrievePath: "/v2/billing/license_fees/{id}"},
+	ResourceV2PricingPlanSubscription: {idPrefixes: []string{""}, retrievePath: "/v2/billing/pricing_plan_subscriptions/{id}"},
 }

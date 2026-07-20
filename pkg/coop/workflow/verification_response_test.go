@@ -21,17 +21,9 @@ func TestReportWorkRendersConciseAdvisoryVerificationResults(t *testing.T) {
 			return err
 		}
 		return verification.UpsertResult(&node.VerificationResults, verification.Result{
-			ID:            "runtime-check",
-			CheckID:       "runtime-check",
-			Source:        verification.SourceCLI,
-			Status:        verification.StatusFailed,
-			FailureDomain: verification.FailureDomainApplication,
-			Detail:        "Expected behavior was not seen.",
-			Evidence: []verification.Evidence{{
-				Key:   "internal_identifier",
-				Class: verification.EvidenceIdentifier,
-				Value: "internal-value",
-			}},
+			ID:     "runtime-check",
+			Status: verification.StatusFailed,
+			Detail: "Expected behavior was not seen.",
 		}, verification.NewSanitizer())
 	})
 	require.NoError(t, err)
@@ -245,8 +237,9 @@ type recordingResourceVerifier struct {
 func (verifier *recordingResourceVerifier) Verify(_ context.Context, request resourcecheck.ReportRequest) (verification.ResultSet, error) {
 	verifier.requests = append(verifier.requests, request)
 	return verification.NewResultSet(verification.Result{
-		ID: "resource.fake", CheckID: resourcecheck.CheckResourceExists, Source: verification.SourceCLI,
-		Status: verification.StatusPassed, Detail: "resource state observed",
+		ID:     "resource.fake",
+		Status: verification.StatusPassed,
+		Detail: "resource state observed",
 	}), nil
 }
 

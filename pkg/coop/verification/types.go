@@ -1,121 +1,94 @@
 package verification
 
+import (
+	"errors"
+	"fmt"
+)
+
 // CurrentSchemaVersion identifies the ResultSet wire contract.
 const CurrentSchemaVersion = 1
 
-// Source identifies who produced a result.
-type Source string
+const maxIDLength = 128
 
-const (
-	SourceAgent Source = "agent"
-	SourceCLI   Source = "cli"
-)
-
-// Valid reports whether source is part of the verification contract.
-func (source Source) Valid() bool {
-	return source == SourceAgent || source == SourceCLI
-}
-
-// Status is the outcome reported for a check.
+// Status is the outcome reported for one check.
+//
+// The full policy fits in the status: a failed result is a deterministic
+// contradiction and keeps the node active for agent repair; an unavailable
+// result means the check could not run (missing credentials, unsupported API
+// access, rate limits, incomplete bounded lookups) and fails open to normal
+// human review. Neither may ever be presented as a pass.
 type Status string
 
 const (
 	StatusPassed      Status = "passed"
 	StatusFailed      Status = "failed"
-	StatusNotObserved Status = "not_observed"
 	StatusUnavailable Status = "unavailable"
-	StatusSkipped     Status = "skipped"
 )
 
 // Valid reports whether status is part of the verification contract.
 func (status Status) Valid() bool {
 	switch status {
-	case StatusPassed, StatusFailed, StatusNotObserved, StatusUnavailable, StatusSkipped:
+	case StatusPassed, StatusFailed, StatusUnavailable:
 		return true
 	default:
 		return false
 	}
 }
 
-// FailureDomain identifies the system that contradicted a requirement or
-// prevented it from being evaluated.
-type FailureDomain string
-
-const (
-	FailureDomainIntegration FailureDomain = "integration"
-	FailureDomainApplication FailureDomain = "application"
-	FailureDomainCollector   FailureDomain = "collector"
-	FailureDomainCoverage    FailureDomain = "coverage"
-	FailureDomainSafety      FailureDomain = "safety"
-)
-
-// Valid reports whether domain is empty or part of the verification contract.
-func (domain FailureDomain) Valid() bool {
-	switch domain {
-	case "", FailureDomainIntegration, FailureDomainApplication, FailureDomainCollector, FailureDomainCoverage, FailureDomainSafety:
-		return true
-	default:
-		return false
-	}
-}
-
-// EvidenceClass describes how an evidence scalar must be handled. It does not
-// establish that the evidence is correct or authorize displaying it.
-type EvidenceClass string
-
-const (
-	EvidenceSafe        EvidenceClass = "safe"
-	EvidenceIdentifier  EvidenceClass = "identifier"
-	EvidenceFingerprint EvidenceClass = "fingerprint"
-	EvidenceSensitive   EvidenceClass = "sensitive"
-)
-
-// Valid reports whether class is part of the verification contract.
-func (class EvidenceClass) Valid() bool {
-	switch class {
-	case EvidenceSafe, EvidenceIdentifier, EvidenceFingerprint, EvidenceSensitive:
-		return true
-	default:
-		return false
-	}
-}
-
-// Evidence is one named scalar attached to a result. Key uses the same stable
-// grammar as IDs. Consumers must not assume that Class performs redaction;
-// they remain responsible for keeping secret material out of durable output.
-type Evidence struct {
-	Key   string        `json:"key"`
-	Class EvidenceClass `json:"class"`
-	Value string        `json:"value,omitempty"`
-}
-
-// Result is the policy-neutral outcome of one check execution.
-//
-// Transient is a factual producer classification. It does not prescribe
-// whether or when a consumer should retry the check.
+// Result is the durable outcome of one check execution. ID is a stable,
+// producer-owned identifier; Detail is a human/agent-readable sentence that
+// must never contain credentials or raw resource IDs.
 type Result struct {
-	ID            ResultID      `json:"id"`
-	CheckID       CheckID       `json:"check_id"`
-	Source        Source        `json:"source"`
-	Status        Status        `json:"status"`
-	FailureDomain FailureDomain `json:"failure_domain,omitempty"`
-	Transient     bool          `json:"transient,omitempty"`
-	Detail        string        `json:"detail,omitempty"`
-	Evidence      []Evidence    `json:"evidence,omitempty"`
+	ID     string `json:"id"`
+	Status Status `json:"status"`
+	Detail string `json:"detail,omitempty"`
 }
 
-// ResultSet is the versioned deterministic wire envelope for results.
+// Validate reports whether the result satisfies the wire contract.
+func (result Result) Validate() error {
+	if result.ID == "" {
+		return errors.New("verification result ID is required")
+	}
+	if len(result.ID) > maxIDLength {
+		return fmt.Errorf("verification result ID exceeds %d bytes", maxIDLength)
+	}
+	if !result.Status.Valid() {
+		return fmt.Errorf("verification result %q has invalid status %q", result.ID, result.Status)
+	}
+	return nil
+}
+
+// ResultSet is the versioned envelope persisted on a session node.
 type ResultSet struct {
 	SchemaVersion int      `json:"schema_version"`
 	Results       []Result `json:"results"`
 }
 
-// NewResultSet returns a versioned result envelope. It copies the result slice
-// so callers can safely reuse their input after construction.
+// NewResultSet returns a versioned result envelope. It copies the result
+// slice so callers can safely reuse their input after construction.
 func NewResultSet(results ...Result) ResultSet {
 	copyOfResults := append([]Result(nil), results...)
 	if copyOfResults == nil {
 		copyOfResults = []Result{}
 	}
 	return ResultSet{SchemaVersion: CurrentSchemaVersion, Results: copyOfResults}
+}
+
+// Validate reports whether the envelope and every result are well formed and
+// result IDs are unique.
+func (set ResultSet) Validate() error {
+	if set.SchemaVersion != CurrentSchemaVersion {
+		return fmt.Errorf("verification result set has unsupported schema version %d", set.SchemaVersion)
+	}
+	seen := make(map[string]struct{}, len(set.Results))
+	for _, result := range set.Results {
+		if err := result.Validate(); err != nil {
+			return err
+		}
+		if _, duplicate := seen[result.ID]; duplicate {
+			return fmt.Errorf("verification result set repeats ID %q", result.ID)
+		}
+		seen[result.ID] = struct{}{}
+	}
+	return nil
 }

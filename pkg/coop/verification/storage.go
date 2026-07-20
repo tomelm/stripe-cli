@@ -10,9 +10,7 @@ import (
 
 const (
 	MaxResultsPerNode      = 24
-	MaxEvidencePerResult   = 8
 	MaxDetailBytes         = 240
-	MaxEvidenceValueBytes  = 160
 	MaxAgentFacingResults  = 8
 	redactedCredentialText = "[redacted]"
 )
@@ -59,7 +57,7 @@ func UpsertResult(set **ResultSet, result Result, sanitizer Sanitizer) error {
 		return err
 	}
 
-	byID := make(map[ResultID]Result, MaxResultsPerNode+1)
+	byID := make(map[string]Result, MaxResultsPerNode+1)
 	if *set != nil {
 		if err := (*set).Validate(); err != nil {
 			return err
@@ -74,11 +72,11 @@ func UpsertResult(set **ResultSet, result Result, sanitizer Sanitizer) error {
 	}
 	byID[prepared.ID] = prepared
 
-	ids := make([]ResultID, 0, len(byID))
+	ids := make([]string, 0, len(byID))
 	for id := range byID {
 		ids = append(ids, id)
 	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	sort.Strings(ids)
 	if len(ids) > MaxResultsPerNode {
 		ids = ids[:MaxResultsPerNode]
 	}
@@ -92,50 +90,27 @@ func UpsertResult(set **ResultSet, result Result, sanitizer Sanitizer) error {
 	return nil
 }
 
-// Prepare validates, redacts, bounds, and orders one result for persistence.
+// Prepare validates, redacts, and bounds one result for persistence.
 func (sanitizer Sanitizer) Prepare(result Result) (Result, error) {
 	if err := result.Validate(); err != nil {
 		return Result{}, err
 	}
-	if sanitizer.containsCredential(string(result.ID)) ||
-		sanitizer.containsCredential(string(result.CheckID)) {
+	if sanitizer.containsCredential(result.ID) {
 		return Result{}, ErrCredentialExposure
 	}
-
-	prepared := cloneResult(result)
-	prepared.Detail = truncateUTF8(sanitizer.redact(prepared.Detail), MaxDetailBytes)
-	sort.Slice(prepared.Evidence, func(i, j int) bool {
-		return prepared.Evidence[i].Key < prepared.Evidence[j].Key
-	})
-	if len(prepared.Evidence) > MaxEvidencePerResult {
-		prepared.Evidence = prepared.Evidence[:MaxEvidencePerResult]
-	}
-	for index := range prepared.Evidence {
-		evidence := &prepared.Evidence[index]
-		if sanitizer.containsCredential(evidence.Key) {
-			return Result{}, ErrCredentialExposure
-		}
-		if evidence.Class == EvidenceSensitive {
-			evidence.Value = redactedCredentialText
-		} else {
-			evidence.Value = truncateUTF8(sanitizer.redact(evidence.Value), MaxEvidenceValueBytes)
-		}
-	}
-	if err := prepared.Validate(); err != nil {
-		return Result{}, err
-	}
-	return prepared, nil
+	result.Detail = truncateUTF8(sanitizer.redact(result.Detail), MaxDetailBytes)
+	return result, nil
 }
 
-// Summary is the concise, evidence-free result projection returned to agents.
+// Summary is the concise result projection returned to agents.
 type Summary struct {
-	ID      ResultID `json:"id"`
-	CheckID CheckID  `json:"check_id"`
-	Status  Status   `json:"status"`
-	Detail  string   `json:"detail,omitempty"`
+	ID     string `json:"id"`
+	Status Status `json:"status"`
+	Detail string `json:"detail,omitempty"`
 }
 
-// AgentSummaries returns a deterministic, bounded projection without evidence.
+// AgentSummaries returns a deterministic, bounded projection of a node's
+// persisted results.
 func AgentSummaries(set *ResultSet) []Summary {
 	if set == nil || len(set.Results) == 0 {
 		return nil
@@ -148,18 +123,12 @@ func AgentSummaries(set *ResultSet) []Summary {
 	summaries := make([]Summary, 0, len(results))
 	for _, result := range results {
 		summaries = append(summaries, Summary{
-			ID:      result.ID,
-			CheckID: result.CheckID,
-			Status:  result.Status,
-			Detail:  truncateUTF8(NewSanitizer().redact(result.Detail), MaxDetailBytes),
+			ID:     result.ID,
+			Status: result.Status,
+			Detail: truncateUTF8(NewSanitizer().redact(result.Detail), MaxDetailBytes),
 		})
 	}
 	return summaries
-}
-
-func cloneResult(result Result) Result {
-	result.Evidence = append([]Evidence(nil), result.Evidence...)
-	return result
 }
 
 func (sanitizer Sanitizer) containsCredential(value string) bool {
