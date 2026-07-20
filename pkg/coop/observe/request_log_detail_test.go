@@ -1,7 +1,11 @@
 package observe
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -114,4 +118,43 @@ func TestParamPresence(t *testing.T) {
 	present, missing = paramPresence([]string{"currency"}, []string{"currency"}, 4)
 	assert.Equal(t, 1, present)
 	assert.Empty(t, missing)
+}
+
+func TestStripeRequestLogFetcherFetchesOverHTTP(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1/request_logs/req_test123", r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"livemode": false,
+			"request": {
+				"from_dashboard": false,
+				"get_params": {},
+				"post_params": {"name": "x"},
+				"headers": {"User-Agent": "Stripe/v1 stripe-cli/master"}
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	base, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	fetcher := &stripeRequestLogFetcher{apiKey: "sk_test_fetcher", baseURL: base}
+
+	detail, err := fetcher.Fetch(context.Background(), "req_test123")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"name"}, detail.ParamKeys)
+	assert.Equal(t, RequestSourceCLI, detail.SourceClass)
+}
+
+func TestStripeRequestLogFetcherRequiresBaseURL(t *testing.T) {
+	// Regression: a nil BaseURL previously panicked inside
+	// stripe.Client.PerformRequest and took down the whole observer.
+	fetcher := &stripeRequestLogFetcher{apiKey: "sk_test_fetcher"}
+	_, err := fetcher.Fetch(context.Background(), "req_test123")
+	require.Error(t, err)
+
+	// The production constructor always sets the API base.
+	production, ok := NewRequestLogFetcher("sk_test_fetcher").(*stripeRequestLogFetcher)
+	require.True(t, ok)
+	assert.NotNil(t, production.baseURL)
 }

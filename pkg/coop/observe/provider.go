@@ -303,9 +303,12 @@ type fetchJob struct {
 }
 
 const (
-	fetchQueueCapacity   = 8
-	fetchRetryBaseDelay  = time.Second
-	fetchAttempts        = 3
+	fetchQueueCapacity = 8
+	// Request-log details index well after the stream delivers the request:
+	// measured live at roughly 15-35 seconds. Attempts run at +10s, +30s,
+	// and +60s after the immediate first try.
+	fetchRetryBaseDelay  = 10 * time.Second
+	fetchAttempts        = 4
 	fetchResponseTimeout = 10 * time.Second
 )
 
@@ -364,8 +367,12 @@ func (target *providerTarget) expectedParamKeys() []string {
 }
 
 // runDetailFetcher loads request-log details for matched requests with
-// bounded retries (log indexing can lag the stream by a moment).
+// bounded retries (log indexing lags the stream; see fetchRetryBaseDelay).
+// Enrichment is advisory: a panic here must never take down the observer.
 func (provider *Provider) runDetailFetcher(ctx context.Context) {
+	defer func() {
+		_ = recover()
+	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -384,6 +391,7 @@ func (provider *Provider) fetchWithRetry(ctx context.Context, requestID string) 
 	var lastErr error
 	for attempt := 0; attempt < fetchAttempts; attempt++ {
 		if attempt > 0 {
+			// 10s, 20s, 30s waits: cumulative +10s/+30s/+60s coverage.
 			delay := time.Duration(attempt) * fetchRetryBaseDelay
 			timer := time.NewTimer(delay)
 			select {

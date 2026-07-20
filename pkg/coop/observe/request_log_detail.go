@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 
@@ -44,12 +45,14 @@ type RequestLogFetcher interface {
 // Stripe client routing. The endpoint is undocumented; any failure is treated
 // as detail-unavailable by callers, never as a verification signal.
 type stripeRequestLogFetcher struct {
-	apiKey string
+	apiKey  string
+	baseURL *url.URL
 }
 
 // NewRequestLogFetcher returns the production fetcher for the given key.
 func NewRequestLogFetcher(apiKey string) RequestLogFetcher {
-	return &stripeRequestLogFetcher{apiKey: apiKey}
+	base, _ := url.Parse(stripe.DefaultAPIBaseURL)
+	return &stripeRequestLogFetcher{apiKey: apiKey, baseURL: base}
 }
 
 // requestLogDetailPayload mirrors only the fields we project; everything else
@@ -70,7 +73,11 @@ func (fetcher *stripeRequestLogFetcher) Fetch(ctx context.Context, requestID str
 	if err := validateConfigText("request_id", requestID, 128, false); err != nil {
 		return RequestLogDetail{}, err
 	}
-	client := &stripe.Client{APIKey: fetcher.apiKey}
+	if fetcher.baseURL == nil {
+		return RequestLogDetail{}, fmt.Errorf("request log fetcher has no API base")
+	}
+	// BaseURL must be set: stripe.Client.PerformRequest dereferences it.
+	client := &stripe.Client{APIKey: fetcher.apiKey, BaseURL: fetcher.baseURL}
 	telemetrySafeCtx := stripe.WithTelemetryClient(ctx, &stripe.NoOpTelemetryClient{})
 	resp, err := client.PerformRequest(telemetrySafeCtx, http.MethodGet, "/v1/request_logs/"+requestID, "", nil)
 	if err != nil {
