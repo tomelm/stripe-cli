@@ -22,6 +22,7 @@ type keyMap struct {
 	Follow    key.Binding
 	Confirm   key.Binding
 	Reject    key.Binding
+	Attest    key.Binding
 	Copy      key.Binding
 	OpenClaim key.Binding
 }
@@ -92,6 +93,10 @@ func newKeyMap() keyMap {
 			key.WithKeys("r"),
 			key.WithHelp("r", "request changes"),
 		),
+		Attest: key.NewBinding(
+			key.WithKeys("a"),
+			key.WithHelp("a", "attest"),
+		),
 		Copy: key.NewBinding(
 			key.WithKeys("y"),
 			key.WithHelp("y", "copy"),
@@ -130,6 +135,14 @@ func (m Model) ShortHelp() []key.Binding {
 			confirm.SetHelp("c", "confirm all")
 			reject.SetHelp("r", "changes")
 		}
+		// Keep the confirm affordance visible while the journey gate holds,
+		// but say so — pressing it explains what to do instead of acting.
+		if m.outcomeBlockReason(target.nodeNumbers) != "" {
+			confirm.SetHelp("c", "confirm (locked)")
+		}
+		if m.targetHasAttestableNode(target.nodeNumbers) {
+			bindings = append(bindings, m.keys.Attest)
+		}
 		bindings = append(bindings, confirm, reject)
 	}
 
@@ -147,7 +160,11 @@ func (m Model) ShortHelp() []key.Binding {
 		bindings = append(bindings, m.keys.Tab, m.keys.Escape)
 	}
 
-	if m.sandboxClaimLink() != "" {
+	if m.selectedJourneyURL() != "" {
+		open := m.keys.OpenClaim
+		open.SetHelp("o", "open journey")
+		bindings = append(bindings, open)
+	} else if m.sandboxClaimLink() != "" {
 		bindings = append(bindings, m.keys.OpenClaim)
 	}
 

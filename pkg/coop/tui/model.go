@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -69,6 +70,13 @@ type Model struct {
 
 	isDark  bool
 	focused bool // true when terminal has focus (default: true, updated via FocusMsg/BlurMsg)
+
+	// outcomeObserver, when set, polls Stripe for bound journey outcomes on
+	// its own message chain (independent of the focus-gated session tick).
+	outcomeObserver OutcomeObserver
+	// workflowOpts are threaded into every workflow service the TUI builds
+	// (e.g. the confirm-time outcome verifier).
+	workflowOpts []workflow.Option
 }
 
 func newThemedSpinner(t Theme) spinner.Model {
@@ -157,10 +165,14 @@ func NewWaitingModel(store *coop.Store, existingSessionIDs map[string]bool, opts
 }
 
 func (m Model) Init() tea.Cmd {
-	if m.waiting {
-		return tea.Batch(m.spinner.Tick, tickCmd(), tea.RequestBackgroundColor)
+	cmds := []tea.Cmd{m.spinner.Tick, tickCmd(), tea.RequestBackgroundColor}
+	if !m.waiting {
+		cmds = append(cmds, m.loadSession())
 	}
-	return tea.Batch(m.loadSession(), m.spinner.Tick, tickCmd(), tea.RequestBackgroundColor)
+	if m.outcomeObserver != nil {
+		cmds = append(cmds, outcomeTickCmd(outcomeWatchActive))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -189,6 +201,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tickCmd()
 		}
 		return m, tea.Batch(m.checkForUpdates(), tickCmd())
+
+	case outcomeTickMsg:
+		return m, m.handleOutcomeTick()
+
+	case outcomeCheckedMsg:
+		return m, m.handleOutcomeChecked(msg)
 
 	case noUpdateMsg:
 		m.updateAgentIdle(msg.heartbeatAge, msg.heartbeatOK, time.Now())
@@ -730,7 +748,13 @@ func (m Model) handleActionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case key.Matches(msg, m.keys.Confirm):
 		return m, m.handleConfirm()
+	case key.Matches(msg, m.keys.Attest):
+		return m, m.handleAttest()
 	case key.Matches(msg, m.keys.OpenClaim):
+		// Contextual: a pending journey URL wins over the sandbox claim URL.
+		if journeyURL := m.selectedJourneyURL(); journeyURL != "" {
+			return m, openBrowserCmd(journeyURL)
+		}
 		if claimURL := m.sandboxClaimLink(); claimURL != "" {
 			return m, openBrowserCmd(claimURL)
 		}
@@ -849,8 +873,24 @@ func (m *Model) handleConfirm() tea.Cmd {
 	if !ok {
 		return nil
 	}
-	session, err := workflow.NewService(m.store).ConfirmReview(m.session.ID, target.nodeNumbers)
+	if reason := m.outcomeBlockReason(target.nodeNumbers); reason != "" {
+		m.setStatus(reason, 6*time.Second)
+		m.resizeViewport()
+		m.syncViewport()
+		return nil
+	}
+	session, err := m.workflowService().ConfirmReview(m.session.ID, target.nodeNumbers)
 	if err != nil {
+		// A gate refusal is expected interaction, not a fatal error: the
+		// stale-view race means the service can still block after the local
+		// pre-check passed. Never route it to m.err (which replaces the view).
+		var notObserved *workflow.ErrUIOutcomeNotObserved
+		if errors.As(err, &notObserved) {
+			m.setStatus(notObserved.Error(), 6*time.Second)
+			m.resizeViewport()
+			m.syncViewport()
+			return nil
+		}
 		m.err = fmt.Errorf("failed to confirm review: %w", err)
 		return nil
 	}
@@ -930,7 +970,7 @@ func (m *Model) handleReject(note string) {
 		return
 	}
 	target := m.rejectTarget
-	session, err := workflow.NewService(m.store).RequestChanges(m.session.ID, target.nodeNumbers, note)
+	session, err := m.workflowService().RequestChanges(m.session.ID, target.nodeNumbers, note)
 	if err != nil {
 		m.err = fmt.Errorf("failed to request changes: %w", err)
 		return

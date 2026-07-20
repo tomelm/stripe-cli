@@ -27,8 +27,12 @@ func (m Model) renderFooter() string {
 
 	if m.session != nil {
 		if count := m.actionableReviewCount(); count > 0 {
+			message := "  Waiting for you: review step"
+			if target, ok := m.selectedReviewTarget(); ok && m.outcomeBlockReason(target.nodeNumbers) != "" {
+				message = "  Waiting for you: complete the journey to unlock review"
+			}
 			lines = append(lines, "")
-			lines = append(lines, m.theme.AttentionStyle.Render("  Waiting for you: review step"))
+			lines = append(lines, m.theme.AttentionStyle.Render(message))
 		}
 	}
 
@@ -91,6 +95,9 @@ func (m Model) renderReviewCardWithMaxHeight(maxHeight int) string {
 		lines = append(lines, m.theme.ConfirmationHeaderStyle.Render("Confirmation steps"))
 		lines = append(lines, check)
 	}
+	// Journey-outcome rows sit above the agent metadata so height truncation
+	// drops "Agent changed/verified" before it drops the gate explanation.
+	lines = append(lines, m.reviewOutcomeLines(target.nodeNumbers)...)
 	metadataStart := len(lines)
 	if target.kind == "step" {
 		if included := m.reviewNodeTitleLabel(target.nodeNumbers); included != "" {

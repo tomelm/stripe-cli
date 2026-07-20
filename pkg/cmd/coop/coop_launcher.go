@@ -243,7 +243,7 @@ func (rc *coopRunCmd) runInTmuxSplitWithCommand(stripeBin string, blueprintID st
 	}
 
 	if blueprintID != "" {
-		return tui.Run(store, session.ID, tui.WithSandboxClaimURL(coopSandboxClaimURL()))
+		return tui.Run(store, session.ID, coopTUIOptions()...)
 	}
 
 	return runCoopTUIWait(store)
@@ -410,5 +410,5 @@ func runCoopTUIWait(store *coop.Store) error {
 			existingIDs[id] = true
 		}
 	}
-	return tui.RunWaiting(store, existingIDs, tui.WithSandboxClaimURL(coopSandboxClaimURL()))
+	return tui.RunWaiting(store, existingIDs, coopTUIOptions()...)
 }
