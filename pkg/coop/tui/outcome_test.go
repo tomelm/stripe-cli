@@ -69,16 +69,37 @@ func billingPortalSession(id string, node2State coop.NodeState, outcome *coop.UI
 	return gatedOutcomeSession(id, "/v1/billing_portal/sessions", node2State, outcome)
 }
 
+// pendingOutcome is the pre-bound shape: the agent named the object up front,
+// so the card can watch a specific id.
 func pendingOutcome() *coop.UIOutcome {
 	reported := time.Now()
 	return &coop.UIOutcome{
 		Role:       "checkout_session",
+		Type:       "checkout.session",
 		ObjectID:   "cs_test_abc123",
 		Expect:     "status=complete, payment_status=paid",
 		JourneyURL: "http://localhost:3000/checkout",
 		Status:     coop.UIOutcomePending,
 		ReportedAt: &reported,
 	}
+}
+
+// discoveryPendingOutcome is the app-minted shape: no object exists yet
+// because the developer has not walked the app's flow, so the card can only
+// name the TYPE it is waiting for.
+func discoveryPendingOutcome() *coop.UIOutcome {
+	outcome := pendingOutcome()
+	outcome.ObjectID = ""
+	outcome.Discovered = true
+	return outcome
+}
+
+// discoveredObservedOutcome is what the checker leaves behind after finding
+// the object the developer's walk created.
+func discoveredObservedOutcome() *coop.UIOutcome {
+	outcome := observedOutcomeWithEvidence()
+	outcome.Discovered = true
+	return outcome
 }
 
 func observedOutcomeWithEvidence() *coop.UIOutcome {
@@ -149,18 +170,59 @@ func helpDescs(bindings []key.Binding) string {
 
 // --- 1. Pending render ---
 
+// The pending card sends the developer into their OWN app first: the journey
+// has to start there for the outcome to prove the app's UI produced it.
 func TestOutcomePendingRender(t *testing.T) {
 	session := checkoutSession("outcome_pending", coop.NodeReview, pendingOutcome())
 	m := newOutcomeModel(t, session)
 
 	require.Nil(t, m.err)
-	assertContainsPlain(t, m.View().Content, "Your turn: complete the journey")
-	assertContainsPlain(t, m.View().Content, "Open: http://localhost:3000/checkout")
-	assertContainsPlain(t, m.View().Content, "Watching cs_test_abc123")
+	assertContainsPlain(t, m.View().Content, "Your turn: walk this flow in your app")
+	assertContainsPlain(t, m.View().Content, "Start here: http://localhost:3000/checkout")
+	assertContainsPlain(t, m.View().Content, "Watching cs_test_abc123 for status=complete, payment_status=paid")
 
 	assertContainsPlain(t, m.renderFooter(), "complete the journey to unlock review")
 
 	assert.Contains(t, helpDescs(m.ShortHelp()), "confirm (locked)")
+}
+
+// With nothing bound yet, the card names the TYPE it is watching for instead
+// of an id — the object only appears once the app creates it.
+func TestOutcomeDiscoveryPendingRender(t *testing.T) {
+	session := checkoutSession("outcome_pending_discovery", coop.NodeReview, discoveryPendingOutcome())
+	m := newOutcomeModel(t, session)
+
+	require.Nil(t, m.err)
+	content := m.View().Content
+	assertContainsPlain(t, content, "Your turn: walk this flow in your app")
+	assertContainsPlain(t, content, "Start here: http://localhost:3000/checkout")
+	// The expectation text itself wraps inside the review card, so assert the
+	// unwrapped head of the line plus the expectation it names.
+	assertContainsPlain(t, content, "Watching for a checkout.session from your app:")
+	assertContainsPlain(t, content, "status=complete,")
+
+	// Rendered directly, the row carries the whole expectation.
+	lines := m.reviewOutcomeLines([]int{2})
+	require.NotEmpty(t, lines)
+	assert.Contains(t, strings.Join(lines, "\n"), "Watching for a checkout.session from your app: status=complete, payment_status=paid")
+
+	assert.Contains(t, helpDescs(m.ShortHelp()), "confirm (locked)")
+}
+
+// A discovered object was never named by the agent, so the card says whose
+// action produced it and makes confirming an informed act.
+func TestOutcomeDiscoveredObservedRender(t *testing.T) {
+	session := checkoutSession("outcome_observed_discovered", coop.NodeReview, discoveredObservedOutcome())
+	m := newOutcomeModel(t, session)
+
+	content := m.View().Content
+	assertContainsPlain(t, content, "✓ Observed")
+	assertContainsPlain(t, content, "cs_test_abc123")
+	assertContainsPlain(t, content, "Your app created this during review")
+
+	// A pre-bound observation carries no such caveat.
+	plain := newOutcomeModel(t, checkoutSession("outcome_observed_prebound", coop.NodeReview, observedOutcomeWithEvidence()))
+	assert.NotContains(t, plain.View().Content, "Your app created this")
 }
 
 // --- 2. Blocked confirm interaction ---
@@ -172,12 +234,35 @@ func TestOutcomeConfirmBlockedWhilePending(t *testing.T) {
 	updated := pressKey(t, m, 'c')
 
 	assert.Nil(t, updated.err)
-	assert.Contains(t, updated.statusMessage, "Confirm is locked")
+	assert.Contains(t, updated.statusMessage, "Confirm is locked: walk this flow in your app")
+	assert.Contains(t, updated.statusMessage, "watching cs_test_abc123")
+	assert.Contains(t, updated.statusMessage, "press o to open it")
 	assertContainsPlain(t, updated.View().Content, "Confirm is locked")
 
 	node, err := updated.session.NodeByNumber(2)
 	require.NoError(t, err)
 	assert.Equal(t, coop.NodeReview, node.State)
+
+	stored, err := updated.store.Read(session.ID)
+	require.NoError(t, err)
+	storedNode, err := stored.NodeByNumber(2)
+	require.NoError(t, err)
+	assert.Equal(t, coop.NodeReview, storedNode.State)
+	require.NotNil(t, storedNode.UIOutcome)
+	assert.Equal(t, coop.UIOutcomePending, storedNode.UIOutcome.Status)
+}
+
+// A journey with nothing bound yet blocks confirm on the app producing the
+// object, not on a specific id.
+func TestOutcomeConfirmBlockedWhileDiscovering(t *testing.T) {
+	session := checkoutSession("outcome_confirm_blocked_discovery", coop.NodeReview, discoveryPendingOutcome())
+	m := newOutcomeModel(t, session)
+
+	updated := pressKey(t, m, 'c')
+
+	assert.Nil(t, updated.err)
+	assert.Contains(t, updated.statusMessage, "Confirm is locked: walk this flow in your app")
+	assert.Contains(t, updated.statusMessage, "waiting for your app to produce a checkout.session")
 
 	stored, err := updated.store.Read(session.ID)
 	require.NoError(t, err)
