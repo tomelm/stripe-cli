@@ -170,10 +170,15 @@ func (s *Service) ReportWork(sessionID string, nodeNumber int, input ReportWorkI
 // so an agent cannot satisfy the app-entry requirement by naming a page for an
 // app it never actually ran.
 func (s *Service) ReportWorkContext(ctx context.Context, sessionID string, nodeNumber int, input ReportWorkInput, autoConfirm bool) (coop.CommandResponse, error) {
-	if s.appEntryProbe != nil && strings.TrimSpace(input.JourneyURL) != "" {
-		if err := s.appEntryProbe.ProbeAppEntry(ctx, strings.TrimSpace(input.JourneyURL)); err != nil {
-			return errorResponse(&ErrAppEntryRequired{Reason: err.Error()},
-				fmt.Sprintf("stripe coop agent report-work --session=%s --step=%d --journey-url=<url your app serves>", sessionID, nodeNumber)), nil
+	if entry := strings.TrimSpace(input.JourneyURL); entry != "" && s.appEntryProbe != nil {
+		// Validate before probing: the check is pure, its errors are more
+		// precise than "nothing is serving", and it keeps the CLI from
+		// issuing a request to an agent-supplied URL it is about to reject.
+		if _, err := validateAppEntryURL(entry); err != nil {
+			return errorResponse(&ErrAppEntryRequired{Reason: err.Error()}, appEntryHint(sessionID, nodeNumber)), nil
+		}
+		if err := s.appEntryProbe.ProbeAppEntry(ctx, entry); err != nil {
+			return errorResponse(&ErrAppEntryRequired{Reason: err.Error()}, appEntryHint(sessionID, nodeNumber)), nil
 		}
 	}
 	var targetState coop.NodeState
@@ -241,7 +246,11 @@ func reportWorkErrorResponse(err error, sessionID string, nodeNumber int) coop.C
 	role := ""
 	var required *ErrOutcomeRequired
 	var invalid *ErrOutcomeInvalid
+	var appEntry *ErrAppEntryRequired
 	switch {
+	case errors.As(err, &appEntry):
+		// The fix is a different URL, not a different object id.
+		return errorResponse(err, appEntryHint(sessionID, nodeNumber))
 	case errors.As(err, &required):
 		role = required.Role
 	case errors.As(err, &invalid):
@@ -249,7 +258,7 @@ func reportWorkErrorResponse(err error, sessionID string, nodeNumber int) coop.C
 	}
 	if role != "" {
 		return errorResponse(err, fmt.Sprintf(
-			"stripe coop agent report-work --session=%s --step=%d --file=<path> --note=\"<what you did>\" --outcome %s=<id> --journey-url=<url the developer opens>",
+			"stripe coop agent report-work --session=%s --step=%d --file=<path> --note=\"<what you did>\" --outcome %s=<id> --journey-url=<page in YOUR app where this flow starts>",
 			sessionID, nodeNumber, role))
 	}
 	return errorResponse(err, fmt.Sprintf("stripe coop agent start-work --session=%s --step=%d", sessionID, nodeNumber))

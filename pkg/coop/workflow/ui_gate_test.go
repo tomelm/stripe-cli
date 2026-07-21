@@ -301,7 +301,7 @@ func TestReportWorkAppMintedAcceptsAppEntryWithoutOutcome(t *testing.T) {
 	assert.Equal(t, "checkout_session", node.UIOutcome.Role)
 	assert.Equal(t, "checkout.session", node.UIOutcome.Type)
 	assert.Empty(t, node.UIOutcome.ObjectID, "the object does not exist until the developer walks the app")
-	assert.True(t, node.UIOutcome.Discovered)
+	assert.False(t, node.UIOutcome.Discovered, "nothing has been discovered yet; the flag is set when an observation supplies the object")
 	assert.Equal(t, appEntryURL, node.UIOutcome.JourneyURL)
 	assert.Equal(t, coop.UIOutcomePending, node.UIOutcome.Status)
 	assert.NotEmpty(t, node.UIOutcome.Expect)
@@ -617,7 +617,7 @@ func TestReportWorkReReportWhileInReviewReplacesBinding(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, node.UIOutcome)
 	assert.Empty(t, node.UIOutcome.ObjectID)
-	assert.True(t, node.UIOutcome.Discovered)
+	assert.False(t, node.UIOutcome.Discovered, "re-report reverts to discovery; the flag follows the observation, not the report")
 	assert.Equal(t, "http://localhost:3000/pay", node.UIOutcome.JourneyURL)
 }
 
@@ -1131,14 +1131,15 @@ func TestAwaitReviewDoesNotAutoConfirmPendingUIOutcome(t *testing.T) {
 // does not mint one per walk — so there is nothing for discovery to find and
 // the agent must still name the object.
 func TestReportWorkNonAppMintedRequiresOutcome(t *testing.T) {
-	store, session := gatedFCSessionStore(t)
+	t.Run("the modality really is gated and not app-minted", func(t *testing.T) {
+		_, session := gatedFCSessionStore(t)
 
-	// Guard the premise: this modality is derivable, gated, and NOT app-minted.
-	expectation, ok := uicheck.DeriveExpectation(session, 2)
-	require.True(t, ok)
-	assert.Equal(t, "fc_session", expectation.Role)
-	assert.True(t, expectation.Gated())
-	assert.False(t, expectation.AppMinted())
+		expectation, ok := uicheck.DeriveExpectation(session, 2)
+		require.True(t, ok)
+		assert.Equal(t, "fc_session", expectation.Role)
+		assert.True(t, expectation.Gated())
+		assert.False(t, expectation.AppMinted())
+	})
 
 	t.Run("app entry URL alone is refused", func(t *testing.T) {
 		store, session := gatedFCSessionStore(t)
@@ -1170,6 +1171,7 @@ func TestReportWorkNonAppMintedRequiresOutcome(t *testing.T) {
 	})
 
 	t.Run("id plus app entry URL is accepted", func(t *testing.T) {
+		store, session := gatedFCSessionStore(t)
 		service := NewService(store)
 		_, err := service.StartWork(session.ID, 2, "Linking a bank account")
 		require.NoError(t, err)

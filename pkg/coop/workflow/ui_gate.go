@@ -51,10 +51,22 @@ type ErrAppEntryRequired struct {
 }
 
 func (e *ErrAppEntryRequired) Error() string {
-	if e.Reason != "" {
-		return fmt.Sprintf("this journey must start in your app: %s. Report the page the developer opens to begin it (the cart or checkout page that creates the %s), not a Stripe URL", e.Reason, e.Role)
+	// Role is unknown when the URL is rejected before the session is read
+	// (the probe path), so the object phrase is optional.
+	object := "the Stripe object"
+	if e.Role != "" {
+		object = "the " + e.Role
 	}
-	return fmt.Sprintf("this journey must start in your app: report the page the developer opens to begin it with --journey-url=<url> (the cart or checkout page whose flow creates the %s), not a Stripe URL", e.Role)
+	if e.Reason != "" {
+		return fmt.Sprintf("this journey must start in your app: %s. Report the page the developer opens to begin it (the cart or checkout page whose flow creates %s), not a Stripe URL", e.Reason, object)
+	}
+	return fmt.Sprintf("this journey must start in your app: report the page the developer opens to begin it with --journey-url=<url> (the cart or checkout page whose flow creates %s), not a Stripe URL", object)
+}
+
+// appEntryHint is the corrective command for a rejected app entry URL, so the
+// failure is self-healing the way the outcome-binding failures are.
+func appEntryHint(sessionID string, nodeNumber int) string {
+	return fmt.Sprintf("stripe coop agent report-work --session=%s --step=%d --journey-url=<page in YOUR app where this flow starts>", sessionID, nodeNumber)
 }
 
 // stripeHostedHosts are surfaces the developer must reach THROUGH the app.
@@ -143,10 +155,11 @@ func applyOutcomeBinding(node *coop.SessionNode, exp uicheck.Expectation, input 
 
 	reportedAt := now
 	node.UIOutcome = &coop.UIOutcome{
-		Role:       exp.Role,
-		Type:       exp.ObjectType,
-		ObjectID:   id,
-		Discovered: id == "",
+		Role:     exp.Role,
+		Type:     exp.ObjectType,
+		ObjectID: id,
+		// Discovered stays false until an observation actually supplies the
+		// object; an empty id here only means discovery is pending.
 		JourneyURL: entry,
 		Expect:     exp.Summary,
 		Status:     coop.UIOutcomePending,

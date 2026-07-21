@@ -384,19 +384,10 @@ func TestOutcomeAttestRefusedForPendingNode(t *testing.T) {
 	require.NotNil(t, node.UIOutcome)
 	assert.Equal(t, coop.UIOutcomePending, node.UIOutcome.Status)
 
-	if !strings.Contains(updated.statusMessage, "machine-checkable") {
-		t.Skip("SPEC-MISMATCH: Model.handleAttest (pkg/coop/tui/outcome.go) checks " +
-			"targetHasAttestableNode() BEFORE calling workflowService().AttestOutcome, and that " +
-			"pre-check already excludes any node whose UIOutcome.Status is pending (only nil-outcome " +
-			"attestation-tier nodes and UIOutcomeUnavailable nodes pass). So pressing 'a' on an " +
-			"observable-pending node returns nil from handleAttest as a silent no-op — no status message " +
-			"is ever set, and workflow.Service.AttestOutcome's \"machine-checkable outcome\" refusal error " +
-			"(which does contain that string, see pkg/coop/workflow/ui_gate.go's AttestOutcome default " +
-			"case and TestAttestOutcome's \"pending machine-checkable node refuses attestation\" subtest in " +
-			"ui_gate_test.go) is never reached through this TUI keypress. The store-side assertion above " +
-			"(outcome stays pending) is verified; only the status-message expectation is unreachable.")
-	}
+	// handleAttest refuses the keypress before reaching AttestOutcome, but it
+	// explains the refusal rather than swallowing it.
 	assert.Contains(t, updated.statusMessage, "machine-checkable")
+	assert.Contains(t, updated.statusMessage, "complete it in your browser")
 }
 
 // --- 9. Journey URL open key precedence over sandbox claim link ---
