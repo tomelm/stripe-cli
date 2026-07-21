@@ -45,6 +45,17 @@ The missing artifact in every case: **a checkable object identifier recorded at
 report time, plus an independent observation of that object reaching its
 terminal state.** That is exactly what this mechanism adds.
 
+Underneath the honor-system mechanics is an authoring problem, not just a
+protocol gap. The blueprint survey (§2, §9) found most upstream `uiComponent`
+nodes are written as demo/walkthrough steps for a hosted product tour — "click
+the link below", "optionally fill out the form with 4242…" — text aimed at a
+human reading the blueprint and clicking through a Stripe-hosted page.
+Verification was retrofitted onto that prose afterward, but the prose still
+tells the agent a human is the actor. Read as written, an agent that stages a
+link and builds nothing has done exactly what the node asked; the loop had no
+way to tell a staged demo from a wired integration, because that distinction
+was never in the node's contract to begin with.
+
 ## 2. Blueprint survey (the taxonomy that drives the design)
 
 Corpus: 6 embedded blueprints (all hosted-redirect) + 27 upstream blueprints
@@ -448,6 +459,13 @@ confirms; `r` recovers; session never completes). Full tmux suite: 33/33.
 
 ## 9. Upstream blueprint-authoring guidance
 
+**What a uiComponent node means.** A uiComponent node means: wire this flow
+end-to-end into the developer's app. The app needs a real surface — a page, a
+button, a mounted component — that a person can start from, and walking that
+surface has to be what drives the Stripe object to its terminal state. A node
+is not satisfied by an agent that stages a link for a human to click; it is
+satisfied by an agent that builds the thing the human clicks through.
+
 For a uiComponent node to be machine-verifiable, a blueprint needs only what
 good blueprints already have — no schema changes:
 1. A **preceding apiRequest node that creates the journey object** (checkout
@@ -457,11 +475,9 @@ good blueprints already have — no schema changes:
 2. **Events refine, never bind**: wire the asyncHandler with the canonical
    completion event when one exists; derivation uses it to phrase the
    expectation and records v2-only events as explicit gaps.
-3. **Write uiComponent descriptions as integration work**, not spectator
-   instructions. "Add a button that redirects the customer to the Checkout
-   page" derives a verifiable journey; "Open the URL below and optionally pay
-   with 4242…" is demo voice (24 of 35 upstream nodes today) and tells the
-   agent the human is the actor — the exact honor-system framing that failed.
+3. **Write uiComponent descriptions in integration voice, not spectator
+   voice** — see below; this is the single most common defect in the corpus
+   (~24/35 nodes today).
 4. **Journeys with no observable outcome** (portal visits, dashboard steps)
    are fine — they classify as attestation tier automatically. Prefer pairing
    them with a follow-up apiRequest that reads the side effect when you want
@@ -469,6 +485,54 @@ good blueprints already have — no schema changes:
 5. Optional future field: an explicit `outcome` hint per node was prototyped
    behind derivation (Go-side defaults remain the source of truth). Adopt in
    the upstream schema only if derivation proves insufficient.
+
+### Voice: spectator vs. integration
+
+Spectator voice describes what a human does by hand: click here, open this
+link, optionally type 4242 4242 4242 4242. Integration voice describes what
+the app must do: create the object, mount the component, wire the redirect.
+The difference isn't tone — it's who the text casts as the actor. Spectator
+voice casts a human as the actor and the app as scenery it walks past;
+integration voice casts the app as the actor, with the human exercising it
+afterward. Three real examples, verbatim:
+
+| blueprint | before (verbatim) | after (integration voice) |
+|---|---|---|
+| `billing-portal.json` | "Click the link below to open the billing portal in a new tab." | "Add a button in your app that requests a Billing Portal session from your backend and redirects the customer to it." |
+| `invoice-payments.json` | "Preview the hosted invoice page where customers can view and pay their invoice online. Optionally fill out the form with the card number as 4242 4242 4242 4242. Use a valid future date, such as 12/34, and any three-digit CVC." | "Add a 'Pay invoice' action to your billing UI that sends the customer to the invoice's hosted_invoice_url — wired from a real invoice your app created, not a preview link." |
+| `learn-accounts-v1-marketplace.json` | "The connected account's customer can then complete a payment on the checkout surface. Click on the link below and fill in the test card information with the card number as 4242 4242 4242 4242 to run a successful payment." | "Add a checkout surface in your marketplace app where a shopper pays the connected account directly — the page itself creates the Checkout Session and redirects." |
+
+For contrast, `accept-payment-with-payment-element.json` is already close to
+integration voice: "On your client, initialize Stripe.js with the
+client_secret from the PaymentIntent, mount the PaymentElement, and call
+stripe.confirmPayment() to complete the payment." Every verb there belongs to
+the app, not the human.
+
+### Per-modality acceptance criteria
+
+"The app must actually have X" means something different per modality. This
+grounds it in the taxonomy from §2/§3 — no new modalities invented:
+
+| modality | what the app must have | what the developer does, starting from the app URL |
+|---|---|---|
+| Hosted redirect (Checkout, hosted invoice, account links, billing portal) | A real page/control that server-side creates the Stripe object and redirects to it — not a bare Stripe URL pasted into the node text | Start on the app page, click the app's own control, land on Stripe's hosted flow, complete it, return to an app page |
+| Embedded component (Payment Element, embedded Connect onboarding, embedded checkout, FC-backed ACH) | A page that mounts the real Stripe.js component against a live client secret from a real PaymentIntent/SetupIntent/Account Session — a passing build is not evidence | Start on the app page, watch the component render inline, submit it without leaving the app |
+| Modal / handoff (Financial Connections) | A real trigger wired to a live session client secret, plus handling for the return | Start on the app page, launch the modal, connect a (test) institution, watch the app resume with the linked data |
+| Dashboard-or-no-observable (Issuing activation, sandbox funding, billing portal's actual outcome) | A real entry point for the described action, even though no Stripe API can confirm the result | Start on the app page, perform the action, then attest it happened — no observable outcome doesn't waive the app-entry requirement |
+
+### The protocol already enforces the app-entry half of this
+
+Independent of what a node's prose says, `report-work` on a gated uiComponent
+node requires `--journey-url` pointing at a page the developer's own app
+serves (§3): Stripe-hosted hosts are rejected, reachability is probed, and for
+app-minted journeys the verified object is discovered from what the walk
+creates, not from what the agent names. A blueprint whose text implies "the
+human just clicks a Stripe link" gets no easier ride from this — the agent
+still has to produce an app page and pass the reachability probe, just while
+working against prose that told it a human already did the work. That
+mismatch is friction, not a bypass, and it's the intended pressure: it's also
+the reason to fix the prose upstream. Doing so doesn't change what the CLI
+enforces; it stops making the agent fight the blueprint to comply with it.
 
 ## 10. Eval-integration handoff (deliberate later phase, eval workstream owns)
 
@@ -505,3 +569,57 @@ What the eval harness will need:
   detection) — connector prior art exists in the passive-verification branch.
 - Pending-timeout auto-degrade (no: Skip/RequestChanges are the escape
   hatches — revisit with usage data). Schema v3 reconciliation at merge.
+
+## 12. Spike: can we tell a browser journey from an API-driven fake? (2026-07-20)
+
+Motivation: §4 records that object state alone cannot prove the developer's
+browser did the work — an agent holding the account key can complete a
+Checkout Session server-side with the recipe that ships in this repo
+(`pkg/fixtures/triggers/checkout.session.completed.json`). This spike tested
+whether the request-log stream closes that hole. Method: one session
+completed via the API recipe and one paid in a real browser, both observed on
+a live `stripe logs tail` stream, then each request enriched via
+`GET /v1/request_logs/{request_id}`.
+
+**Refuted — path presence proves nothing.** Both completions appear in the
+merchant's request log as `POST /v1/payment_pages/:id/confirm`. The hosted
+page's own confirm is a normal logged API request. (This is the second
+plausible discriminator to fail empirically; §4 already records that
+`event.request.id` is null for both.) The streamed path is also
+**id-redacted to `:id`**, so the stream alone cannot say *which* session a
+confirm belongs to.
+
+**Confirmed — the credential discriminates, and the enrichment carries ids.**
+`GET /v1/request_logs/{request_id}` returns both the calling credential and
+the concrete objects touched:
+
+| | API recipe (fake) | Browser (real journey) |
+|---|---|---|
+| `request.headers.User-Agent` | `curl/8.7.1` | `Mozilla/5.0 … Chrome …` |
+| `request.key.redacted_secret` | `sk_test_…` | `pk_test_…` |
+| `objects[]` | `[cs_test_a1fxz…]` | `[pi_3TvW4I…, cs_test_a1eOU…]` |
+
+The hosted Checkout page confirms with the **publishable** key — a browser
+has nothing else. The recipe must use the **secret** key. So key type is a
+semantic, not heuristic, signal, and it yields *positive* evidence ("this
+settled from a browser") rather than only fake-detection. `objects[]` restores
+the exact correlation the redacted path destroys.
+
+**Operational constraint discovered.** The request-log websocket rejects
+AI-agent user agents outright:
+`websocket: bad handshake — Invalid user agent: Stripe/v1 stripe-cli/master AIAgent/claude_code`.
+The CLI derives that suffix from environment detection (`CLAUDECODE`,
+`CODEX_*`, `CURSOR_AGENT`, … in `pkg/useragent`), so a TUI launched from the
+developer's own shell is unaffected, but a co-op session started from inside
+an agent session would be refused. `stripe listen` accepts the same UA;
+only `request-log-payloads` refuses it. Any design leaning on this stream
+must degrade to today's object-state verification rather than fail the node.
+Note also that request-log tail sessions are capped per account, so the
+observer competes with a developer's own `stripe logs tail`.
+
+**Implication.** The integration is worth building, and its shape is now
+known: stream request logs → for entries on the journey's paths, enrich via
+`/v1/request_logs/{id}` → correlate through `objects[]` → classify origin by
+`request.key` prefix. Not yet built; the passive-verification branch has the
+connector and the enrichment fetcher but projects away the User-Agent, the
+key, and the objects it would need to keep.
