@@ -1,6 +1,7 @@
 package coopcmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -252,7 +253,9 @@ func (rc *coopRunCmd) runInTmuxSplitWithCommand(stripeBin string, blueprintID st
 	}
 
 	if blueprintID != "" {
-		return tui.Run(store, session.ID, coopTUIOptions()...)
+		opts, stopObserver := coopTUIOptions(context.Background())
+		defer stopObserver()
+		return tui.Run(store, session.ID, opts...)
 	}
 
 	return runCoopTUIWait(store)
@@ -419,5 +422,7 @@ func runCoopTUIWait(store *coop.Store) error {
 			existingIDs[id] = true
 		}
 	}
-	return tui.RunWaiting(store, existingIDs, coopTUIOptions()...)
+	opts, stopObserver := coopTUIOptions(context.Background())
+	defer stopObserver()
+	return tui.RunWaiting(store, existingIDs, opts...)
 }

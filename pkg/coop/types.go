@@ -209,6 +209,11 @@ type UIOutcomeSummary struct {
 	Expect     string `json:"expect,omitempty"`
 	Status     string `json:"status,omitempty"`
 	JourneyURL string `json:"journey_url,omitempty"`
+	// SettledBy reports what actually completed the journey ("browser" or
+	// "api") when the request log could tell. The agent needs this: a node
+	// confirmed on an api-settled outcome means the object reached its end
+	// state without anyone walking the UI the node exists to build.
+	SettledBy string `json:"settled_by,omitempty"`
 }
 
 // CommandResponse is the JSON output format for agent-facing commands.

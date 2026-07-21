@@ -1,6 +1,7 @@
 package coopcmd
 
 import (
+	"context"
 	"fmt"
 	"sort"
 
@@ -52,7 +53,9 @@ func (jc *coopJoinCmd) runJoinCmd(cmd *cobra.Command, args []string) error {
 				existingIDs[id] = true
 			}
 		}
-		return tui.RunWaiting(store, existingIDs, coopTUIOptions()...)
+		opts, stopObserver := coopTUIOptions(context.Background())
+		defer stopObserver()
+		return tui.RunWaiting(store, existingIDs, opts...)
 	}
 
 	var session *coop.Session
@@ -87,7 +90,9 @@ func (jc *coopJoinCmd) runJoinCmd(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 	}
 
-	return tui.Run(store, session.ID, coopTUIOptions()...)
+	opts, stopObserver := coopTUIOptions(context.Background())
+	defer stopObserver()
+	return tui.Run(store, session.ID, opts...)
 }
 
 type sessionChoice struct {

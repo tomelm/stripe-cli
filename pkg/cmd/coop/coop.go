@@ -14,6 +14,7 @@ type Options struct {
 	SandboxClaimURL          func() string
 	TestModeAPIKey           func() (string, error)
 	TestModePublishableKey   func() (string, error)
+	DeviceName               func() (string, error)
 	AIAgentHelpAnnotationKey string
 }
 

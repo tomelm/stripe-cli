@@ -265,7 +265,55 @@ func uiOutcomeSummary(node *coop.SessionNode) *coop.UIOutcomeSummary {
 		Expect:     node.UIOutcome.Expect,
 		Status:     string(node.UIOutcome.Status),
 		JourneyURL: node.UIOutcome.JourneyURL,
+		SettledBy:  settledBy(node),
 	}
+}
+
+// settledBy reads the origin classification the checker recorded as evidence,
+// if the request log was able to determine one.
+func settledBy(node *coop.SessionNode) string {
+	if node == nil || node.UIOutcome == nil {
+		return ""
+	}
+	for _, evidence := range node.UIOutcome.Evidence {
+		if evidence.Key == "settled_by" {
+			return evidence.Value
+		}
+	}
+	return ""
+}
+
+// apiSettledNodes lists confirmed uiComponent nodes whose journey was settled
+// by a server-side call. The developer confirmed them, so they are done — but
+// the agent is the only party that can close the gap, and it never sees the
+// review card, so the confirmation response has to carry it.
+func apiSettledNodes(session *coop.Session, nodeNumbers []int) []*coop.SessionNode {
+	var settled []*coop.SessionNode
+	for _, nodeNumber := range nodeNumbers {
+		node, err := session.NodeByNumber(nodeNumber)
+		if err != nil || node.Type != coop.NodeUIComponent {
+			continue
+		}
+		if settledBy(node) == string(uicheck.OriginAPI) {
+			settled = append(settled, node)
+		}
+	}
+	return settled
+}
+
+// apiSettledWarning is the agent-facing explanation appended when a confirmed
+// journey turned out to have been completed server-side.
+func apiSettledWarning(nodes []*coop.SessionNode) string {
+	if len(nodes) == 0 {
+		return ""
+	}
+	titles := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		titles = append(titles, node.Title)
+	}
+	return fmt.Sprintf(
+		"\nHeads up: %s settled from a server-side API call, not a browser. The Stripe object reached its end state, but nobody walked the UI this node exists to build — if your integration is meant to drive this from the app, that path is still unproven. Do not complete these journeys yourself with the API.",
+		strings.Join(titles, ", "))
 }
 
 // stepHasPendingJourney reports whether any review node in the step is gated

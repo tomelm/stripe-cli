@@ -617,9 +617,35 @@ must degrade to today's object-state verification rather than fail the node.
 Note also that request-log tail sessions are capped per account, so the
 observer competes with a developer's own `stripe logs tail`.
 
-**Implication.** The integration is worth building, and its shape is now
-known: stream request logs → for entries on the journey's paths, enrich via
-`/v1/request_logs/{id}` → correlate through `objects[]` → classify origin by
-`request.key` prefix. Not yet built; the passive-verification branch has the
-connector and the enrichment fetcher but projects away the User-Agent, the
-key, and the objects it would need to keep.
+**Built, and validated live.** The shape above now ships: the TUI starts a
+request-log stream, buffers entries, and on a settled journey enriches the
+matching `SettlePaths` request, correlates through `objects[]`, and
+classifies by `request.key` prefix. A live app-first run (cart page → Buy →
+Stripe Checkout → paid with 4242) recorded:
+
+```
+✓ Observed: checkout.session · cs_test_a1UpUpDhDx0dx… · status=complete ·
+  payment_status=paid · payment_intent=pi_3TvWMUDIKN6pQZY90Bfm0QVJ
+  Your app created this during review — confirm only if it was your journey.
+✓ Settled from a browser at http://127.0.0.1:56328/
+```
+
+with `settled_by: browser` and `settled_from: http://127.0.0.1:56328/`
+persisted as node evidence. Note the recorded origin was the app's own URL
+rather than `https://checkout.stripe.com/` as in the isolated spike above;
+both are Stripe-reported values from `request.origin`, and the difference
+between the two runs is not yet explained — do not build logic that assumes
+which one appears. Only the credential (`pk_` vs `sk_`) is relied on to
+classify; origin is displayed as corroboration.
+
+The `api` branch is covered by unit tests rather than a live run: the
+classifier is symmetric (the same code path differing only in the key
+prefix), and staging a live server-side completion inside a review window
+adds setup without exercising new code.
+
+**Reporting it back to the agent.** The developer sees this on the review
+card, but only the agent can close the gap and it never sees the card — so
+`await-review`'s confirmation response carries the warning in prose and
+`CommandResponse.UIOutcome.SettledBy` carries it structurally. A browser-
+settled journey adds nothing; an unobserved origin adds nothing at all,
+since the stream is optional and silence must never read as suspicion.

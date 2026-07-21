@@ -562,7 +562,7 @@ func (s *Service) awaitStepReview(sessionID, stepTitle string, stepIndex, nodeNu
 		if session.StepHasReview(stepIndex) {
 			continue
 		}
-		return confirmedResponse(session, nodeNumber), nil
+		return confirmedResponse(session, stepIndex, nodeNumber), nil
 	}
 }
 
@@ -648,15 +648,39 @@ func alreadyMovedResponse(session *coop.Session, nodeNumber int, state coop.Node
 	}
 }
 
-func confirmedResponse(session *coop.Session, nodeNumber int) coop.CommandResponse {
-	return coop.CommandResponse{
+func confirmedResponse(session *coop.Session, stepIndex, nodeNumber int) coop.CommandResponse {
+	message := fmt.Sprintf("Node %d confirmed by developer. Proceed to next node.", nodeNumber)
+	resp := coop.CommandResponse{
 		OK:        true,
 		SessionID: session.ID,
 		Node:      nodeNumber,
 		State:     "confirmed",
-		Message:   fmt.Sprintf("Node %d confirmed by developer. Proceed to next node.", nodeNumber),
 		Next:      nextAfterNode(session, nodeNumber),
 	}
+	// The developer sees the origin warning on the review card, but only the
+	// agent can act on it, and it never sees the card.
+	settled := apiSettledNodes(session, stepNodeNumbers(session, stepIndex))
+	if len(settled) > 0 {
+		message += apiSettledWarning(settled)
+		resp.UIOutcome = uiOutcomeSummary(settled[0])
+	}
+	resp.Message = message
+	return resp
+}
+
+// stepNodeNumbers lists the 1-based node numbers belonging to a step.
+func stepNodeNumbers(session *coop.Session, stepIndex int) []int {
+	var numbers []int
+	nodeNumber := 0
+	for i := range session.Steps {
+		for range session.Steps[i].Nodes {
+			nodeNumber++
+			if i == stepIndex {
+				numbers = append(numbers, nodeNumber)
+			}
+		}
+	}
+	return numbers
 }
 
 func timeoutResponse(sessionID string, nodeNumber int) coop.CommandResponse {

@@ -284,6 +284,9 @@ func init() {
 		TestModePublishableKey: func() (string, error) {
 			return Config.Profile.GetPublishableKey(false)
 		},
+		DeviceName: func() (string, error) {
+			return Config.Profile.GetDeviceName()
+		},
 		AIAgentHelpAnnotationKey: AIAgentHelpAnnotationKey,
 	}))
 	rootCmd.AddCommand(newPluginCmd().cmd)

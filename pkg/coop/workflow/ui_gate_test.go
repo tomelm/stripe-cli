@@ -1339,3 +1339,79 @@ func TestValidateAppEntryURL(t *testing.T) {
 		}
 	})
 }
+
+// --- agent-facing reporting of how a journey settled ---
+
+func apiSettledNode(title string) *coop.SessionNode {
+	return &coop.SessionNode{
+		NodeDefinition: coop.NodeDefinition{Type: coop.NodeUIComponent, Title: title},
+		State:          coop.NodeDone,
+		UIOutcome: &coop.UIOutcome{
+			Role:     "checkout_session",
+			ObjectID: "cs_test_settled",
+			Status:   coop.UIOutcomeObserved,
+			Evidence: []coop.UIOutcomeEvidence{
+				{Key: "status", Value: "complete"},
+				{Key: "settled_by", Value: "api"},
+			},
+		},
+	}
+}
+
+func TestUIOutcomeSummaryCarriesSettledBy(t *testing.T) {
+	summary := uiOutcomeSummary(apiSettledNode("Complete the checkout"))
+	require.NotNil(t, summary)
+	assert.Equal(t, "api", summary.SettledBy)
+
+	browser := apiSettledNode("Complete the checkout")
+	browser.UIOutcome.Evidence[1].Value = "browser"
+	assert.Equal(t, "browser", uiOutcomeSummary(browser).SettledBy)
+
+	// No origin evidence at all (request log unavailable) must stay empty
+	// rather than implying anything about how the journey settled.
+	quiet := apiSettledNode("Complete the checkout")
+	quiet.UIOutcome.Evidence = quiet.UIOutcome.Evidence[:1]
+	assert.Empty(t, uiOutcomeSummary(quiet).SettledBy)
+}
+
+func TestConfirmedResponseWarnsAgentAboutServerSideSettlement(t *testing.T) {
+	session := &coop.Session{
+		ID:     "coop_settled",
+		Status: coop.SessionActive,
+		Steps: []coop.SessionStep{{
+			StepDefinition: coop.StepDefinition{Key: "step", Title: "Step"},
+			Nodes: []coop.SessionNode{
+				{NodeDefinition: coop.NodeDefinition{Type: coop.NodeAPIRequest, Title: "Create"}, State: coop.NodeDone},
+				*apiSettledNode("Complete the checkout"),
+			},
+		}},
+	}
+
+	resp := confirmedResponse(session, 0, 2)
+	require.True(t, resp.OK)
+	assert.Equal(t, "confirmed", resp.State)
+	// The developer already saw this on the card; the agent never does, so
+	// the confirmation it is blocked on has to carry it.
+	assert.Contains(t, resp.Message, "server-side API call")
+	assert.Contains(t, resp.Message, "Complete the checkout")
+	assert.Contains(t, resp.Message, "Do not complete these journeys yourself")
+	require.NotNil(t, resp.UIOutcome)
+	assert.Equal(t, "api", resp.UIOutcome.SettledBy)
+}
+
+func TestConfirmedResponseStaysQuietForBrowserSettledJourneys(t *testing.T) {
+	node := apiSettledNode("Complete the checkout")
+	node.UIOutcome.Evidence[1].Value = "browser"
+	session := &coop.Session{
+		ID:     "coop_browser",
+		Status: coop.SessionActive,
+		Steps: []coop.SessionStep{{
+			StepDefinition: coop.StepDefinition{Key: "step", Title: "Step"},
+			Nodes:          []coop.SessionNode{*node},
+		}},
+	}
+
+	resp := confirmedResponse(session, 0, 1)
+	assert.NotContains(t, resp.Message, "server-side")
+	assert.Nil(t, resp.UIOutcome, "a healthy journey needs no extra agent-facing payload")
+}
