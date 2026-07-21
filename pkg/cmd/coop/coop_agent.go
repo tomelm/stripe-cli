@@ -226,7 +226,10 @@ func newWorkflowService() (*workflow.Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating store: %w", err)
 	}
-	return workflow.NewService(store, workflow.WithUIVerifier(newUIVerifier())), nil
+	return workflow.NewService(store,
+		workflow.WithUIVerifier(newUIVerifier()),
+		workflow.WithAppEntryProber(uicheck.NewAppEntryProbe()),
+	), nil
 }
 
 // newUIVerifier builds the confirm-time outcome checker. When no test-mode

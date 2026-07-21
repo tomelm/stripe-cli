@@ -50,13 +50,10 @@ func ApplyObservation(store SessionStore, sessionID string, nodeNumber int, boun
 		outcome.Detail = obs.Detail
 		outcome.Evidence = obs.Evidence
 		outcome.LastCheckedAt = &checked
-		if outcome.JourneyURL == "" {
-			for _, evidence := range obs.Evidence {
-				if evidence.Key == "journey_url" {
-					outcome.JourneyURL = evidence.Value
-					break
-				}
-			}
+		// Discovery fills in the object the developer's traversal created.
+		if obs.ObjectID != "" && outcome.ObjectID == "" {
+			outcome.ObjectID = obs.ObjectID
+			outcome.Discovered = true
 		}
 		switch obs.Status {
 		case coop.UIOutcomeObserved, coop.UIOutcomeFailed:

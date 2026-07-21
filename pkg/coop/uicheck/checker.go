@@ -4,10 +4,19 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
+)
+
+const (
+	// discoverLimit caps how many recent objects a discovery pass inspects.
+	discoverLimit = 20
+	// discoverSkew tolerates clock drift between this machine and Stripe when
+	// filtering objects to the review window.
+	discoverSkew = 2 * time.Minute
 )
 
 // Checker evaluates a node's bound journey outcome with one bounded read.
@@ -33,11 +42,14 @@ func (c *Checker) CheckNow(ctx context.Context, session *coop.Session, nodeNumbe
 	if err != nil {
 		return Observation{}, false, err
 	}
-	if node.UIOutcome == nil || node.UIOutcome.ObjectID == "" {
+	if node.UIOutcome == nil {
 		return Observation{}, false, nil
 	}
 	expectation, ok := DeriveExpectation(session, nodeNumber)
 	if !ok || !expectation.Gated() || expectation.Evaluate == nil {
+		return Observation{}, false, nil
+	}
+	if node.UIOutcome.ObjectID == "" && !expectation.AppMinted() {
 		return Observation{}, false, nil
 	}
 	if c.reader == nil {
@@ -47,19 +59,64 @@ func (c *Checker) CheckNow(ctx context.Context, session *coop.Session, nodeNumbe
 		}, true, nil
 	}
 
+	if node.UIOutcome.ObjectID == "" {
+		return c.discover(ctx, expectation, node.UIOutcome), true, nil
+	}
+
 	path := strings.Replace(expectation.GetPath, "{id}", url.PathEscape(node.UIOutcome.ObjectID), 1)
 	object, err := c.reader.GetObject(ctx, path, nil)
 	if err != nil {
 		return observationFromReadError(err, node.UIOutcome.ObjectID), true, nil
 	}
+	return expectation.Evaluate(object), true, nil
+}
 
-	observation := expectation.Evaluate(object)
-	if node.UIOutcome.JourneyURL == "" {
-		if journeyURL := hostedURL(object); journeyURL != "" {
-			observation.Evidence = append(observation.Evidence, coop.UIOutcomeEvidence{Key: "journey_url", Value: journeyURL})
-		}
+// discover looks for the object the developer's walk through the app created:
+// one of the expected type, created since the review opened, that satisfies
+// the journey's win condition. Finding one is the evidence the app's own UI
+// works — a cart page whose button never navigates, or whose endpoint errors,
+// cannot produce a settled object at all.
+func (c *Checker) discover(ctx context.Context, exp Expectation, outcome *coop.UIOutcome) Observation {
+	query := url.Values{}
+	query.Set("limit", strconv.Itoa(discoverLimit))
+	if outcome.ReportedAt != nil {
+		// Only objects minted after the developer was handed the app URL can
+		// be theirs; anything older predates the journey.
+		query.Set("created[gte]", strconv.FormatInt(outcome.ReportedAt.Add(-discoverSkew).Unix(), 10))
 	}
-	return observation, true, nil
+	listing, err := c.reader.GetObject(ctx, exp.ListPath, query)
+	if err != nil {
+		observation := observationFromReadError(err, exp.ObjectType)
+		if observation.Status == coop.UIOutcomeFailed {
+			// A listing 404 says nothing about the journey; only a bound
+			// object's 404 is a contradiction.
+			observation = Observation{Status: coop.UIOutcomePending, Detail: "could not list " + exp.ObjectType + " objects; retrying"}
+		}
+		return observation
+	}
+
+	data, _ := listing["data"].([]any)
+	for _, entry := range data {
+		object, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		id := idValue(object["id"])
+		if id == "" || !strings.HasPrefix(id, exp.IDPrefix) {
+			continue
+		}
+		observation := exp.Evaluate(object)
+		if observation.Status != coop.UIOutcomeObserved {
+			continue
+		}
+		observation.ObjectID = id
+		observation.Detail = strings.TrimSpace(observation.Detail + " (created by your app during this review)")
+		return observation
+	}
+	return Observation{
+		Status: coop.UIOutcomePending,
+		Detail: "no completed " + exp.ObjectType + " from your app yet",
+	}
 }
 
 // Watch runs CheckNow for every review-state node with an unresolved binding
@@ -131,17 +188,4 @@ func observationFromReadError(err error, objectID string) Observation {
 			Detail: "outcome check error: " + err.Error(),
 		}
 	}
-}
-
-// hostedURL extracts the journey URL a hosted surface exposes on its object
-// (checkout session .url, invoice .hosted_invoice_url). Present only while
-// the journey is incomplete — which is exactly when it is worth capturing.
-func hostedURL(object map[string]any) string {
-	if value, ok := object["url"].(string); ok && strings.HasPrefix(value, "https://") {
-		return value
-	}
-	if value, ok := object["hosted_invoice_url"].(string); ok && strings.HasPrefix(value, "https://") {
-		return value
-	}
-	return ""
 }

@@ -1,8 +1,24 @@
 # UI Verification in Co-op
 
 Status: prototype on branch `tomer/coop-ui-verifiers`. Design + implementation of
-machine-checkable outcomes for `uiComponent` nodes: the human reviewer is the
-browser; Stripe-side observable consequences are the machine check.
+machine-checkable outcomes for `uiComponent` nodes: the developer walks the
+journey **starting in their own app**, and the CLI verifies that the walk
+produced the right Stripe-side consequence — instead of trusting the agent's
+claim that a working UI exists.
+
+**What this proves, precisely.** Starting from a page the app actually serves,
+a real traversal produced a settled Stripe object. It does not prove which
+pixels rendered; only a browser driver could, and that stays the eval
+harness's job. The teeth come from the object *not existing until the app
+creates it*: a cart page whose button never navigates, or whose endpoint 404s,
+cannot produce one at all.
+
+> Design history worth keeping. The first version had the agent pre-create the
+> Stripe object and hand the developer its hosted Stripe URL. That verified a
+> payment settled but let the app be skipped entirely — the developer could pay
+> a Checkout Session the app never served, and the gate went green. Section 3
+> describes the fix (app entry point + object discovery); section 4 records
+> what remains unproven.
 
 ## 1. Problem
 
@@ -64,16 +80,26 @@ Key survey facts that shaped the design:
 
 ### The contract
 
-1. **Bind** — at `report-work` for a machine-verifiable journey, the agent must
-   pass `--outcome <role>=<object id>` (e.g. `checkout_session=cs_...`) and
-   should pass `--journey-url` (the app's URL the developer opens). Missing
-   binding fails closed with a self-healing corrective `Hint`; role, id prefix,
-   and charset are validated. Re-reports while in review rebind idempotently.
-2. **Watch** — while the node sits in review, an observer inside the TUI
-   process polls `GET <object>` with the profile's test-mode key (3s cadence
-   for 30 minutes after report, then 10s, idling at 30s) and persists status
-   transitions into the session file via compare-and-set updates. Pending →
-   observed renders live in the review card.
+1. **Point at the app** — at `report-work` for a machine-verifiable journey the
+   agent must pass `--journey-url`: the page **in the developer's own app**
+   where the flow starts (the cart page, the checkout page). It is rejected if
+   it is a Stripe-hosted host (`checkout.stripe.com`, `billing.stripe.com`, …)
+   or if nothing answers it — a bounded reachability GET runs before the store
+   update, so an agent cannot name a page for an app it never ran. Failing
+   either way fails closed with a corrective `Hint`.
+   `--outcome <role>=<id>` is now required only for journeys that act on an
+   object created *earlier* (Financial Connections sessions, Connect accounts);
+   for app-minted journeys the object cannot be named yet, because it does not
+   exist until the developer walks the app.
+2. **Watch, and discover** — while the node sits in review, an observer inside
+   the TUI process polls with the profile's test-mode key (3s cadence for 30
+   minutes after report, then 10s, idling at 30s) and persists status
+   transitions via compare-and-set updates. For app-minted journeys it *lists*
+   objects of the expected type created since the review opened and takes the
+   first that satisfies the win condition — that object is the evidence, since
+   only the app's own flow could have created it. Pre-bound journeys keep the
+   direct `GET <object>` path. Pending → observed renders live in the card,
+   which names the discovered object so confirming it is an informed act.
 3. **Gate** — `ConfirmReview` refuses to move a `uiComponent` node to done
    while its outcome is `pending` or `failed` (typed error, rendered as a
    status line, never a fatal view). A bounded one-shot re-check runs at
@@ -152,22 +178,28 @@ M0 spike (2026-07-20, test sandbox `acct_1Q5WiUDIKN6pQZY9`):
 | account (Stripe-collected requirements) | NO — platform writes to requirement fields are refused | strong |
 | account (application-collected) | YES — prefill test data via API | weak; noted in Summary |
 
-Binding integrity limits (adversarial review findings, recorded):
-- The agent could bind an object its app never serves; the human paying the
-  bound object's own URL would bypass the app. Mitigations shipped: the agent
-  is instructed to pass the **app's** URL as `--journey-url` (hosted URLs are
-  only a display fallback captured from the object while pending); amount/mode
-  cross-checks against the creating node's params are future work (port from
-  resource-verification's `paramChecks`).
-- Apps that mint a fresh cs_ per journey false-negative against a pinned id.
-  Designed mitigation (deferred, below): hybrid observation — poll
-  `GET /v1/events` for same-type completions since review start and surface
-  "cs_Y completed just now — accept as this journey's outcome?" for
-  one-keystroke human acceptance.
-- The session file is owner-writable; derivation from the embedded blueprint
-  and the confirm-time live re-check raise the bar, but an agent with the
-  account key can always manufacture state. Full tamper-proofing is
-  impossible; the goal is a strong evidence trail.
+Binding integrity — what the app-entry model fixed, and what is left:
+- **FIXED — the app could be skipped entirely.** Previously the agent bound an
+  object it had created and the developer paid that object's hosted URL, so a
+  green gate said nothing about the app. Now the journey URL must be an
+  app-served, non-Stripe page (reachability-probed), and for app-minted
+  journeys the verified object is *discovered* from what the walk produced.
+  Validated live: the discovered session (`cs_test_a1vEkTu…`) was a different
+  object from the one the agent had created by API (`cs_test_a1TLXgA…`) — only
+  the app's own Buy flow could mint it. This also removed the pinned-id false
+  negative, since a fresh object per journey is now the expected case.
+- **REMAINS — fabrication inside the review window.** A determined agent could
+  create and complete its own object of the right type while the node is in
+  review, and discovery would find it. This is much narrower than before (the
+  object must post-date the review opening, and the card names it so an
+  unexpected object is visible before you confirm), but it is not closed. The
+  honest framing stays: necessary, not sufficient.
+- **REMAINS — the session file is owner-writable.** Deriving expectations from
+  the embedded blueprint and re-checking live at confirm time raise the bar,
+  but an agent holding the account key can manufacture state. Full
+  tamper-proofing is impossible; the goal is a strong evidence trail.
+- Amount/mode cross-checks against the creating node's params are still future
+  work (port from resource-verification's `paramChecks`).
 
 ## 5. Schema and protocol changes
 
@@ -281,7 +313,51 @@ sandbox (`acct_1Q5WiUDIKN6pQZY9`): real `stripe coop start <bp> --debug-agent
 --live` sessions in tmux, with a real browser completing (and, for the
 negative paths, failing) each journey. Verbatim TUI transcript excerpts below.
 
-### Hosted redirect — one-time-payment (session `coop_27486d38`)
+### App-first hosted checkout — one-time-payment (2026-07-20, the current model)
+
+Run with `--debug-agent --live`, which now serves a real local storefront (a
+cart page whose Buy button creates the Checkout Session server-side and
+redirects). The review card points at the **app**, not Stripe:
+
+```
+│ Your turn: walk this flow in your app                                     │
+│ Start here: http://127.0.0.1:53766/  o open                               │
+│ ⠋ Watching for a checkout.session from your app: status=complete and      │
+│ payment_status paid or no_payment_required (payment mode)                 │
+  c confirm (locked) · r changes · …
+```
+
+Pressing `c` before walking it: `Confirm is locked: walk this flow in your app
+— waiting for your app to produce a checkout.session`.
+
+Then the genuine traversal: cart page → **Buy now** → the app created its own
+Session and redirected to Stripe Checkout → paid with 4242 → back to the
+**app's** success page. Discovery found it:
+
+```
+│ ✓ Observed: checkout.session · cs_test_a1vEkTu6oyGiO… · status=complete · │
+│ payment_status=paid · payment_intent=pi_3TvVIyDIKN6pQZY90cQXvsBv · 21:29  │
+│ Your app created this during review — confirm only if it was your         │
+│ journey.                                                                  │
+```
+
+The decisive evidence is the id comparison in the session file:
+
+| | id |
+|---|---|
+| created by the agent's own API call (blueprint node) | `cs_test_a1TLXgAh20GQ5Bzv…` |
+| **discovered and verified** (minted by the app's Buy flow) | `cs_test_a1vEkTu6oyGiOGFg…` |
+
+`ui_outcome` records `discovered: true`, `journey_url:
+http://127.0.0.1:53766/`, `detail: "checkout completed (created by your app
+during this review)"`. Under the previous model the gate would have watched
+the agent's session and passed without the app doing anything.
+
+### (Superseded) Pre-bound hosted redirect — one-time-payment (session `coop_27486d38`)
+
+Kept as the record of the earlier model, and of why it was replaced: this run
+went green while the developer paid a Stripe URL directly, with no app in the
+loop.
 
 Pending, with the real Checkout Session the live agent created and bound:
 
@@ -413,9 +489,9 @@ What the eval harness will need:
 
 ## 11. Deferred work / open questions
 
-- **Hybrid candidate discovery** (`/v1/events`-based "a different cs_ just
-  completed — accept it?") — designed (see §4), not prototyped. The realistic
-  fresh-object-per-journey integration needs it before broad rollout.
+- ~~Hybrid candidate discovery~~ — **shipped** as the app-entry + discovery
+  model (§3): the fresh-object-per-journey case is now the primary path, not
+  an edge case.
 - **Invoice origin evidence** (record the completing event's `request.id`,
   warn on API origin) — predicate hardening shipped; origin recording is a
   small follow-up now that the spike proved the signal.

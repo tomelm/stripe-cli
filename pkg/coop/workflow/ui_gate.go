@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -39,38 +40,114 @@ func (e *ErrOutcomeInvalid) Error() string {
 	return fmt.Sprintf("outcome binding %s=%s rejected: %s", e.Role, e.ID, e.Reason)
 }
 
-// applyOutcomeBinding validates and records the agent's binding on a gated
-// node. Re-reports may replace the binding (a redone step mints new objects);
-// a re-report without --outcome keeps the existing binding.
-func applyOutcomeBinding(node *coop.SessionNode, exp uicheck.Expectation, input ReportWorkInput, now time.Time) error {
-	if input.Outcome == nil {
-		if node.UIOutcome != nil && node.UIOutcome.ObjectID != "" {
-			if url := strings.TrimSpace(input.JourneyURL); url != "" {
-				node.UIOutcome.JourneyURL = url
-			}
-			return nil
+// ErrAppEntryRequired blocks report-work on a journey the developer is meant
+// to walk inside the app. Verifying a Stripe object alone proves a payment
+// settled, not that the app's UI produced it — so the agent must hand over
+// the app page that STARTS the journey, and the object is then discovered
+// from what the developer's traversal actually creates.
+type ErrAppEntryRequired struct {
+	Role   string
+	Reason string
+}
+
+func (e *ErrAppEntryRequired) Error() string {
+	if e.Reason != "" {
+		return fmt.Sprintf("this journey must start in your app: %s. Report the page the developer opens to begin it (the cart or checkout page that creates the %s), not a Stripe URL", e.Reason, e.Role)
+	}
+	return fmt.Sprintf("this journey must start in your app: report the page the developer opens to begin it with --journey-url=<url> (the cart or checkout page whose flow creates the %s), not a Stripe URL", e.Role)
+}
+
+// stripeHostedHosts are surfaces the developer must reach THROUGH the app.
+// Accepting one as the journey entry point would let the agent skip its own
+// UI entirely — exactly the gap app-entry verification closes.
+var stripeHostedHosts = []string{
+	"checkout.stripe.com",
+	"billing.stripe.com",
+	"invoice.stripe.com",
+	"connect.stripe.com",
+	"pay.stripe.com",
+	"js.stripe.com",
+	"dashboard.stripe.com",
+}
+
+// validateAppEntryURL accepts only an http(s) URL that is not a Stripe-hosted
+// surface. Reachability is checked separately (it needs network).
+func validateAppEntryURL(raw string) (string, error) {
+	entry := strings.TrimSpace(raw)
+	if entry == "" {
+		return "", fmt.Errorf("no app URL was reported")
+	}
+	parsed, err := url.Parse(entry)
+	if err != nil || parsed.Host == "" {
+		return "", fmt.Errorf("%q is not a URL", entry)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("%q is not an http(s) URL", entry)
+	}
+	host := strings.ToLower(parsed.Hostname())
+	for _, hosted := range stripeHostedHosts {
+		if host == hosted || strings.HasSuffix(host, "."+hosted) {
+			return "", fmt.Errorf("%s is a Stripe-hosted surface, which the developer must reach through your app", host)
 		}
-		return &ErrOutcomeRequired{Role: exp.Role, Expect: exp.Summary}
 	}
-	if input.Outcome.Role != exp.Role {
-		return &ErrOutcomeInvalid{Role: exp.Role, ID: input.Outcome.ID,
-			Reason: fmt.Sprintf("this journey expects role %q, got %q", exp.Role, input.Outcome.Role)}
+	return entry, nil
+}
+
+// applyOutcomeBinding records what the CLI needs to verify the journey.
+//
+// For app-minted journeys (a Checkout Session per cart checkout, and so on)
+// the object does not exist yet — the developer's walk through the app
+// creates it — so the agent reports the app entry URL and the checker
+// discovers the object later. For journeys that act on an object created
+// earlier (Financial Connections sessions, Connect accounts) the agent still
+// reports that object's id, plus the app page the developer starts from.
+func applyOutcomeBinding(node *coop.SessionNode, exp uicheck.Expectation, input ReportWorkInput, now time.Time) error {
+	previous := node.UIOutcome
+
+	entry, err := validateAppEntryURL(input.JourneyURL)
+	if err != nil {
+		// A re-report that omits the URL keeps the one already accepted.
+		if strings.TrimSpace(input.JourneyURL) == "" && previous != nil && previous.JourneyURL != "" {
+			entry = previous.JourneyURL
+		} else {
+			return &ErrAppEntryRequired{Role: exp.Role, Reason: err.Error()}
+		}
 	}
-	id := strings.TrimSpace(input.Outcome.ID)
-	if !strings.HasPrefix(id, exp.IDPrefix) {
-		return &ErrOutcomeInvalid{Role: exp.Role, ID: id,
-			Reason: fmt.Sprintf("a %s id starts with %q", exp.Role, exp.IDPrefix)}
+
+	id := ""
+	if input.Outcome != nil {
+		if input.Outcome.Role != exp.Role {
+			return &ErrOutcomeInvalid{Role: exp.Role, ID: input.Outcome.ID,
+				Reason: fmt.Sprintf("this journey expects role %q, got %q", exp.Role, input.Outcome.Role)}
+		}
+		id = strings.TrimSpace(input.Outcome.ID)
+		if !strings.HasPrefix(id, exp.IDPrefix) {
+			return &ErrOutcomeInvalid{Role: exp.Role, ID: id,
+				Reason: fmt.Sprintf("a %s id starts with %q", exp.Role, exp.IDPrefix)}
+		}
+		if !validObjectID(id) {
+			return &ErrOutcomeInvalid{Role: exp.Role, ID: id,
+				Reason: "object ids contain only letters, digits, and underscores"}
+		}
 	}
-	if !validObjectID(id) {
-		return &ErrOutcomeInvalid{Role: exp.Role, ID: id,
-			Reason: "object ids contain only letters, digits, and underscores"}
+
+	if id == "" && !exp.AppMinted() {
+		// Nothing to discover for this modality: the object the developer acts
+		// on already exists, so the agent has to name it.
+		if previous != nil && previous.ObjectID != "" {
+			id = previous.ObjectID
+		} else {
+			return &ErrOutcomeRequired{Role: exp.Role, Expect: exp.Summary}
+		}
 	}
+
 	reportedAt := now
 	node.UIOutcome = &coop.UIOutcome{
 		Role:       exp.Role,
 		Type:       exp.ObjectType,
 		ObjectID:   id,
-		JourneyURL: strings.TrimSpace(input.JourneyURL),
+		Discovered: id == "",
+		JourneyURL: entry,
 		Expect:     exp.Summary,
 		Status:     coop.UIOutcomePending,
 		ReportedAt: &reportedAt,

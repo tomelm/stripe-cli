@@ -221,10 +221,16 @@ func (a *coopDebugAgent) completeActiveStep(ctx context.Context, step int) error
 	if expectation, ok := uicheck.DeriveExpectation(session, step); ok && expectation.Gated() {
 		switch {
 		case a.live != nil:
-			if id, journeyURL := a.live.bindingFor(expectation); id != "" {
+			// App-minted journeys deliberately return no id: the object does
+			// not exist until the developer walks the app, so the entry URL is
+			// the whole binding and discovery supplies the object later.
+			id, journeyURL := a.live.bindingFor(expectation)
+			input.JourneyURL = journeyURL
+			if id != "" {
 				input.Outcome = &workflow.OutcomeInput{Role: expectation.Role, ID: id}
-				input.JourneyURL = journeyURL
 				a.logf("step %d bound live outcome %s=%s", step, expectation.Role, id)
+			} else if journeyURL != "" {
+				a.logf("step %d journey starts at %s (%s discovered after the walk)", step, journeyURL, expectation.Role)
 			}
 		case a.simulateBind:
 			input.Outcome = &workflow.OutcomeInput{

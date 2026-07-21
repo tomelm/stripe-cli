@@ -42,6 +42,11 @@ type Observation struct {
 	Status   coop.UIOutcomeStatus
 	Detail   string
 	Evidence []coop.UIOutcomeEvidence
+
+	// ObjectID is set when the observation came from discovery — the object
+	// the developer's walk through the app created. Empty when the agent
+	// named the object up front.
+	ObjectID string
 }
 
 // Expectation is the derived, machine-checkable consequence of a uiComponent
@@ -54,6 +59,16 @@ type Expectation struct {
 	ObjectType string // e.g. "checkout.session"
 	IDPrefix   string // e.g. "cs_"
 	GetPath    string // contains "{id}"; substituted at fetch time
+
+	// ListPath is set for journeys the APP mints a fresh object for every
+	// time a user walks it (a Checkout Session per cart checkout, an
+	// invoice per billing action). For those, the object cannot be known
+	// when the agent reports work — it does not exist until the developer
+	// walks the app's own UI — so the checker discovers it by listing
+	// objects created since the review opened. Empty for journeys that act
+	// on an object created earlier (Financial Connections sessions, Connect
+	// accounts), which stay pre-bound.
+	ListPath string
 
 	// StripeVersion, when set, replays the creating request's pinned version
 	// header on the GET (preview-pinned objects reject the default version).
@@ -86,4 +101,12 @@ type Expectation struct {
 // Gated reports whether this expectation blocks confirmation until observed.
 func (e Expectation) Gated() bool {
 	return e.Tier == TierEventBound || e.Tier == TierStatePoll
+}
+
+// AppMinted reports whether the developer's own app creates the outcome
+// object during the journey. When true the object is discovered rather than
+// reported, and the agent must instead hand over the app page that starts the
+// journey — which is what puts the app's UI on the verified path.
+func (e Expectation) AppMinted() bool {
+	return e.ListPath != ""
 }

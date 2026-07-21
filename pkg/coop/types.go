@@ -124,11 +124,19 @@ type UIOutcomeEvidence struct {
 // journey changes, and records the observation lifecycle for that object.
 // Credentials and raw API payloads are never stored here.
 type UIOutcome struct {
-	Role       string `json:"role"`
-	Type       string `json:"type,omitempty"`
-	ObjectID   string `json:"object_id"`
-	AccountID  string `json:"account_id,omitempty"`
+	Role      string `json:"role"`
+	Type      string `json:"type,omitempty"`
+	ObjectID  string `json:"object_id"`
+	AccountID string `json:"account_id,omitempty"`
+	// JourneyURL is the developer's own app page that STARTS the journey —
+	// the cart or checkout page, never a Stripe-hosted URL. Sending the
+	// developer through the app is what puts the app's UI on the verified
+	// path: for app-minted journeys the object only exists because the app
+	// created it during that walk.
 	JourneyURL string `json:"journey_url,omitempty"`
+	// Discovered records that ObjectID was found by watching what the
+	// developer's traversal created, rather than named by the agent up front.
+	Discovered bool   `json:"discovered,omitempty"`
 	Expect     string `json:"expect,omitempty"`
 
 	Status     UIOutcomeStatus     `json:"status"`

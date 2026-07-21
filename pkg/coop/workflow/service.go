@@ -29,13 +29,20 @@ type UIVerifier interface {
 	CheckNow(ctx context.Context, session *coop.Session, nodeNumber int) (obs uicheck.Observation, ran bool, err error)
 }
 
+// AppEntryProber checks that a reported app entry URL is actually served.
+// Implemented by uicheck's AppEntryProbe; nil skips the reachability check.
+type AppEntryProber interface {
+	ProbeAppEntry(ctx context.Context, rawURL string) error
+}
+
 type Service struct {
-	store        Store
-	fetchSnippet func(path, method string, params interface{}, language string) (string, error)
-	now          func() time.Time
-	sleep        func(time.Duration)
-	awaitTimeout time.Duration
-	uiVerifier   UIVerifier
+	store         Store
+	fetchSnippet  func(path, method string, params interface{}, language string) (string, error)
+	now           func() time.Time
+	sleep         func(time.Duration)
+	awaitTimeout  time.Duration
+	uiVerifier    UIVerifier
+	appEntryProbe AppEntryProber
 }
 
 type Option func(*Service)
@@ -60,6 +67,14 @@ func WithClock(now func() time.Time, sleep func(time.Duration)) Option {
 func WithAwaitTimeout(timeout time.Duration) Option {
 	return func(s *Service) {
 		s.awaitTimeout = timeout
+	}
+}
+
+// WithAppEntryProber enables the report-work reachability check on the app
+// page an agent reports as the start of a journey.
+func WithAppEntryProber(prober AppEntryProber) Option {
+	return func(s *Service) {
+		s.appEntryProbe = prober
 	}
 }
 
@@ -131,14 +146,36 @@ func (s *Service) StartWork(sessionID string, nodeNumber int, note string) (coop
 	}
 	if expectation, ok := uicheck.DeriveExpectation(session, nodeNumber); ok && expectation.Gated() {
 		resp.UIOutcome = &coop.UIOutcomeSummary{Role: expectation.Role, Expect: expectation.Summary}
-		resp.Next = fmt.Sprintf(
-			"stripe coop agent report-work --session=%s --step=%d --file=<path> --note=\"<what you did>\" --outcome %s=<the %s id your journey completes> --journey-url=<url the developer opens>",
-			session.ID, nodeNumber, expectation.Role, expectation.Role)
+		if expectation.AppMinted() {
+			// The object does not exist yet: the developer's walk through the
+			// app creates it, so all the agent owes us is where that walk starts.
+			resp.Next = fmt.Sprintf(
+				"stripe coop agent report-work --session=%s --step=%d --file=<path> --note=\"<what you did>\" --journey-url=<page in YOUR app where this flow starts>",
+				session.ID, nodeNumber)
+		} else {
+			resp.Next = fmt.Sprintf(
+				"stripe coop agent report-work --session=%s --step=%d --file=<path> --note=\"<what you did>\" --outcome %s=<the %s id> --journey-url=<page in YOUR app where this flow starts>",
+				session.ID, nodeNumber, expectation.Role, expectation.Role)
+		}
 	}
 	return resp, nil
 }
 
 func (s *Service) ReportWork(sessionID string, nodeNumber int, input ReportWorkInput, autoConfirm bool) (coop.CommandResponse, error) {
+	return s.ReportWorkContext(context.Background(), sessionID, nodeNumber, input, autoConfirm)
+}
+
+// ReportWorkContext records reported work. A reported app entry URL is probed
+// for reachability first — outside the store lock, since it is network I/O —
+// so an agent cannot satisfy the app-entry requirement by naming a page for an
+// app it never actually ran.
+func (s *Service) ReportWorkContext(ctx context.Context, sessionID string, nodeNumber int, input ReportWorkInput, autoConfirm bool) (coop.CommandResponse, error) {
+	if s.appEntryProbe != nil && strings.TrimSpace(input.JourneyURL) != "" {
+		if err := s.appEntryProbe.ProbeAppEntry(ctx, strings.TrimSpace(input.JourneyURL)); err != nil {
+			return errorResponse(&ErrAppEntryRequired{Reason: err.Error()},
+				fmt.Sprintf("stripe coop agent report-work --session=%s --step=%d --journey-url=<url your app serves>", sessionID, nodeNumber)), nil
+		}
+	}
 	var targetState coop.NodeState
 	session, err := s.store.Update(sessionID, func(session *coop.Session) error {
 		if err := requireActiveSession(session); err != nil {

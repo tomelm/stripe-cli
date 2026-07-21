@@ -15,6 +15,9 @@ func coopTUIOptions() []tui.Option {
 	return []tui.Option{
 		tui.WithSandboxClaimURL(coopSandboxClaimURL()),
 		tui.WithOutcomeObserver(checker),
-		tui.WithWorkflowOptions(workflow.WithUIVerifier(checker)),
+		tui.WithWorkflowOptions(
+			workflow.WithUIVerifier(checker),
+			workflow.WithAppEntryProber(uicheck.NewAppEntryProbe()),
+		),
 	}
 }

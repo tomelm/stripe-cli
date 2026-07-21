@@ -28,6 +28,11 @@ import (
 type debugLiveExecutor struct {
 	apiKey    string
 	responses map[string]gjson.Result
+
+	// cartAppURL caches the local storefront serveCartApp starts for
+	// checkout_session journeys, so repeated bindingFor calls for the same
+	// review reuse one listener instead of spawning a new one each time.
+	cartAppURL string
 }
 
 func newDebugLiveExecutor() (*debugLiveExecutor, error) {
@@ -149,7 +154,26 @@ func (l *debugLiveExecutor) interpolate(value string) string {
 // payment intents (no hosted URL) it serves a minimal local page that mounts
 // a real Payment Element, so the human can genuinely complete an embedded
 // journey in a browser.
+//
+// checkout_session is different in kind, not just presentation: app-entry
+// verification (pkg/coop/workflow/ui_gate.go's validateAppEntryURL) refuses a
+// checkout.stripe.com URL as the journey's starting point, on purpose — a
+// blueprint's apiRequest node minting a Session directly proves the API call
+// works, not that the developer's own app can drive a customer to one. So for
+// that role we never hand back a pre-created session's hosted url; instead we
+// return no id at all (the checker's discover pass finds whatever object the
+// app mints) and point the journey at a tiny local storefront that creates
+// the real Session itself when the human clicks Buy.
 func (l *debugLiveExecutor) bindingFor(expectation uicheck.Expectation) (id, journeyURL string) {
+	if expectation.Role == "checkout_session" {
+		if priceID := l.priceIDFromResponses(); priceID != "" {
+			return "", l.serveCartApp(priceID)
+		}
+		// No price known yet (the blueprint's product-creation node hasn't
+		// run, or this blueprint doesn't have one) - fall back to the
+		// pre-change behavior below rather than binding nothing at all.
+	}
+
 	for _, response := range l.responses {
 		objectID := response.Get("id").String()
 		if !strings.HasPrefix(objectID, expectation.IDPrefix) {
@@ -170,6 +194,24 @@ func (l *debugLiveExecutor) bindingFor(expectation uicheck.Expectation) (id, jou
 		return id, journeyURL
 	}
 	return "", ""
+}
+
+// priceIDFromResponses finds a price id among the live responses recorded so
+// far, so serveCartApp has something to sell. Blueprints either create a
+// standalone Price (id itself is the match) or a Product with inline
+// default_price_data, whose response carries the generated price id under
+// default_price - the one-time-payment blueprint's create-product node is the
+// latter shape.
+func (l *debugLiveExecutor) priceIDFromResponses() string {
+	for _, response := range l.responses {
+		if id := response.Get("id").String(); strings.HasPrefix(id, "price_") {
+			return id
+		}
+		if defaultPrice := response.Get("default_price").String(); strings.HasPrefix(defaultPrice, "price_") {
+			return defaultPrice
+		}
+	}
+	return ""
 }
 
 // embeddedPaymentPage is the minimal real Payment Element surface for live
@@ -220,4 +262,120 @@ func (l *debugLiveExecutor) serveEmbeddedPaymentPage(clientSecret string) string
 		}))
 	}()
 	return "http://" + listener.Addr().String() + "/"
+}
+
+// cartAppPage is a stand-in for a developer's own storefront: a product, a
+// price, and a plain form (no Stripe.js - the Session doesn't exist until the
+// server route below mints it). The point is not the HTML, it's that the
+// journey's entry point is this app's own page, not a Stripe one.
+const cartAppPage = `<!doctype html>
+<html><head><title>coop debug: cart</title>
+<style>body{font-family:sans-serif;max-width:28rem;margin:4rem auto}
+button{font-size:1rem;padding:0.5rem 1.25rem;cursor:pointer}</style></head>
+<body>
+<h3>coop debug cart</h3>
+<p>%s &mdash; %s</p>
+<form method="post" action="/checkout">
+<button type="submit">Buy now</button>
+</form>
+</body></html>`
+
+// cartSuccessPage is returned at success_url once Checkout redirects back.
+const cartSuccessPage = `<!doctype html>
+<html><head><title>coop debug: success</title></head>
+<body style="font-family: sans-serif; max-width: 28rem; margin: 4rem auto;">
+<h3>Thanks &mdash; payment complete</h3>
+<p>You can close this tab.</p>
+</body></html>`
+
+// serveCartApp starts a localhost storefront for priceID and returns its
+// base URL. Unlike serveEmbeddedPaymentPage, the object under test isn't
+// created before the browser opens: the /checkout route mints a fresh
+// Checkout Session, server-side, the moment the human clicks Buy - exactly
+// the app-minted shape the discover pass in pkg/coop/uicheck/checker.go is
+// built to find. Cached on the struct so one review only ever gets one
+// listener.
+func (l *debugLiveExecutor) serveCartApp(priceID string) string {
+	if l.cartAppURL != "" {
+		return l.cartAppURL
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return ""
+	}
+	base := "http://" + listener.Addr().String()
+	name, price := l.fetchCartLabel(priceID)
+	cartPage := fmt.Sprintf(cartAppPage, name, price)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, cartPage)
+	})
+	mux.HandleFunc("/success", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, cartSuccessPage)
+	})
+	mux.HandleFunc("/checkout", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		params := &requests.RequestParameters{}
+		params.AppendData([]string{
+			"mode=payment",
+			"line_items[0][price]=" + priceID,
+			"line_items[0][quantity]=1",
+			"success_url=" + base + "/success",
+			"cancel_url=" + base + "/",
+		})
+		checkoutBase := requests.Base{Method: "POST", SuppressOutput: true, APIBaseURL: stripe.DefaultAPIBaseURL}
+		body, err := checkoutBase.MakeRequest(r.Context(), l.apiKey, "/v1/checkout/sessions", params, map[string]interface{}{}, true, nil)
+		if err != nil {
+			// The message alone (never l.apiKey) is enough for a human to see
+			// what went wrong from the browser.
+			http.Error(w, "creating checkout session: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		sessionURL := gjson.GetBytes(body, "url").String()
+		if sessionURL == "" {
+			http.Error(w, "checkout session response had no hosted url", http.StatusInternalServerError)
+			return
+		}
+		http.Redirect(w, r, sessionURL, http.StatusSeeOther)
+	})
+
+	go func() {
+		_ = http.Serve(listener, mux)
+	}()
+	l.cartAppURL = base + "/"
+	return l.cartAppURL
+}
+
+// fetchCartLabel best-effort fetches a price's amount and product name (via
+// expand[]=product) to make the cart page read like a real product instead
+// of a bare id. Failure just falls back to generic copy - this is cosmetic,
+// never load-bearing for the journey itself.
+func (l *debugLiveExecutor) fetchCartLabel(priceID string) (name, price string) {
+	name, price = "your product", "the configured price"
+	params := &requests.RequestParameters{}
+	params.AppendExpand([]string{"product"})
+	base := requests.Base{Method: "GET", SuppressOutput: true, APIBaseURL: stripe.DefaultAPIBaseURL}
+	body, err := base.MakeRequest(context.Background(), l.apiKey, "/v1/prices/"+priceID, params, map[string]interface{}{}, true, nil)
+	if err != nil {
+		return name, price
+	}
+	result := gjson.ParseBytes(body)
+	if productName := result.Get("product.name").String(); productName != "" {
+		name = productName
+	}
+	if amount := result.Get("unit_amount"); amount.Exists() && amount.Int() > 0 {
+		currency := strings.ToUpper(result.Get("currency").String())
+		price = fmt.Sprintf("%.2f %s", float64(amount.Int())/100, currency)
+	}
+	return name, price
 }

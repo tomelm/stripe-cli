@@ -171,15 +171,27 @@ func (m Model) reviewOutcomeLines(nodeNumbers []int) []string {
 		}
 		switch outcome.Status {
 		case coop.UIOutcomePending:
-			lines = append(lines, m.theme.AttentionStyle.Render("Your turn: complete the journey in your browser"))
+			lines = append(lines, m.theme.AttentionStyle.Render("Your turn: walk this flow in your app"))
 			if outcome.JourneyURL != "" {
-				lines = append(lines, m.theme.MutedStyle.Render("Open: ")+outcome.JourneyURL+m.theme.DimmedStyle.Render("  o open"))
+				lines = append(lines, m.theme.MutedStyle.Render("Start here: ")+outcome.JourneyURL+m.theme.DimmedStyle.Render("  o open"))
 			}
-			watching := fmt.Sprintf("Watching %s for %s", shortObjectID(outcome.ObjectID), outcome.Expect)
+			var watching string
+			if outcome.ObjectID == "" {
+				// Discovery: the app has not created the object yet, which is
+				// precisely what walking the app's UI is supposed to produce.
+				watching = fmt.Sprintf("Watching for a %s from your app: %s", outcome.Type, outcome.Expect)
+			} else {
+				watching = fmt.Sprintf("Watching %s for %s", shortObjectID(outcome.ObjectID), outcome.Expect)
+			}
 			lines = append(lines, m.spinner.View()+" "+m.theme.MutedStyle.Render(watching))
 		case coop.UIOutcomeObserved:
 			summary := "✓ Observed: " + observedSummary(outcome)
 			lines = append(lines, m.theme.SuccessStyle.Render(summary))
+			if outcome.Discovered {
+				// Naming the object makes confirming it an informed act: if this
+				// is not what you just did in the app, request changes instead.
+				lines = append(lines, m.theme.MutedStyle.Render("Your app created this during review — confirm only if it was your journey."))
+			}
 		case coop.UIOutcomeFailed:
 			lines = append(lines, m.theme.ErrorStyle.Render("✗ Outcome: "+outcome.Detail))
 			lines = append(lines, m.theme.MutedStyle.Render("r request changes so the agent can redo this step"))
@@ -246,8 +258,12 @@ func (m Model) outcomeBlockReason(nodeNumbers []int) string {
 		}
 		switch node.UIOutcome.Status {
 		case coop.UIOutcomePending:
-			reason := fmt.Sprintf("Confirm is locked: complete the journey in your browser (watching %s for %s)",
-				shortObjectID(node.UIOutcome.ObjectID), node.UIOutcome.Expect)
+			reason := "Confirm is locked: walk this flow in your app"
+			if node.UIOutcome.ObjectID == "" {
+				reason += fmt.Sprintf(" — waiting for your app to produce a %s (%s)", node.UIOutcome.Type, node.UIOutcome.Expect)
+			} else {
+				reason += fmt.Sprintf(" (watching %s for %s)", shortObjectID(node.UIOutcome.ObjectID), node.UIOutcome.Expect)
+			}
 			if node.UIOutcome.JourneyURL != "" {
 				reason += " — press o to open it"
 			}
