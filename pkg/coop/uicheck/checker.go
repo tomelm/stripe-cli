@@ -24,12 +24,24 @@ const (
 // half the background observer loops over.
 type Checker struct {
 	reader Reader
+	// requestLog, when available, answers HOW the journey settled — object
+	// state alone cannot distinguish a person paying on a real page from a
+	// server-side completion. Optional by design: it degrades to
+	// object-state-only verification rather than failing a node.
+	requestLog RequestLogSource
 }
 
 // NewChecker builds a Checker. A nil reader is allowed: every check then
 // resolves unavailable, which fails open to human attestation.
 func NewChecker(reader Reader) *Checker {
 	return &Checker{reader: reader}
+}
+
+// WithRequestLog attaches a request-log source used to classify how an
+// observed journey was settled.
+func (c *Checker) WithRequestLog(source RequestLogSource) *Checker {
+	c.requestLog = source
+	return c
 }
 
 // CheckNow fetches the bound object once and evaluates the node's derived
@@ -60,7 +72,8 @@ func (c *Checker) CheckNow(ctx context.Context, session *coop.Session, nodeNumbe
 	}
 
 	if node.UIOutcome.ObjectID == "" {
-		return c.discover(ctx, expectation, node.UIOutcome), true, nil
+		observation := c.discover(ctx, expectation, node.UIOutcome)
+		return c.withOrigin(ctx, expectation, node.UIOutcome, observation), true, nil
 	}
 
 	path := strings.Replace(expectation.GetPath, "{id}", url.PathEscape(node.UIOutcome.ObjectID), 1)
@@ -68,7 +81,37 @@ func (c *Checker) CheckNow(ctx context.Context, session *coop.Session, nodeNumbe
 	if err != nil {
 		return observationFromReadError(err, node.UIOutcome.ObjectID), true, nil
 	}
-	return expectation.Evaluate(object), true, nil
+	return c.withOrigin(ctx, expectation, node.UIOutcome, expectation.Evaluate(object)), true, nil
+}
+
+// withOrigin annotates a settled observation with how it was settled. Only
+// observed outcomes are classified: a pending journey has nothing to explain
+// yet, and a failed one is already blocking. An unobserved origin adds no
+// evidence at all rather than implying anything was wrong — the stream is
+// optional and frequently unavailable.
+func (c *Checker) withOrigin(ctx context.Context, exp Expectation, outcome *coop.UIOutcome, observation Observation) Observation {
+	if observation.Status != coop.UIOutcomeObserved {
+		return observation
+	}
+	objectID := observation.ObjectID
+	if objectID == "" {
+		objectID = outcome.ObjectID
+	}
+	since := time.Time{}
+	if outcome.ReportedAt != nil {
+		since = outcome.ReportedAt.Add(-discoverSkew)
+	}
+	origin, detail := classifyJourneyOrigin(ctx, c.requestLog, exp, objectID, since)
+	if origin == OriginUnobserved {
+		return observation
+	}
+	observation.Evidence = append(observation.Evidence, detail.OriginEvidence()...)
+	if origin == OriginAPI {
+		// The object settled, but a server-side call settled it — the journey
+		// this node exists to verify may never have been walked.
+		observation.Detail = strings.TrimSpace(observation.Detail) + "; completed by a server-side API call, not a browser"
+	}
+	return observation
 }
 
 // discover looks for the object the developer's walk through the app created:

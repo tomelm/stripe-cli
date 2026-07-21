@@ -60,6 +60,12 @@ type Expectation struct {
 	IDPrefix   string // e.g. "cs_"
 	GetPath    string // contains "{id}"; substituted at fetch time
 
+	// SettlePaths are the id-redacted request-log paths whose successful POST
+	// settles this journey (Stripe redacts ids in streamed paths, so the
+	// concrete object is confirmed by enrichment). Empty means this modality
+	// has no single settling request to classify.
+	SettlePaths []string
+
 	// ListPath is set for journeys the APP mints a fresh object for every
 	// time a user walks it (a Checkout Session per cart checkout, an
 	// invoice per billing action). For those, the object cannot be known

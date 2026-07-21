@@ -192,6 +192,7 @@ func (m Model) reviewOutcomeLines(nodeNumbers []int) []string {
 				// is not what you just did in the app, request changes instead.
 				lines = append(lines, m.theme.MutedStyle.Render("Your app created this during review — confirm only if it was your journey."))
 			}
+			lines = append(lines, m.outcomeOriginLines(outcome)...)
 		case coop.UIOutcomeFailed:
 			lines = append(lines, m.theme.ErrorStyle.Render("✗ Outcome: "+outcome.Detail))
 			lines = append(lines, m.theme.MutedStyle.Render("r request changes so the agent can redo this step"))
@@ -209,6 +210,38 @@ func (m Model) reviewOutcomeLines(nodeNumbers []int) []string {
 	return lines
 }
 
+// outcomeOriginLines renders how the journey settled, when the request log
+// could tell us. A browser confirm is the strongest positive evidence the
+// mechanism can produce; a server-side completion means the object settled
+// without anyone walking the UI, which the developer should see before
+// confirming. Silence means the request log was unavailable — which says
+// nothing either way, so it renders nothing.
+func (m Model) outcomeOriginLines(outcome *coop.UIOutcome) []string {
+	settledBy, settledFrom := "", ""
+	for _, evidence := range outcome.Evidence {
+		switch evidence.Key {
+		case "settled_by":
+			settledBy = evidence.Value
+		case "settled_from":
+			settledFrom = evidence.Value
+		}
+	}
+	switch settledBy {
+	case string(uicheck.OriginBrowser):
+		line := "Settled from a browser"
+		if settledFrom != "" {
+			line += " at " + settledFrom
+		}
+		return []string{m.theme.SuccessStyle.Render("✓ " + line)}
+	case string(uicheck.OriginAPI):
+		return []string{
+			m.theme.ErrorStyle.Render("⚠ Completed by a server-side API call, not a browser"),
+			m.theme.MutedStyle.Render("The object settled, but no one walked the UI this step is meant to build."),
+		}
+	}
+	return nil
+}
+
 func observedSummary(outcome *coop.UIOutcome) string {
 	parts := []string{}
 	if outcome.Type != "" {
@@ -216,7 +249,9 @@ func observedSummary(outcome *coop.UIOutcome) string {
 	}
 	parts = append(parts, shortObjectID(outcome.ObjectID))
 	for _, evidence := range outcome.Evidence {
-		if evidence.Key == "journey_url" {
+		// journey_url is already shown; origin evidence gets its own line.
+		switch evidence.Key {
+		case "journey_url", "settled_by", "settled_from":
 			continue
 		}
 		parts = append(parts, evidence.Key+"="+evidence.Value)
