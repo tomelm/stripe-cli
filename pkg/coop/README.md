@@ -89,7 +89,10 @@ test-mode key **before** the node transitions, and persists the results with
 the outcome in one update. A deterministic contradiction (`failed`) or a
 missing required role keeps the node active: the response is `ok:false` with
 concise repair guidance, and the agent fixes the integration and re-runs
-report-work — no human action is needed. Missing authentication, unsupported
+report-work — no human action is needed. If the identical checks block several
+attempts in a row, the node fails open to review with the findings attached so
+a developer can decide, rather than looping the agent against a check it cannot
+satisfy. Missing authentication, unsupported
 API access, or rate limits are `unavailable`, which fails open to normal
 review and is always distinct from a pass. Rejecting a step removes the
 rejected attempt's references and resets its action window. The persisted

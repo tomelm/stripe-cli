@@ -17,6 +17,12 @@ import (
 
 const AwaitTimeout = 10 * time.Minute
 
+// escalationBlockThreshold is how many consecutive report-work attempts may be
+// blocked by the identical set of failing checks before the node fails open to
+// human review. It bounds an agent repair loop against a check it cannot
+// satisfy (for example a deliberate divergence from a blueprint literal).
+const escalationBlockThreshold = 3
+
 type Store interface {
 	Read(id string) (*coop.Session, error)
 	Update(id string, fn func(*coop.Session) error) (*coop.Session, error)
@@ -250,6 +256,7 @@ func (s *Service) ReportWorkContext(ctx context.Context, sessionID string, nodeN
 	blocked := verifierRan && (len(missing) > 0 || hasBlockingResult(resultSet))
 
 	var targetState coop.NodeState
+	var escalated bool
 	session, err := s.store.Update(sessionID, func(current *coop.Session) error {
 		if err := requireActiveSession(current); err != nil {
 			return err
@@ -262,6 +269,7 @@ func (s *Service) ReportWorkContext(ctx context.Context, sessionID string, nodeN
 			return errReportSuperseded
 		}
 		current.StripeResources = supersedeStripeResources(current.StripeResources, replacedRoles, nodeNumber, replacements)
+		previousSignature := blockSignature(currentNode.VerificationResults)
 		if verifierRan {
 			currentNode.VerificationResults = nil
 			for _, result := range resultSet.Results {
@@ -271,10 +279,25 @@ func (s *Service) ReportWorkContext(ctx context.Context, sessionID string, nodeN
 			}
 		}
 		if blocked {
-			// Keep the node active for agent repair. References and results
-			// are persisted so the TUI and the corrected report see them.
-			return nil
+			// Count consecutive attempts blocked by the same failing checks.
+			// A different failing set means the agent made progress, so the
+			// counter restarts rather than marching toward escalation.
+			if signature := blockSignature(currentNode.VerificationResults); signature != "" && signature == previousSignature {
+				currentNode.VerificationBlocks++
+			} else {
+				currentNode.VerificationBlocks = 1
+			}
+			if currentNode.VerificationBlocks < escalationBlockThreshold {
+				// Keep the node active for agent repair. References and results
+				// are persisted so the TUI and the corrected report see them.
+				return nil
+			}
+			// The same checks have blocked repeatedly: the check may be a false
+			// positive the agent cannot satisfy. Fail open to review with the
+			// failures retained so a developer decides, instead of looping.
+			escalated = true
 		}
+		currentNode.VerificationBlocks = 0
 		targetState = coop.NodeReview
 		if autoConfirm || currentNode.AutoConfirm {
 			targetState = coop.NodeDone
@@ -304,10 +327,14 @@ func (s *Service) ReportWorkContext(ctx context.Context, sessionID string, nodeN
 		return errorResponse(err, startWorkHint), nil
 	}
 	node, _ = session.NodeByNumber(nodeNumber)
-	if blocked {
+	if blocked && !escalated {
 		return blockedReportResponse(session, node, nodeNumber, missing), nil
 	}
-	return s.reportWorkResponse(session, node, nodeNumber, targetState), nil
+	resp := s.reportWorkResponse(session, node, nodeNumber, targetState)
+	if escalated {
+		resp.Message = "Automatic Stripe resource verification still reports issues after repeated attempts, so this node was sent to human review with the findings attached rather than blocking further. " + resp.Message
+	}
+	return resp, nil
 }
 
 // reportTransitionError mirrors Session.TransitionNode's validation errors for
@@ -444,6 +471,24 @@ func hasBlockingResult(set verification.ResultSet) bool {
 		}
 	}
 	return false
+}
+
+// blockSignature is the stable identity of a node's blocking failures: the
+// sorted IDs of its failed results. Two attempts share a signature only when
+// the exact same checks failed, so the escalation counter advances only while
+// the agent is stuck rather than iterating through different problems.
+func blockSignature(set *verification.ResultSet) string {
+	if set == nil {
+		return ""
+	}
+	ids := make([]string, 0, len(set.Results))
+	for _, result := range set.Results {
+		if result.Status == verification.StatusFailed {
+			ids = append(ids, result.ID)
+		}
+	}
+	sort.Strings(ids)
+	return strings.Join(ids, "\x00")
 }
 
 func blockedReportResponse(session *coop.Session, node *coop.SessionNode, nodeNumber int, missing []string) coop.CommandResponse {
@@ -655,6 +700,8 @@ func (s *Service) RequestChanges(sessionID string, nodeNumbers []int, note strin
 			node.Implementation = nil
 			node.Verifications = nil
 			node.VerificationResults = nil
+			// A developer-initiated redo starts the escalation count over.
+			node.VerificationBlocks = 0
 			// Remove the rejected attempt's resource references so they cannot
 			// keep feeding verification. References reported by other (done)
 			// nodes are retained for reuse.

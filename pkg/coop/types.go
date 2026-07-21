@@ -102,9 +102,15 @@ type SessionNode struct {
 	Implementation      *Implementation         `json:"implementation,omitempty"`
 	Verifications       []Verification          `json:"verifications,omitempty"`
 	VerificationResults *verification.ResultSet `json:"verification_results,omitempty"`
-	RejectionNote       string                  `json:"rejection_note,omitempty"`
-	StartedAt           *time.Time              `json:"started_at,omitempty"`
-	CompletedAt         *time.Time              `json:"completed_at,omitempty"`
+	// VerificationBlocks counts consecutive report-work attempts blocked by the
+	// same set of failing checks. When it reaches the escalation threshold the
+	// node fails open to review so a deterministic false positive cannot loop
+	// the agent forever. It resets whenever the failing set changes, the node
+	// passes, or the developer requests changes.
+	VerificationBlocks int        `json:"verification_blocks,omitempty"`
+	RejectionNote      string     `json:"rejection_note,omitempty"`
+	StartedAt          *time.Time `json:"started_at,omitempty"`
+	CompletedAt        *time.Time `json:"completed_at,omitempty"`
 }
 
 // SessionStep groups nodes under a titled step.
