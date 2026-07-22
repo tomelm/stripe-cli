@@ -333,7 +333,9 @@ func (m Model) nodeStatusLabel(node coop.SessionNode, includedInStepReview bool)
 			return "Complete · human override", func(s string) string { return m.theme.AttentionStyle.Render(s) }
 		}
 		if completedWithoutAutomaticVerification(&node) {
-			if completedWithUnavailableVerification(&node) {
+			if coop.AsyncHandlerCompletionSummary(&node) != "" {
+				return "Complete · handler unverified", func(s string) string { return m.theme.MutedStyle.Render(s) }
+			} else if completedWithUnavailableVerification(&node) {
 				return "Complete · automatic check unavailable", func(s string) string { return m.theme.AttentionStyle.Render(s) }
 			}
 			return "Complete · agent reported", func(s string) string { return m.theme.MutedStyle.Render(s) }

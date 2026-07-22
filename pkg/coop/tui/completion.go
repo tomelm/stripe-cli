@@ -35,7 +35,7 @@ func (m Model) renderCompletionBodyWithLines() completionBody {
 	summary := m.session.NodeSummary()
 	done := summary[coop.NodeDone]
 	total := m.session.TotalNodes()
-	agentReported, unavailable, overrides := completionVerificationCounts(m.session)
+	agentReported, stateVerifiedHandlers, unavailable, overrides := completionVerificationCounts(m.session)
 
 	box := m.theme.SuccessStyle.Render(fmt.Sprintf("✓ Integration complete: %s", m.session.Blueprint)) +
 		"\n" + m.theme.MutedStyle.Render(fmt.Sprintf("%d nodes complete.", done))
@@ -44,6 +44,13 @@ func (m Model) renderCompletionBodyWithLines() completionBody {
 	}
 	if agentReported > 0 {
 		box += "\n" + m.theme.MutedStyle.Render(fmt.Sprintf("%d completed from agent reports without direct automatic checks.", agentReported))
+	}
+	if stateVerifiedHandlers > 0 {
+		label := "webhook step"
+		if stateVerifiedHandlers != 1 {
+			label = "webhook steps"
+		}
+		box += "\n" + m.theme.MutedStyle.Render(fmt.Sprintf("%d %s: %s.", stateVerifiedHandlers, label, coop.AsyncHandlerStateVerifiedSummary))
 	}
 	if unavailable > 0 {
 		box += "\n" + m.theme.AttentionStyle.Render(fmt.Sprintf("%d completed while automatic verification was unavailable.", unavailable))
@@ -109,18 +116,21 @@ func (m Model) renderCompletionBodyWithLines() completionBody {
 	return completionBody{body: content, suggestionLines: suggestionLines}
 }
 
-func completionVerificationCounts(session *coop.Session) (agentReported, unavailable, overrides int) {
+func completionVerificationCounts(session *coop.Session) (agentReported, stateVerifiedHandlers, unavailable, overrides int) {
 	if session == nil {
-		return 0, 0, 0
+		return 0, 0, 0, 0
 	}
 	for stepIndex := range session.Steps {
 		for nodeIndex := range session.Steps[stepIndex].Nodes {
 			node := &session.Steps[stepIndex].Nodes[nodeIndex]
 			attempt := presentationAttempt(node)
 			if completedWithoutAutomaticVerification(node) {
-				if completedWithUnavailableVerification(node) {
+				switch {
+				case coop.AsyncHandlerCompletionSummary(node) != "":
+					stateVerifiedHandlers++
+				case completedWithUnavailableVerification(node):
 					unavailable++
-				} else {
+				default:
 					agentReported++
 				}
 			}
@@ -129,7 +139,7 @@ func completionVerificationCounts(session *coop.Session) (agentReported, unavail
 			}
 		}
 	}
-	return agentReported, unavailable, overrides
+	return agentReported, stateVerifiedHandlers, unavailable, overrides
 }
 
 func (m Model) renderCompletionReceipt(width int) string {

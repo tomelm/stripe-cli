@@ -618,6 +618,37 @@ func TestCompletionAndOutlineDiscloseUnverifiedWork(t *testing.T) {
 	assertContainsPlain(t, m.renderNodeLine(*node, 0, false, false), "Complete · agent reported")
 }
 
+func TestAsyncHandlerCompletionDisclosesStateWithoutClaimingProcessing(t *testing.T) {
+	m := withCompletionSuggestions(testModel())
+	for stepIndex := range m.session.Steps {
+		for nodeIndex := range m.session.Steps[stepIndex].Nodes {
+			node := &m.session.Steps[stepIndex].Nodes[nodeIndex]
+			node.State = coop.NodeDone
+			node.Attempts = []coop.NodeAttempt{{Number: 1, EndReason: coop.AttemptConfirmed}}
+		}
+	}
+	handler := &m.session.Steps[1].Nodes[0]
+	handler.Attempts[0].EndReason = coop.AttemptCompletedUnverified
+	handler.Attempts[0].Results = []coop.CheckResult{{
+		ID: "state.checkout.complete", Kind: coop.CheckState,
+		Importance: coop.CheckRequired, Status: coop.CheckPassed,
+	}}
+
+	line := m.renderNodeLine(*handler, 0, false, false)
+	assertContainsPlain(t, line, "Complete · handler unverified")
+	assertNotContainsPlain(t, line, "agent reported")
+
+	var detail strings.Builder
+	m.writeSummaryDetail(&detail, handler)
+	assert.Contains(t, detail.String(), "**Verification:** "+coop.AsyncHandlerStateVerifiedSummary)
+	assert.NotContains(t, detail.String(), "no direct automatic rule")
+
+	completion := m.renderCompletionView()
+	plainCompletion := strings.Join(strings.Fields(strings.ReplaceAll(ansi.Strip(completion), "│", " ")), " ")
+	assert.Contains(t, plainCompletion, "1 webhook step: "+coop.AsyncHandlerStateVerifiedSummary)
+	assertNotContainsPlain(t, completion, "completed from agent reports without direct automatic checks")
+}
+
 func TestOutlineAndDetailDiscloseHumanVerificationOverride(t *testing.T) {
 	m := testModel()
 	node := &m.session.Steps[0].Nodes[0]
