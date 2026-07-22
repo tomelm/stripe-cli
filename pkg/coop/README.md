@@ -1,39 +1,30 @@
 # Co-op Mode
 
-Co-op mode enables an AI agent and a human developer to build Stripe integrations together in real time. The agent writes code and reports progress; the developer watches in a terminal UI, reviews work, and confirms each step.
+Co-op mode enables an AI agent and a human developer to build Stripe integrations together in real time. The agent writes code and reports attempt-scoped progress; Co-op verifies supported Stripe resources and state; the developer watches in a terminal UI and reviews visible UI or Dashboard-owned work.
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ tmux session                                                │
-│                                                             │
-│  ┌──────────────────────┐   ┌────────────────────────────┐ │
-│  │  TUI (coop join)     │   │  Agent (Claude/Codex)      │ │
-│  │                      │   │                            │ │
-│  │  Reads session.json  │   │  Writes session.json via   │ │
-│  │  every 500ms         │   │  stripe coop agent commands│ │
-│  │                      │   │                            │ │
-│  └──────────┬───────────┘   └──────────────┬─────────────┘ │
-│             │                              │               │
-│             └──────────┬───────────────────┘               │
-│                        ▼                                   │
-│              ~/.config/stripe/coop/                         │
-│              ├── coop_abc123.json        (session file)     │
-│              └── coop_abc123.json.heartbeat (agent alive)   │
-└─────────────────────────────────────────────────────────────┘
+```text
+blueprint JSON ─┐
+                ├─> pure plan compiler ─> bounded Stripe reads ─> workflow policy
+rule catalog ───┘             ▲                                  │
+                              │                                  ▼
+request/event streams ─> facts, bindings, triggers       attempt history
+                                                               ▲  ▲
+                                                               │  │
+                                                            TUI  agent CLI
 ```
 
-No server, no HTTP, no WebSocket. Communication is through a shared JSON session file with atomic writes (write to .tmp, rename).
+The shared JSON session file is the durable boundary between the TUI and agent CLI. Writes are atomic and attempt-scoped. Automatic findings are applied as complete snapshots behind a per-attempt watermark, so an older asynchronous evaluation cannot overwrite or resurrect findings from a newer one. A test-mode reader must authenticate its exact `/v1/account` identity before the first usable account can atomically pin the session; an empty or different account fails closed. A single TUI-owned observer may consume the CLI's existing request/event streams to trigger rereads and attach supporting evidence; polling is the fallback. The observer retries credentials after first-run sandbox provisioning and reconnects closed streams. Stream observations never pass a check by themselves.
 
 ## Node State Machine
 
 ```
-pending ──→ active ──→ review ──→ done     (normal flow)
+pending ──→ active ──→ review ──→ done     (human UI/Dashboard review)
    │          │          │
    │          │          └──→ active        (request changes: developer entered feedback)
    │          │
-   │          └──→ done                     (auto_confirm nodes skip review)
+   │          └──→ done                     (verified or explicitly unverified non-UI work)
    │          └──→ skipped                  (agent decides node doesn't apply)
    │
    └──→ skipped                             (agent skips from pending)
@@ -67,14 +58,14 @@ active ──→ completed    (all nodes done/skipped, or "stripe coop stop")
 |---------|---------|
 | `stripe coop run <blueprint>` | Create a session (outputs JSON with instructions) |
 | `stripe coop agent start-work --step <n>` | Mark a node as active |
-| `stripe coop agent report-work --step <n>` | Mark a node complete (→ review or → done if auto_confirm) |
-| `stripe coop agent report-check --step <n>` | Add a verification check |
-| `stripe coop agent skip --step <n>` | Skip a node |
-| `stripe coop agent await-review --step <n>` | Block until developer confirms or requests changes |
+| `stripe coop agent report-work --step <n> --attempt <a>` | Submit an attempt with implementation evidence, requested resource IDs, and an app URL for UI work |
+| `stripe coop agent report-check --step <n> --attempt <a>` | Add an agent-reported check to the current attempt |
+| `stripe coop agent skip --step <n> --attempt <a>` | Skip the current attempt |
+| `stripe coop agent await-review --step <n> --attempt <a>` | Poll direct checks and block until Co-op or the developer decides |
 | `stripe coop agent next-action` | Show post-completion options (blocks until selection) |
 | `stripe coop agent start-followup` | Start an internal guided follow-up session selected from next actions |
 
-All agent commands output JSON with an `ok` field and a `next` field suggesting the next command. The `--step` flag name is retained for the CLI, but its value is the 1-based node number across the session.
+All agent commands output JSON with an `ok` field and an exact `next` command. `start-work` creates or returns the open append-only attempt. Later mutations must carry that attempt number, so delayed writes cannot modify a correction attempt. The `--step` flag name is retained for the CLI, but its value is the 1-based node number across the session.
 
 ## TUI Keybindings
 
@@ -95,7 +86,7 @@ All agent commands output JSON with an `ok` field and a `next` field suggesting 
 | `r` | Request changes for the selected review item |
 | `y` | Copy the selected review command when one is available |
 | `f` | Resume following the active/review node after manual navigation |
-| `o` | Open claim URL in browser (when sandbox is unclaimed) |
+| `o` | Open the selected app URL, or the sandbox claim URL when no app is selected |
 | `q` / `Ctrl+C` | Quit TUI |
 
 When requesting changes, `r` opens a feedback prompt. Press `Enter` to submit a note and move the reviewed node or step back to `active`; press `Esc` to cancel.
@@ -121,11 +112,14 @@ $ stripe coop start one-time-payment --language=node
 #      stripe coop agent start-work --session=coop_abc123 --step=1 --note="Beginning: Understand the project"
 # 5. Agent works through steps, calling:
 #      stripe coop agent start-work --session=coop_abc123 --step=1 --note="Scanning project"
-#      stripe coop agent report-work --session=coop_abc123 --step=1 --note="Found Next.js app"
+#      # start-work returns attempt=1 and its exact report command
+#      stripe coop agent report-work --session=coop_abc123 --step=1 --attempt=1 --note="Found Next.js app"
 #      stripe coop agent start-work --session=coop_abc123 --step=2 --note="Creating product"
-#      stripe coop agent report-work --session=coop_abc123 --step=2 --file=server.js --lines=5-20 --note="Created product"
-#      stripe coop agent await-review --session=coop_abc123 --step=2   ← blocks until developer confirms
-# 6. Developer sees progress live, presses 'c' to confirm
+#      stripe coop agent report-work --session=coop_abc123 --step=2 --attempt=1 --file=server.js --lines=5-20 --note="Created product" --stripe-resource=product=prod_123
+#      stripe coop agent await-review --session=coop_abc123 --step=2 --attempt=1
+# 6. Supported non-UI work is confirmed automatically. For a uiComponent the
+#    agent supplies --app-url, the developer opens it with 'o', then confirms
+#    the visible UI or requests changes while ordinary checks keep running.
 # 7. Agent continues to next step
 # 8. After all steps: agent runs "stripe coop agent next-action --session=coop_abc123"
 # 9. Developer picks what to do next from TUI suggestions
@@ -143,13 +137,17 @@ $ stripe coop start
 
 Post-completion choices are written into the session file for the agent. Deploy follow-ups are internal guided sessions, not blueprints: the agent runs `stripe coop agent start-followup --session=<parent> --action=deploy` or `--action=deploy-update`. The child session returns to the completed parent by running `stripe coop agent next-action --session=<parent> --completed=<action>` when it finishes.
 
-## Auto-Confirm
+## Verification Decisions
 
-Nodes with `"auto_confirm": true` skip human review:
-- `agent report-work` transitions directly to `done` (not `review`)
-- `agent await-review` returns immediately if the node is auto-confirmed
-- The prepended "Project context" step contains an auto-confirmed "Understand the project" node
-- Blueprint nodes can set `"auto_confirm": true` for mechanical steps
+- Required direct resource/state checks all pass: non-UI work completes automatically.
+- A deterministic required mismatch: the attempt ends, its evidence is retained, and a correction attempt is created with expected/observed facts and repair guidance.
+- A state is still progressing: `await-review` polls it; during UI review the TUI stays quietly pending.
+- A direct check is unavailable: it is never presented as passed. Non-UI work can continue with the explicit unavailable result; UI confirmation requires a visibly recorded human override.
+- Completed-but-unverified work remains distinct in attempt history and in the TUI outline/completion summary; it is not rendered as a green automatic success.
+- Request/event observations are supporting evidence only. Missing or ambiguous observations never become failures. Even a uniquely path-matched 4xx/5xx remains advisory because Stripe request logs are account-wide and carry no Co-op attempt token; Co-op will not blame or wake the agent without a stronger correlation key.
+- An event may propose a new resource binding only for a reported, still-unbound state attempt after the human opens an app in the same step, when exactly one attempt matches. The window begins at the later of report/open and expires after five minutes. A direct reader must prove the object was created inside it. An observed event can never replace an existing binding.
+- A state rule proves the authoritative Stripe object's state, not that application webhook code received or processed the event. Handler-specific side effects remain agent/human evidence until a direct reusable rule can verify them.
+- Real `uiComponent` work requires a syntactically safe application URL. Co-op performs no reachability or authentication probe; the human opens and judges it. `dashboard` work remains human-owned without an app URL.
 
 ## Heartbeat
 
@@ -181,7 +179,6 @@ Blueprints are embedded JSON in `pkg/coop/blueprints/`. Each has:
 
 Each node has:
 - `type` — `apiRequest`, `asyncHandler`, `uiComponent`, `cliCommand`, `dashboard`, `setUpWebhooks`, `testHelper`
-- `auto_confirm` — skip human review for this node
 - `description` — what the agent should do (source of truth)
 - `review_prompt` — what the human should check before confirming
 - `review_command` — optional command the TUI can show/copy for developer verification
@@ -189,6 +186,8 @@ Each node has:
 - `request.hidden_params` — request fields that should not be shown directly in the TUI
 - `requests` — API-backed test helper requests for `testHelper` nodes
 - `events` — webhook events (for `asyncHandler` nodes)
+
+Verification applicability is derived from this existing blueprint data: requests select resource rules, `${node...}` references select cataloged relationship predicates, events select state rules, and `uiComponent` selects the app handoff. Reusable Stripe object predicates and repair guidance live in the strictly validated embedded catalog in `checks/catalog.json`; blueprints do not duplicate them in sidecars. Unsupported operations, events, relationships, and runtime-resolved inputs compile to explicit advisory coverage gaps rather than silently disappearing or being treated as passes.
 
 `testHelper` request metadata tells the agent which Stripe-backed test helpers can advance test state. Agents should use those helpers while verifying work, but should not encode helper-only request parameters into the user's application.
 
@@ -227,6 +226,10 @@ Writes are serialized with a per-session `.lock` file. `Store.Write()` also chec
 
 ```
 pkg/coop/
+  appsurface/        — Syntax-only app URL safety validation
+  checks/            — Embedded Stripe rule catalog and pure step compiler
+  checkrun/          — Bounded read-only Stripe evaluator
+  observe/           — Bounded request/event normalization and attribution
   types.go          — Session, Node, Step types and constants
   session.go        — State machine, validation, queries
   store.go          — Atomic file I/O, heartbeat, lock files, optimistic locking
@@ -256,7 +259,8 @@ pkg/coop/tui/
   theme.go          — Sail Design System colors
 
 pkg/coop/workflow/
-  service.go        — Shared lifecycle operations for agent commands and TUI review actions
+  service.go        — Attempt-scoped lifecycle operations for agent commands and TUI review actions
+  verification.go   — Product-agnostic result policy and evaluator boundary
 
 pkg/coop/helpers/
   nextaction.go     — Post-completion suggestions, environment detection, and next-action responses
