@@ -170,91 +170,131 @@ type evaluation struct {
 }
 
 func (run *evaluation) targets(plan checks.StepPlan, state *StateObservation) []target {
-	var result []target
-	reviewActive := !run.discoveryWindowStart().IsZero()
-	var eventType, eventResourceID string
-	if state != nil {
-		eventType, eventResourceID = state.EventType, strings.TrimSpace(state.ResourceID)
-	}
-	uiDiscovery := make(map[string]bool)
-	replacements := make(map[string]string)
-	for _, check := range plan.States {
-		if check.Source.Step == run.step && check.Source.Node == run.node.Key {
-			key := check.Role + "\x00" + check.ResourceType
-			uiDiscovery[key] = true
-			binding, bound := findBinding(run.attempt, check.Role, check.ResourceType)
-			replaceable := (!bound && !hasBindingRole(run.attempt, check.Role)) ||
-				(bound && binding.Source == coop.BindingObservedCandidate && binding.ID != eventResourceID)
-			if eventType == check.EventType && eventResourceID != "" && replaceable && reviewActive {
-				replacements[key] = eventResourceID
-			}
-		}
-	}
+	discovery := run.discoverTargets(plan.States, state)
+	result := make([]target, 0, len(plan.Resources)+len(plan.States))
 	for _, check := range plan.Resources {
-		binding, bindingAttempt, bound := run.binding(check.Source, check.Role, check.ResourceType)
-		bindingGroup := check.Role + "\x00" + check.ResourceType
-		replacementID := replacements[bindingGroup]
-		if replacementID != "" {
-			binding = coop.ResourceBinding{ID: replacementID, Source: coop.BindingObservedCandidate}
-			bindingAttempt, bound = run.attempt, true
-		}
-		unboundAfterOpen := !bound && run.uiOpened() && !hasBindingRole(run.attempt, check.Role)
-		canDiscover := uiDiscovery[bindingGroup]
-		persistedCandidate := binding.Source == coop.BindingObservedCandidate && bindingAttempt == run.attempt
-		reviewBinding := (binding.Source == coop.BindingObservedCandidate || binding.Source == coop.BindingObserved) &&
-			bindingAttempt == run.attempt && reviewActive
-		result = append(result, target{meta: check.CheckMeta, kind: coop.CheckResource,
-			resourceType: check.ResourceType, role: check.Role, path: check.RetrievePath,
-			id: binding.ID, actionAttempt: bindingAttempt, prefixes: check.IDPrefixes,
-			predicates: check.Predicates, created: true,
-			evidence:            check.Evidence,
-			discovered:          replacementID != "",
-			actionThroughReview: reviewBinding, candidateBinding: persistedCandidate,
-			validateDiscoveryWindow: reviewBinding,
-			awaitingDiscovery:       unboundAfterOpen && canDiscover, unavailableWithoutDiscovery: unboundAfterOpen && !canDiscover,
-			discoveryWindow: run.discoveryWindowStart()})
+		result = append(result, run.resourceTarget(check, discovery))
 	}
 	for _, check := range plan.States {
-		bindingGroup := check.Role + "\x00" + check.ResourceType
-		replacementID := replacements[bindingGroup]
-		observedResourceID := ""
-		if eventType == check.EventType {
-			observedResourceID = eventResourceID
-		}
-		binding, bound := findBinding(run.attempt, check.Role, check.ResourceType)
-		id := binding.ID
-		discovered := false
-		persistedCandidate := bound && binding.Source == coop.BindingObservedCandidate
-		replaceableCandidate := persistedCandidate && reviewActive
-		switch {
-		case replacementID != "":
-			id, discovered = replacementID, replacementID != binding.ID
-		case replaceableCandidate && observedResourceID != "" && observedResourceID != id:
-			id, discovered = observedResourceID, true
-		case !bound && !hasBindingRole(run.attempt, check.Role):
-			if id = observedResourceID; id != "" {
-				discovered = true
-			} else if !run.uiOpened() {
-				sourceBinding, _, sourceBound := run.sourceBinding(check.Source, check.Role, check.ResourceType)
-				if sourceBound {
-					id = sourceBinding.ID
-				}
-			}
-		}
-		unboundAfterOpen := id == "" && run.uiOpened() && !hasBindingRole(run.attempt, check.Role)
-		canDiscover := uiDiscovery[bindingGroup]
-		reviewBinding := bound && (binding.Source == coop.BindingObservedCandidate || binding.Source == coop.BindingObserved) && reviewActive
-		result = append(result, target{meta: check.CheckMeta, kind: coop.CheckState,
-			resourceType: check.ResourceType, role: check.Role, path: check.RetrievePath,
-			id: id, prefixes: run.evaluator.rulePrefixes(check.ResourceType),
-			predicates: check.Predicates, terminalFailures: check.TerminalFailures,
-			discovered: discovered, candidateBinding: (discovered && reviewActive) || persistedCandidate,
-			awaitingDiscovery:           unboundAfterOpen && canDiscover,
-			unavailableWithoutDiscovery: unboundAfterOpen && !canDiscover,
-			validateDiscoveryWindow:     discovered || reviewBinding,
-			discoveryWindow:             run.discoveryWindowStart()})
+		result = append(result, run.stateTarget(check, discovery))
 	}
 	return result
+}
+
+type targetDiscovery struct {
+	reviewActive    bool
+	eventType       string
+	eventResourceID string
+	window          time.Time
+	uiRoles         map[string]bool
+	replacements    map[string]string
+}
+
+func (run *evaluation) discoverTargets(states []checks.StateCheck, observation *StateObservation) targetDiscovery {
+	discovery := targetDiscovery{
+		window:       run.discoveryWindowStart(),
+		uiRoles:      make(map[string]bool),
+		replacements: make(map[string]string),
+	}
+	discovery.reviewActive = !discovery.window.IsZero()
+	if observation != nil {
+		discovery.eventType = observation.EventType
+		discovery.eventResourceID = strings.TrimSpace(observation.ResourceID)
+	}
+	for _, check := range states {
+		discovery.considerState(run, check)
+	}
+	return discovery
+}
+
+func (discovery targetDiscovery) considerState(run *evaluation, check checks.StateCheck) {
+	if check.Source.Step != run.step || check.Source.Node != run.node.Key {
+		return
+	}
+	key := targetGroup(check.Role, check.ResourceType)
+	discovery.uiRoles[key] = true
+	binding, bound := findBinding(run.attempt, check.Role, check.ResourceType)
+	replaceable := !bound && !hasBindingRole(run.attempt, check.Role)
+	if bound {
+		replaceable = binding.Source == coop.BindingObservedCandidate && binding.ID != discovery.eventResourceID
+	}
+	if discovery.eventType == check.EventType && discovery.eventResourceID != "" && replaceable && discovery.reviewActive {
+		discovery.replacements[key] = discovery.eventResourceID
+	}
+}
+
+func (run *evaluation) resourceTarget(check checks.ResourceCheck, discovery targetDiscovery) target {
+	binding, bindingAttempt, bound := run.binding(check.Source, check.Role, check.ResourceType)
+	group := targetGroup(check.Role, check.ResourceType)
+	replacementID := discovery.replacements[group]
+	if replacementID != "" {
+		binding = coop.ResourceBinding{ID: replacementID, Source: coop.BindingObservedCandidate}
+		bindingAttempt, bound = run.attempt, true
+	}
+	unboundAfterOpen := !bound && run.uiOpened() && !hasBindingRole(run.attempt, check.Role)
+	persistedCandidate := binding.Source == coop.BindingObservedCandidate && bindingAttempt == run.attempt
+	reviewBinding := (binding.Source == coop.BindingObservedCandidate || binding.Source == coop.BindingObserved) &&
+		bindingAttempt == run.attempt && discovery.reviewActive
+	return target{
+		meta: check.CheckMeta, kind: coop.CheckResource,
+		resourceType: check.ResourceType, role: check.Role, path: check.RetrievePath,
+		id: binding.ID, actionAttempt: bindingAttempt, prefixes: check.IDPrefixes,
+		predicates: check.Predicates, evidence: check.Evidence, created: true,
+		discovered: replacementID != "", actionThroughReview: reviewBinding,
+		candidateBinding: persistedCandidate, validateDiscoveryWindow: reviewBinding,
+		awaitingDiscovery:           unboundAfterOpen && discovery.uiRoles[group],
+		unavailableWithoutDiscovery: unboundAfterOpen && !discovery.uiRoles[group],
+		discoveryWindow:             discovery.window,
+	}
+}
+
+func (run *evaluation) stateTarget(check checks.StateCheck, discovery targetDiscovery) target {
+	group := targetGroup(check.Role, check.ResourceType)
+	binding, bound := findBinding(run.attempt, check.Role, check.ResourceType)
+	id, discovered := run.stateTargetID(check, binding, bound, discovery)
+	persistedCandidate := bound && binding.Source == coop.BindingObservedCandidate
+	unboundAfterOpen := id == "" && run.uiOpened() && !hasBindingRole(run.attempt, check.Role)
+	reviewBinding := bound && (binding.Source == coop.BindingObservedCandidate || binding.Source == coop.BindingObserved) && discovery.reviewActive
+	return target{
+		meta: check.CheckMeta, kind: coop.CheckState,
+		resourceType: check.ResourceType, role: check.Role, path: check.RetrievePath,
+		id: id, prefixes: run.evaluator.rulePrefixes(check.ResourceType),
+		predicates: check.Predicates, terminalFailures: check.TerminalFailures,
+		discovered: discovered, candidateBinding: (discovered && discovery.reviewActive) || persistedCandidate,
+		awaitingDiscovery:           unboundAfterOpen && discovery.uiRoles[group],
+		unavailableWithoutDiscovery: unboundAfterOpen && !discovery.uiRoles[group],
+		validateDiscoveryWindow:     discovered || reviewBinding,
+		discoveryWindow:             discovery.window,
+	}
+}
+
+func (run *evaluation) stateTargetID(check checks.StateCheck, binding coop.ResourceBinding, bound bool, discovery targetDiscovery) (string, bool) {
+	replacementID := discovery.replacements[targetGroup(check.Role, check.ResourceType)]
+	observedResourceID := ""
+	if discovery.eventType == check.EventType {
+		observedResourceID = discovery.eventResourceID
+	}
+	id := binding.ID
+	switch {
+	case replacementID != "":
+		return replacementID, replacementID != binding.ID
+	case bound && binding.Source == coop.BindingObservedCandidate && discovery.reviewActive && observedResourceID != "" && observedResourceID != id:
+		return observedResourceID, true
+	case bound || hasBindingRole(run.attempt, check.Role):
+		return id, false
+	case observedResourceID != "":
+		return observedResourceID, true
+	case !run.uiOpened():
+		sourceBinding, _, sourceBound := run.sourceBinding(check.Source, check.Role, check.ResourceType)
+		if sourceBound {
+			return sourceBinding.ID, false
+		}
+	}
+	return id, false
+}
+
+func targetGroup(role, resourceType string) string {
+	return role + "\x00" + resourceType
 }
 
 // binding resolves the current attempt first. Before app review begins, a UI
@@ -287,6 +327,31 @@ func (run *evaluation) sourceBinding(source checks.Source, role, resourceType st
 }
 
 func (run *evaluation) evaluate(target target) {
+	run.prepareCandidate(target)
+	if run.handleMissingBinding(target) || run.handleInvalidBinding(target) || run.handleInvalidObservationWindow(target) {
+		return
+	}
+	run.persistDiscoveredCandidate(target)
+	read, ok := run.readTarget(target)
+	if !ok || !run.verifyReadIdentity(target, read.object) {
+		return
+	}
+	run.add(target, "exists", coop.CheckPassed, "resource exists in the authorized test account", target.resourceType+" "+target.id, target.meta.Repair)
+	run.testMode(target, read.object)
+	if target.validateDiscoveryWindow && !run.discoveryInWindow(target, read.object["created"]) {
+		// A newly proposed event may be discarded and replaced. A candidate
+		// already persisted on the attempt cannot be deleted by the workflow's
+		// upsert-only merge, so retain it here and let its attribution finding
+		// age to unavailable instead of leaving review pending forever.
+		if target.discovered {
+			run.discardCandidate(target)
+		}
+		return
+	}
+	run.evaluateReadTarget(target, read.object)
+}
+
+func (run *evaluation) prepareCandidate(target target) {
 	if target.candidateBinding {
 		for _, evidence := range target.evidence {
 			if evidence.CorrelatesAttempt {
@@ -300,50 +365,68 @@ func (run *evaluation) evaluate(target target) {
 		// window has ended or its ID is malformed for the compiled role.
 		run.bind(target, coop.BindingObservedCandidate)
 	}
-	if target.id == "" {
-		status := coop.CheckFailed
-		repair := "Report the Stripe resource ID observed for this step."
-		if target.kind == coop.CheckState || target.discovered {
-			status = coop.CheckPending
-		}
-		if target.awaitingDiscovery {
-			status = coop.CheckPending
-			repair = "Exercise the app so Stripe emits the expected event."
-			if !target.discoveryWindow.IsZero() && run.at.After(target.discoveryWindow.Add(eventDiscoveryWindow)) {
-				status = coop.CheckUnavailable
-				repair = "Continue with explicit human review, or start a new attempt and exercise the app again."
-			}
-		}
-		if target.unavailableWithoutDiscovery {
+}
+
+func (run *evaluation) handleMissingBinding(target target) bool {
+	if target.id != "" {
+		return false
+	}
+	status := coop.CheckFailed
+	repair := "Report the Stripe resource ID observed for this step."
+	if target.kind == coop.CheckState || target.discovered {
+		status = coop.CheckPending
+	}
+	if target.awaitingDiscovery {
+		status = coop.CheckPending
+		repair = "Exercise the app so Stripe emits the expected event."
+		if !target.discoveryWindow.IsZero() && run.at.After(target.discoveryWindow.Add(eventDiscoveryWindow)) {
 			status = coop.CheckUnavailable
-			repair = "Continue with explicit human review; this UI does not declare an event that can identify the exercised resource."
+			repair = "Continue with explicit human review, or start a new attempt and exercise the app again."
 		}
-		run.add(target, "exists", status, "a Stripe "+target.resourceType+" ID", "no resource binding", repair)
-		return
 	}
-	if !coop.IsSafeStripeObjectID(target.id) || !hasPrefix(target.id, target.prefixes) {
-		status := coop.CheckFailed
-		repair := "Report the matching Stripe resource ID."
-		if target.kind == coop.CheckState || target.discovered {
-			// Event payloads are triggers, not trusted verification input. A
-			// malformed or unrelated discovery cannot be blamed on the agent or
-			// treated as a terminal contradiction; wait for a usable binding.
-			status = coop.CheckPending
-			repair = "Exercise the flow again so Stripe emits the expected event."
-		}
-		run.add(target, "exists", status, "a valid "+target.resourceType+" ID", "no usable resource binding", repair)
-		return
+	if target.unavailableWithoutDiscovery {
+		status = coop.CheckUnavailable
+		repair = "Continue with explicit human review; this UI does not declare an event that can identify the exercised resource."
 	}
-	if target.discovered && target.discoveryWindow.IsZero() {
+	run.add(target, "exists", status, "a Stripe "+target.resourceType+" ID", "no resource binding", repair)
+	return true
+}
+
+func (run *evaluation) handleInvalidBinding(target target) bool {
+	if coop.IsSafeStripeObjectID(target.id) && hasPrefix(target.id, target.prefixes) {
+		return false
+	}
+	status := coop.CheckFailed
+	repair := "Report the matching Stripe resource ID."
+	if target.kind == coop.CheckState || target.discovered {
+		// Event payloads are triggers, not trusted verification input. A
+		// malformed or unrelated discovery cannot be blamed on the agent or
+		// treated as a terminal contradiction; wait for a usable binding.
+		status = coop.CheckPending
+		repair = "Exercise the flow again so Stripe emits the expected event."
+	}
+	run.add(target, "exists", status, "a valid "+target.resourceType+" ID", "no usable resource binding", repair)
+	return true
+}
+
+func (run *evaluation) handleInvalidObservationWindow(target target) bool {
+	if !target.discovered {
+		return false
+	}
+	if target.discoveryWindow.IsZero() {
 		run.add(target, "observation-window", coop.CheckPending, "an event during post-report app review",
 			"no post-report app review window", "Report the resource ID, or report the attempt before the developer opens and exercises the app.")
-		return
+		return true
 	}
-	if target.discovered && !run.discoveryWindowActive(target.discoveryWindow) {
+	if !run.discoveryWindowActive(target.discoveryWindow) {
 		run.add(target, "observation-window", coop.CheckPending, "an event during the current app review window",
 			"event observed outside the current app review window", "Report the matching Stripe resource ID, or start a new attempt and exercise the app again.")
-		return
+		return true
 	}
+	return false
+}
+
+func (run *evaluation) persistDiscoveredCandidate(target target) {
 	if target.candidateBinding && target.discovered && !target.discoveryWindow.IsZero() {
 		// Preserve a safe, attributable event identity before the read so a
 		// transient outage cannot lose a one-shot event. It remains replaceable
@@ -351,10 +434,13 @@ func (run *evaluation) evaluate(target target) {
 		// evidence correlates it with this attempt.
 		run.bind(target, coop.BindingObservedCandidate)
 	}
+}
+
+func (run *evaluation) readTarget(target target) (objectRead, bool) {
 	path, ok := retrievePath(target.path, target.id)
 	if !ok || run.evaluator.reader == nil {
 		run.add(target, "exists", coop.CheckUnavailable, "resource readable in the authorized test account", "read unavailable", "Make test-mode Stripe authentication available and try again.")
-		return
+		return objectRead{}, false
 	}
 	read := run.read(path)
 	if read.err != nil {
@@ -367,16 +453,22 @@ func (run *evaluation) evaluate(target target) {
 			observed = "resource not found in the authorized account scope"
 		}
 		run.add(target, "exists", status, "resource exists in the authorized test account", observed, target.meta.Repair)
-		return
+		return objectRead{}, false
 	}
-	objectID, _ := scalar(read.object["id"])
+	return read, true
+}
+
+func (run *evaluation) verifyReadIdentity(target target, object map[string]any) bool {
+	objectID, _ := scalar(object["id"])
 	if objectID != target.id {
 		run.add(target, "exists", coop.CheckUnavailable, "response identity "+target.id, "malformed identity", "Retry the Stripe read.")
-		return
+		return false
 	}
-	run.add(target, "exists", coop.CheckPassed, "resource exists in the authorized test account", target.resourceType+" "+target.id, target.meta.Repair)
+	return true
+}
 
-	if value, present := read.object["livemode"]; present {
+func (run *evaluation) testMode(target target, object map[string]any) {
+	if value, present := object["livemode"]; present {
 		live, valid := value.(bool)
 		switch {
 		case !valid:
@@ -389,33 +481,26 @@ func (run *evaluation) evaluate(target target) {
 	} else {
 		run.add(target, "test-mode", coop.CheckPassed, "test mode", "authorized test account", target.meta.Repair)
 	}
-	if target.validateDiscoveryWindow && !run.discoveryInWindow(target, read.object["created"]) {
-		// A newly proposed event may be discarded and replaced. A candidate
-		// already persisted on the attempt cannot be deleted by the workflow's
-		// upsert-only merge, so retain it here and let its attribution finding
-		// age to unavailable instead of leaving review pending forever.
-		if target.discovered {
-			run.discardCandidate(target)
-		}
-		return
-	}
+}
+
+func (run *evaluation) evaluateReadTarget(target target, object map[string]any) {
 	if target.created {
-		run.actionWindow(target, read.object["created"])
+		run.actionWindow(target, object["created"])
 	}
 	if target.kind == coop.CheckState {
-		run.state(target, read.object)
-	} else {
-		for _, predicate := range target.predicates {
-			run.predicate(target, read.object, predicate)
-		}
-		for _, evidence := range target.evidence {
-			if evidence.Eventual && !run.uiOpened() {
-				if _, present := valueAt(read.object, evidence.FromField); !present {
-					continue
-				}
+		run.state(target, object)
+		return
+	}
+	for _, predicate := range target.predicates {
+		run.predicate(target, object, predicate)
+	}
+	for _, evidence := range target.evidence {
+		if evidence.Eventual && !run.uiOpened() {
+			if _, present := valueAt(object, evidence.FromField); !present {
+				continue
 			}
-			run.evaluateEvidence(target, read.object, evidence)
 		}
+		run.evaluateEvidence(target, object, evidence)
 	}
 }
 
@@ -619,69 +704,121 @@ type predicateMatch struct {
 func (run *evaluation) match(target target, object map[string]any, predicate checks.Predicate) predicateMatch {
 	value, present := valueAt(object, predicate.Field)
 	observed, scalarValue := scalar(value)
-	result := predicateMatch{available: true, observed: observed}
+	var result predicateMatch
 	switch predicate.Kind {
 	case checks.PredicateEq:
-		result.expected = predicate.Value
-		result.matched = present && scalarValue && observed == result.expected
+		result = matchEq(predicate, present, observed, scalarValue)
 	case checks.PredicateOneOf:
-		result.expected = strings.Join(predicate.Values, " or ")
-		result.matched = present && scalarValue && contains(predicate.Values, observed)
+		result = matchOneOf(predicate, present, observed, scalarValue)
 	case checks.PredicatePresent:
-		result.expected, result.observed = "present", "missing or empty"
-		if present && nonempty(value) {
-			result.matched, result.observed = true, "present"
-		}
+		result = matchPresent(value, present)
 	case checks.PredicatePositive:
-		result.expected, result.observed = "greater than zero", "missing or not positive"
-		if number, ok := number(value); present && ok && number > 0 {
-			result.matched, result.observed = true, "positive"
-		}
+		result = matchPositive(value, present)
 	case checks.PredicateEqualsInput:
-		expectedValue, available := run.inputValue(target.meta.Source, predicate.Input)
-		result.expected, scalarValue = scalar(expectedValue)
-		if !available || !scalarValue {
-			result.available, result.expected = false, "value used by the request"
-			break
-		}
-		result.observed, scalarValue = scalar(value)
-		result.matched = present && scalarValue && result.observed == result.expected
+		result, scalarValue = run.matchEqualsInput(target, predicate, value, present)
 	case checks.PredicateEqualsBinding:
-		var err error
-		result.expected, err = run.bindingValue(predicate.Binding)
-		if err != nil {
-			result.available, result.expected = false, "value from the referenced Stripe resource"
-			break
-		}
-		result.matched = present && scalarValue && observed == result.expected
+		result = run.matchEqualsBinding(predicate, present, observed, scalarValue)
 	case checks.PredicateDifferenceEqualsInput:
-		input, inputAvailable := run.inputValue(target.meta.Source, predicate.Input)
-		inputInteger, validInput := integer(input)
-		if !inputAvailable || !validInput || inputInteger < 0 || predicate.Multiplier <= 0 ||
-			inputInteger > (1<<63-1)/predicate.Multiplier {
-			result.available = false
-			result.expected = "duration derived from the request input"
-			break
-		}
-		expectedDuration := inputInteger * predicate.Multiplier
-		result.expected = fmt.Sprintf("%d seconds (%d x %d)", expectedDuration, inputInteger, predicate.Multiplier)
-		base, basePresent := valueAt(object, predicate.BaseField)
-		baseInteger, validBase := integer(base)
-		fieldInteger, validField := integer(value)
-		if !present || !validField || !basePresent || !validBase || fieldInteger < 0 || baseInteger < 0 {
-			result.matched = false
-			result.observed = predicate.Field + " or " + predicate.BaseField + " is missing or non-integer"
-			break
-		}
-		observedDuration := fieldInteger - baseInteger
-		result.observed = fmt.Sprintf("%d seconds", observedDuration)
-		result.matched = observedDuration == expectedDuration
+		result = run.matchDifferenceEqualsInput(target, object, predicate, value, present, observed)
 	default:
 		result.available, result.expected, result.observed = false, "a supported predicate", "unsupported predicate"
 	}
+	return normalizePredicateMatch(result, predicate.Kind, present, scalarValue)
+}
+
+func matchEq(predicate checks.Predicate, present bool, observed string, scalarValue bool) predicateMatch {
+	return predicateMatch{
+		available: true,
+		expected:  predicate.Value,
+		observed:  observed,
+		matched:   present && scalarValue && observed == predicate.Value,
+	}
+}
+
+func matchOneOf(predicate checks.Predicate, present bool, observed string, scalarValue bool) predicateMatch {
+	return predicateMatch{
+		available: true,
+		expected:  strings.Join(predicate.Values, " or "),
+		observed:  observed,
+		matched:   present && scalarValue && contains(predicate.Values, observed),
+	}
+}
+
+func matchPresent(value any, present bool) predicateMatch {
+	result := predicateMatch{available: true, expected: "present", observed: "missing or empty"}
+	if present && nonempty(value) {
+		result.matched, result.observed = true, "present"
+	}
+	return result
+}
+
+func matchPositive(value any, present bool) predicateMatch {
+	result := predicateMatch{available: true, expected: "greater than zero", observed: "missing or not positive"}
+	if number, ok := number(value); present && ok && number > 0 {
+		result.matched, result.observed = true, "positive"
+	}
+	return result
+}
+
+func (run *evaluation) matchEqualsInput(target target, predicate checks.Predicate, value any, present bool) (predicateMatch, bool) {
+	expectedValue, available := run.inputValue(target.meta.Source, predicate.Input)
+	expected, scalarValue := scalar(expectedValue)
+	observed, _ := scalar(value)
+	result := predicateMatch{available: true, expected: expected, observed: observed}
+	if !available || !scalarValue {
+		result.available, result.expected = false, "value used by the request"
+		return result, scalarValue
+	}
+	result.observed, scalarValue = scalar(value)
+	result.matched = present && scalarValue && result.observed == result.expected
+	return result, scalarValue
+}
+
+func (run *evaluation) matchEqualsBinding(predicate checks.Predicate, present bool, observed string, scalarValue bool) predicateMatch {
+	expected, err := run.bindingValue(predicate.Binding)
+	if err != nil {
+		return predicateMatch{available: false, expected: "value from the referenced Stripe resource", observed: observed}
+	}
+	return predicateMatch{
+		available: true,
+		expected:  expected,
+		observed:  observed,
+		matched:   present && scalarValue && observed == expected,
+	}
+}
+
+func (run *evaluation) matchDifferenceEqualsInput(target target, object map[string]any, predicate checks.Predicate, value any, present bool, observed string) predicateMatch {
+	result := predicateMatch{available: true, observed: observed}
+	input, inputAvailable := run.inputValue(target.meta.Source, predicate.Input)
+	inputInteger, validInput := integer(input)
+	if !validDurationInput(inputAvailable, validInput, inputInteger, predicate.Multiplier) {
+		result.available = false
+		result.expected = "duration derived from the request input"
+		return result
+	}
+	expectedDuration := inputInteger * predicate.Multiplier
+	result.expected = fmt.Sprintf("%d seconds (%d x %d)", expectedDuration, inputInteger, predicate.Multiplier)
+	base, basePresent := valueAt(object, predicate.BaseField)
+	baseInteger, validBase := integer(base)
+	fieldInteger, validField := integer(value)
+	if !present || !validField || !basePresent || !validBase || fieldInteger < 0 || baseInteger < 0 {
+		result.observed = predicate.Field + " or " + predicate.BaseField + " is missing or non-integer"
+		return result
+	}
+	observedDuration := fieldInteger - baseInteger
+	result.observed = fmt.Sprintf("%d seconds", observedDuration)
+	result.matched = observedDuration == expectedDuration
+	return result
+}
+
+func validDurationInput(available, valid bool, value, multiplier int64) bool {
+	return available && valid && value >= 0 && multiplier > 0 && value <= (1<<63-1)/multiplier
+}
+
+func normalizePredicateMatch(result predicateMatch, kind checks.PredicateKind, present, scalarValue bool) predicateMatch {
 	if !present {
 		result.observed = "missing"
-	} else if !scalarValue && predicate.Kind != checks.PredicatePresent && predicate.Kind != checks.PredicatePositive {
+	} else if !scalarValue && kind != checks.PredicatePresent && kind != checks.PredicatePositive {
 		result.observed = "non-scalar value"
 	}
 	return result

@@ -246,7 +246,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeViewport()
 		m.syncViewport()
 		return m, nil
-
 	}
 
 	return m, nil

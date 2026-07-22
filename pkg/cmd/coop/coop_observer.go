@@ -63,6 +63,18 @@ type observerStreamConfig struct {
 	observerPlan
 }
 
+type observerStreamOutcome uint8
+
+const (
+	observerStreamStop observerStreamOutcome = iota
+	observerStreamRetry
+)
+
+type observerProjectionCache struct {
+	compiled    bool
+	projections []checks.UIEventProjection
+}
+
 type observerStreamFactory func(context.Context, observerStreamConfig) ([]<-chan websocket.IElement, error)
 type observerAuthorizer func(context.Context, observerCredentials) error
 type observerProjectionCompiler func(*coop.Session) ([]checks.UIEventProjection, error)
@@ -258,59 +270,16 @@ func (controller *coopObserverController) stream(ctx context.Context, sessionID 
 	if retryEvery <= 0 {
 		retryEvery = coopObserverStandbyRetry
 	}
-	var projections []checks.UIEventProjection
-	projectionsCompiled := false
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		credentials, ok := controller.credentials()
+	projectionCache := observerProjectionCache{}
+	for ctx.Err() == nil {
+		session, credentials, ok := controller.prepareStream(ctx, sessionID)
 		if !ok {
 			if !waitObserverRetry(ctx, retryEvery) {
 				return
 			}
 			continue
 		}
-		if controller.authorize == nil || controller.authorize(ctx, credentials) != nil {
-			if !waitObserverRetry(ctx, retryEvery) {
-				return
-			}
-			continue
-		}
-		session, pinErr := controller.store.PinStripeAccount(sessionID, credentials.AccountID)
-		if pinErr != nil || session.StripeAccountID != credentials.AccountID || session.Status != coop.SessionActive {
-			if !waitObserverRetry(ctx, retryEvery) {
-				return
-			}
-			continue
-		}
-		if controller.sandboxClaimURL != nil && strings.TrimSpace(controller.sandboxClaimURL()) != "" && !session.UsedSandbox {
-			session, pinErr = controller.store.Update(sessionID, func(current *coop.Session) error {
-				if current.Status == coop.SessionActive && current.StripeAccountID == credentials.AccountID {
-					current.UsedSandbox = true
-				}
-				return nil
-			})
-			if pinErr != nil || !session.UsedSandbox {
-				if !waitObserverRetry(ctx, retryEvery) {
-					return
-				}
-				continue
-			}
-		}
-		if !projectionsCompiled {
-			projectionsCompiled = true
-			if controller.compileProjections != nil {
-				compiled, compileErr := controller.compileProjections(session)
-				if compileErr != nil {
-					if controller.reportProjectionError != nil {
-						controller.reportProjectionError(compileErr)
-					}
-				} else {
-					projections = compiled
-				}
-			}
-		}
+		projections := projectionCache.load(controller, session)
 		service := controller.workflow()
 		if service == nil {
 			if !waitObserverRetry(ctx, retryEvery) {
@@ -318,43 +287,115 @@ func (controller *coopObserverController) stream(ctx context.Context, sessionID 
 			}
 			continue
 		}
-		config := observerStreamConfig{observerCredentials: credentials, observerPlan: planObservation(session)}
-		streamCtx, stopStreams := context.WithCancel(ctx)
-		streams, streamErr := controller.streams(streamCtx, config)
-		if streamErr != nil {
-			stopStreams()
-			if !waitObserverRetry(ctx, retryEvery) {
-				return
-			}
-			continue
-		}
-		if len(streams) == 0 {
-			stopStreams()
+		if controller.runStreamAttempt(ctx, sessionID, session, credentials, service, projections) == observerStreamStop {
 			return
 		}
-		var consumers sync.WaitGroup
-		closed := make(chan struct{}, len(streams))
-		for _, source := range streams {
-			consumers.Add(1)
-			go func(stream <-chan websocket.IElement) {
-				defer consumers.Done()
-				controller.consume(streamCtx, service, sessionID, projections, stream)
-				closed <- struct{}{}
-			}(source)
-		}
-		select {
-		case <-ctx.Done():
-			stopStreams()
-			consumers.Wait()
+		if !waitObserverRetry(ctx, retryEvery) {
 			return
-		case <-closed:
-			stopStreams()
-			consumers.Wait()
-			if !waitObserverRetry(ctx, retryEvery) {
-				return
-			}
 		}
 	}
+}
+
+func (controller *coopObserverController) prepareStream(
+	ctx context.Context,
+	sessionID string,
+) (*coop.Session, observerCredentials, bool) {
+	credentials, ok := controller.credentials()
+	if !ok || controller.authorize == nil || controller.authorize(ctx, credentials) != nil {
+		return nil, observerCredentials{}, false
+	}
+	session, err := controller.store.PinStripeAccount(sessionID, credentials.AccountID)
+	if err != nil || session.StripeAccountID != credentials.AccountID || session.Status != coop.SessionActive {
+		return nil, observerCredentials{}, false
+	}
+	if controller.sandboxClaimURL == nil || strings.TrimSpace(controller.sandboxClaimURL()) == "" || session.UsedSandbox {
+		return session, credentials, true
+	}
+	session, err = controller.store.Update(sessionID, func(current *coop.Session) error {
+		if current.Status == coop.SessionActive && current.StripeAccountID == credentials.AccountID {
+			current.UsedSandbox = true
+		}
+		return nil
+	})
+	if err != nil || !session.UsedSandbox {
+		return nil, observerCredentials{}, false
+	}
+	return session, credentials, true
+}
+
+func (cache *observerProjectionCache) load(
+	controller *coopObserverController,
+	session *coop.Session,
+) []checks.UIEventProjection {
+	if cache.compiled {
+		return cache.projections
+	}
+	cache.compiled = true
+	if controller.compileProjections == nil {
+		return nil
+	}
+	projections, err := controller.compileProjections(session)
+	if err == nil {
+		cache.projections = projections
+		return cache.projections
+	}
+	if controller.reportProjectionError != nil {
+		controller.reportProjectionError(err)
+	}
+	return nil
+}
+
+func (controller *coopObserverController) runStreamAttempt(
+	ctx context.Context,
+	sessionID string,
+	session *coop.Session,
+	credentials observerCredentials,
+	service observerWorkflow,
+	projections []checks.UIEventProjection,
+) observerStreamOutcome {
+	config := observerStreamConfig{observerCredentials: credentials, observerPlan: planObservation(session)}
+	streamCtx, stopStreams := context.WithCancel(ctx)
+	streams, err := controller.streams(streamCtx, config)
+	if err != nil {
+		stopStreams()
+		return observerStreamRetry
+	}
+	if len(streams) == 0 {
+		stopStreams()
+		return observerStreamStop
+	}
+	return controller.consumeStreams(ctx, streamCtx, stopStreams, service, sessionID, projections, streams)
+}
+
+func (controller *coopObserverController) consumeStreams(
+	ctx context.Context,
+	streamCtx context.Context,
+	stopStreams context.CancelFunc,
+	service observerWorkflow,
+	sessionID string,
+	projections []checks.UIEventProjection,
+	streams []<-chan websocket.IElement,
+) observerStreamOutcome {
+	var consumers sync.WaitGroup
+	closed := make(chan struct{}, len(streams))
+	for _, source := range streams {
+		consumers.Add(1)
+		go func(stream <-chan websocket.IElement) {
+			defer consumers.Done()
+			controller.consume(streamCtx, service, sessionID, projections, stream)
+			closed <- struct{}{}
+		}(source)
+	}
+
+	outcome := observerStreamRetry
+	select {
+	case <-ctx.Done():
+		outcome = observerStreamStop
+	case <-closed:
+	}
+	stopStreams()
+	consumers.Wait()
+	return outcome
 }
 
 func waitObserverRetry(ctx context.Context, retryEvery time.Duration) bool {
