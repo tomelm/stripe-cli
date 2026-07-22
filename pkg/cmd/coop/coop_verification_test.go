@@ -116,32 +116,52 @@ func TestCheckoutVerificationEndToEndHumanAndAgentFlow(t *testing.T) {
 	require.NoError(t, err)
 	session := coop.NewSessionFromBlueprint(blueprint, "checkout_acceptance", nil, nil)
 	session.StripeAccountID = "acct_checkout123"
-	// Exercise the canonical Checkout/UI step and preserve the separate future
-	// webhook-handler step; setup and context are outside this vertical slice.
-	session.Steps = session.Steps[2:]
+	// Retain the completed Product source because the Checkout relationship is
+	// verified from the blueprint's ${node...:default_price} reference. Context
+	// remains outside this vertical slice.
+	session.Steps = session.Steps[1:]
+	setupStarted := currentTime.Add(-2 * time.Minute)
+	setupReported := currentTime.Add(-time.Minute)
+	setupEnded := setupReported.Add(time.Second)
+	productNode := &session.Steps[0].Nodes[0]
+	productNode.State = coop.NodeDone
+	productNode.Attempts = []coop.NodeAttempt{{
+		Number: 1, StartedAt: setupStarted, ReportedAt: &setupReported, EndedAt: &setupEnded,
+		EndReason: coop.AttemptConfirmed,
+		Resources: []coop.ResourceBinding{{
+			Role: "product", Type: "product", ID: "prod_created", Source: coop.BindingAgent,
+		}},
+	}}
+	const checkoutNodeNumber, uiNodeNumber, handlerNodeNumber = 2, 3, 4
 	require.NoError(t, store.Write(session))
 	service := workflow.NewService(store, workflow.WithEvaluator(evaluator), workflow.WithClock(now, nil))
 
+	reader.Put("/v1/products/prod_created", map[string]any{
+		"id": "prod_created", "default_price": map[string]any{"id": "price_created"},
+	})
 	createdAt := currentTime.Add(5 * time.Second)
 	reader.Put("/v1/checkout/sessions/cs_created", map[string]any{
 		"id": "cs_created", "livemode": false, "created": json.Number(strconv.FormatInt(createdAt.Unix(), 10)),
 		"mode": "payment", "status": "open", "payment_status": "unpaid",
 	})
-	created, err := service.StartWork(session.ID, 1, "Creating Checkout")
+	reader.Put("/v1/checkout/sessions/cs_created/line_items", map[string]any{
+		"data": []any{map[string]any{"price": map[string]any{"id": "price_created"}}},
+	})
+	created, err := service.StartWork(session.ID, checkoutNodeNumber, "Creating Checkout")
 	require.NoError(t, err)
 	currentTime = currentTime.Add(10 * time.Second)
-	createdResult, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, created.Attempt, workflow.ReportWorkInput{
+	createdResult, err := service.ReportWorkAttempt(context.Background(), session.ID, checkoutNodeNumber, created.Attempt, workflow.ReportWorkInput{
 		File: "server/checkout.go", StripeResources: map[string]string{"checkout_session": "cs_created"},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "confirmed", createdResult.Decision)
-	assert.Contains(t, createdResult.Next, "--step=2")
+	assert.Contains(t, createdResult.Next, "--step=3")
 
 	currentTime = currentTime.Add(10 * time.Second)
-	ui, err := service.StartWork(session.ID, 2, "Building the app surface")
+	ui, err := service.StartWork(session.ID, uiNodeNumber, "Building the app surface")
 	require.NoError(t, err)
 	currentTime = currentTime.Add(10 * time.Second)
-	uiResult, err := service.ReportWorkAttempt(context.Background(), session.ID, 2, ui.Attempt, workflow.ReportWorkInput{
+	uiResult, err := service.ReportWorkAttempt(context.Background(), session.ID, uiNodeNumber, ui.Attempt, workflow.ReportWorkInput{
 		File: "web/checkout.tsx", AppURL: "http://127.0.0.1:0/checkout",
 	})
 	require.NoError(t, err)
@@ -163,9 +183,9 @@ func TestCheckoutVerificationEndToEndHumanAndAgentFlow(t *testing.T) {
 	assert.NotZero(t, uiStateResults, "the UI review persists its containing step's pending state checks")
 	projected, err := store.Read(session.ID)
 	require.NoError(t, err)
-	createNode, err := projected.NodeByNumber(1)
+	createNode, err := projected.NodeByNumber(checkoutNodeNumber)
 	require.NoError(t, err)
-	uiNode, err := projected.NodeByNumber(2)
+	uiNode, err := projected.NodeByNumber(uiNodeNumber)
 	require.NoError(t, err)
 	require.NotNil(t, createNode.Attempts[0].EndedAt)
 	assert.Equal(t, "cs_created", createNode.Attempts[0].Resources[0].ID)
@@ -173,11 +193,11 @@ func TestCheckoutVerificationEndToEndHumanAndAgentFlow(t *testing.T) {
 	assert.NotEmpty(t, uiNode.Attempts[0].Results)
 
 	currentTime = currentTime.Add(10 * time.Second)
-	_, err = service.MarkAppOpened(session.ID, 2, ui.Attempt)
+	_, err = service.MarkAppOpened(session.ID, uiNodeNumber, ui.Attempt)
 	require.NoError(t, err)
 	reader.TakePaths()
 	currentTime = currentTime.Add(time.Second)
-	preEvent, err := service.Reevaluate(context.Background(), session.ID, 2, ui.Attempt, workflow.TriggerPoll)
+	preEvent, err := service.Reevaluate(context.Background(), session.ID, uiNodeNumber, ui.Attempt, workflow.TriggerPoll)
 	require.NoError(t, err)
 	assert.Equal(t, "needs_human", preEvent.Decision)
 	assert.Empty(t, reader.TakePaths(), "post-open verification must not reread the ended API sibling")
@@ -192,6 +212,9 @@ func TestCheckoutVerificationEndToEndHumanAndAgentFlow(t *testing.T) {
 		"id": "cs_human", "livemode": false, "created": json.Number(strconv.FormatInt(humanCreatedAt.Unix(), 10)),
 		"mode": "payment", "status": "complete", "payment_status": "paid",
 	})
+	reader.Put("/v1/checkout/sessions/cs_human/line_items", map[string]any{
+		"data": []any{map[string]any{"price": "price_created"}},
+	})
 	openedSession, err := store.Read(session.ID)
 	require.NoError(t, err)
 	match := observe.MatchSession(openedSession, observe.Fact{Event: &observe.EventFact{
@@ -200,36 +223,42 @@ func TestCheckoutVerificationEndToEndHumanAndAgentFlow(t *testing.T) {
 	require.NotNil(t, match.Attribution)
 	require.Len(t, match.Triggers, 1)
 	trigger := match.Triggers[0]
-	assert.Equal(t, 2, trigger.NodeNumber, "the UI's explicit event declaration owns the human flow")
+	assert.Equal(t, uiNodeNumber, trigger.NodeNumber, "the UI's explicit event declaration owns the human flow")
 	currentTime = currentTime.Add(10 * time.Second)
 	reader.TakePaths()
 	stateResult, err := service.ReevaluateState(context.Background(), session.ID, trigger.NodeNumber, trigger.AttemptNumber, "checkout.session.completed", "cs_human")
 	require.NoError(t, err)
 	assert.Equal(t, "needs_human", stateResult.Decision)
-	assertResultKindsHaveStatus(t, stateResult.Verification, coop.CheckResource, coop.CheckPending)
+	assertResultKindsHaveStatus(t, stateResult.Verification, coop.CheckResource, coop.CheckPassed)
 	assertResultKindsHaveStatus(t, stateResult.Verification, coop.CheckState, coop.CheckPassed)
-	assert.Equal(t, []string{"/v1/checkout/sessions/cs_human"}, reader.TakePaths(),
-		"the event snapshot may read state but cannot combine it with old structural passes")
+	assert.Equal(t, []string{
+		"/v1/checkout/sessions/cs_human",
+		"/v1/checkout/sessions/cs_human/line_items",
+		"/v1/products/prod_created",
+	}, reader.TakePaths(), "the event snapshot verifies state and the exercised resource graph together")
 	bound, err := store.Read(session.ID)
 	require.NoError(t, err)
-	uiNode, err = bound.NodeByNumber(2)
+	uiNode, err = bound.NodeByNumber(uiNodeNumber)
 	require.NoError(t, err)
 	require.Len(t, uiNode.Attempts[0].Resources, 1)
 	assert.Equal(t, "cs_human", uiNode.Attempts[0].Resources[0].ID)
-	futureHandler, err := bound.NodeByNumber(3)
+	futureHandler, err := bound.NodeByNumber(handlerNodeNumber)
 	require.NoError(t, err)
 	assert.Equal(t, coop.NodePending, futureHandler.State)
 	assert.Empty(t, futureHandler.Attempts, "the UI event must not mutate its future handler")
 
 	currentTime = currentTime.Add(time.Second)
 	reader.TakePaths()
-	polled, err := service.Reevaluate(context.Background(), session.ID, 2, ui.Attempt, workflow.TriggerPoll)
+	polled, err := service.Reevaluate(context.Background(), session.ID, uiNodeNumber, ui.Attempt, workflow.TriggerPoll)
 	require.NoError(t, err)
 	assert.Equal(t, "needs_human", polled.Decision)
 	assertResultKindsHaveStatus(t, polled.Verification, coop.CheckResource, coop.CheckPassed)
 	assertResultKindsHaveStatus(t, polled.Verification, coop.CheckState, coop.CheckPassed)
-	assert.Equal(t, []string{"/v1/checkout/sessions/cs_human"}, reader.TakePaths(),
-		"the next complete snapshot checks structure and state on the current UI binding")
+	assert.Equal(t, []string{
+		"/v1/checkout/sessions/cs_human",
+		"/v1/checkout/sessions/cs_human/line_items",
+		"/v1/products/prod_created",
+	}, reader.TakePaths(), "the next complete snapshot checks the same resource graph")
 	for _, result := range polled.Verification {
 		if result.Kind == coop.CheckResource && strings.HasSuffix(result.ID, ".exists") {
 			assert.Contains(t, result.Observed, "cs_human")
@@ -237,14 +266,14 @@ func TestCheckoutVerificationEndToEndHumanAndAgentFlow(t *testing.T) {
 		}
 	}
 
-	confirmed, err := service.ConfirmReviewAttempts(session.ID, []workflow.AttemptRef{{Node: 2, Attempt: ui.Attempt}}, false, "")
+	confirmed, err := service.ConfirmReviewAttempts(session.ID, []workflow.AttemptRef{{Node: uiNodeNumber, Attempt: ui.Attempt}}, false, "")
 	require.NoError(t, err)
 	assert.Equal(t, coop.SessionActive, confirmed.Status, "the separate future handler remains to be implemented")
-	woken, err := service.AwaitReviewAttempt(context.Background(), session.ID, 2, ui.Attempt)
+	woken, err := service.AwaitReviewAttempt(context.Background(), session.ID, uiNodeNumber, ui.Attempt)
 	require.NoError(t, err)
 	assert.Equal(t, "confirmed", woken.Decision)
-	assert.Contains(t, woken.Next, "--step=3")
-	futureHandler, err = confirmed.NodeByNumber(3)
+	assert.Contains(t, woken.Next, "--step=4")
+	futureHandler, err = confirmed.NodeByNumber(handlerNodeNumber)
 	require.NoError(t, err)
 	assert.Equal(t, coop.NodePending, futureHandler.State)
 	assert.Empty(t, futureHandler.Attempts)

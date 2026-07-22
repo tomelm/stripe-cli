@@ -14,6 +14,9 @@ const (
 	PredicatePositive      PredicateKind = "positive"
 	PredicateEqualsInput   PredicateKind = "equals_input"
 	PredicateEqualsBinding PredicateKind = "equals_binding"
+	// PredicateDifferenceEqualsInput compares field-base_field with a request
+	// input multiplied by the catalog's fixed scalar.
+	PredicateDifferenceEqualsInput PredicateKind = "difference_equals_input"
 )
 
 // RuleID identifies one of the two concrete verification behaviors. These
@@ -67,6 +70,26 @@ type ResourceRule struct {
 	Retrieve   string              `json:"retrieve,omitempty"`
 	IDPrefixes []string            `json:"id_prefixes,omitempty"`
 	Predicates []PredicateTemplate `json:"predicates,omitempty"`
+	Evidence   []EvidenceRule      `json:"evidence,omitempty"`
+}
+
+// EvidenceRule declares one bounded follow-up read rooted in the created
+// resource. When FromField is empty, {id} is the created resource ID (for a
+// child collection). Otherwise {id} is read from that field and validated
+// against IDPrefixes before the related object is fetched. Eventual marks a
+// relation that may not exist until later state is reached. A correlation
+// rule must consist only of binding comparisons and can make an event
+// candidate attributable enough for deterministic failures to wake the agent.
+type EvidenceRule struct {
+	ID                string              `json:"id"`
+	Retrieve          string              `json:"retrieve"`
+	FromField         string              `json:"from_field,omitempty"`
+	IDPrefixes        []string            `json:"id_prefixes,omitempty"`
+	WhenInput         string              `json:"when_input,omitempty"`
+	Eventual          bool                `json:"eventual,omitempty"`
+	CorrelatesAttempt bool                `json:"correlates_attempt,omitempty"`
+	Predicates        []PredicateTemplate `json:"predicates"`
+	Repair            string              `json:"repair"`
 }
 
 // EventRule maps one exact event type to state predicates on its data object.
@@ -91,11 +114,13 @@ type TerminalFailTemplate struct {
 // predicate. Input is a dotted path in the consuming API request. Value and
 // Values are available only to eq and one_of respectively.
 type PredicateTemplate struct {
-	Kind   PredicateKind `json:"op"`
-	Field  string        `json:"field"`
-	Input  string        `json:"input,omitempty"`
-	Value  string        `json:"value,omitempty"`
-	Values []string      `json:"values,omitempty"`
+	Kind       PredicateKind `json:"op"`
+	Field      string        `json:"field"`
+	BaseField  string        `json:"base_field,omitempty"`
+	Input      string        `json:"input,omitempty"`
+	Multiplier int64         `json:"multiplier,omitempty"`
+	Value      string        `json:"value,omitempty"`
+	Values     []string      `json:"values,omitempty"`
 }
 
 // Source identifies the immutable blueprint node (and, for test helpers, the
@@ -120,12 +145,14 @@ type BindingRef struct {
 // exact parsed node reference; equals-input predicates retain the supported
 // request input path for an evaluator to compare with the actual request.
 type Predicate struct {
-	Kind    PredicateKind
-	Field   string
-	Input   string
-	Value   string
-	Values  []string
-	Binding *BindingRef
+	Kind       PredicateKind
+	Field      string
+	BaseField  string
+	Input      string
+	Multiplier int64
+	Value      string
+	Values     []string
+	Binding    *BindingRef
 }
 
 // TerminalFail is one compiled, independently matching terminal condition.
@@ -153,9 +180,23 @@ type ResourceCheck struct {
 	RetrievePath string
 	IDPrefixes   []string
 	Predicates   []Predicate
+	Evidence     []EvidenceCheck
 }
 
-// StateCheck verifies the canonical state certified by an observed event.
+// EvidenceCheck is the compiled form of one catalog follow-up read.
+type EvidenceCheck struct {
+	ID                string
+	RetrievePath      string
+	FromField         string
+	IDPrefixes        []string
+	Eventual          bool
+	CorrelatesAttempt bool
+	Predicates        []Predicate
+	Repair            string
+}
+
+// StateCheck verifies authoritative resource state associated with a declared
+// event. Observing the event supplies a trigger or candidate ID, never proof.
 type StateCheck struct {
 	CheckMeta
 	EventType        string

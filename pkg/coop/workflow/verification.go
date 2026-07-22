@@ -398,9 +398,7 @@ func (s *Service) applyEvaluation(session *coop.Session, nodeNumber, attemptNumb
 		// stale, none of the snapshot may alter the attempt.
 		applied.results = append([]coop.CheckResult(nil), attempt.Results...)
 		applied.policy = decideResults(attempt.Results, attempt.AgentChecks, isHumanReviewNode(node))
-		if node.Type == coop.NodeAsyncHandler && applied.policy.decision == decisionConfirmed {
-			applied.policy.decision = decisionUnverified
-		}
+		normalizeEvaluationPolicy(session, node, nodeNumber, attempt, &applied.policy)
 		return nil
 	}
 	applied.results = append([]coop.CheckResult(nil), attempt.Results...)
@@ -411,15 +409,7 @@ func (s *Service) applyEvaluation(session *coop.Session, nodeNumber, attemptNumb
 		return nil
 	}
 	applied.policy = decideResults(attempt.Results, attempt.AgentChecks, isHumanReviewNode(node))
-	if node.Type == coop.NodeAsyncHandler && applied.policy.decision == decisionConfirmed {
-		// Stripe state can prove the object transitioned, but not that the
-		// developer's webhook endpoint received or processed the event.
-		applied.policy.decision = decisionUnverified
-	}
-	if applied.policy.decision == decisionUnverified && len(applied.policy.unavailable) > 0 && stepHasHumanReview(session, nodeNumber) {
-		applied.policy.decision = decisionNeedsHuman
-		applied.policy.requiresOverride = true
-	}
+	normalizeEvaluationPolicy(session, node, nodeNumber, attempt, &applied.policy)
 	return s.applyEvaluationPolicy(session, node, nodeNumber, attemptNumber, applied)
 }
 
@@ -452,6 +442,50 @@ func stepHasHumanReview(session *coop.Session, nodeNumber int) bool {
 		}
 	}
 	return false
+}
+
+func attemptHasObservedCandidate(attempt *coop.NodeAttempt) bool {
+	if attempt == nil {
+		return false
+	}
+	for _, binding := range attempt.Resources {
+		if binding.Source == coop.BindingObservedCandidate {
+			return true
+		}
+	}
+	return false
+}
+
+func protectCandidateCompletion(session *coop.Session, nodeNumber int, attempt *coop.NodeAttempt, policy *resultPolicy) {
+	if policy == nil || !attemptHasObservedCandidate(attempt) ||
+		(policy.decision != decisionConfirmed && policy.decision != decisionUnverified) {
+		return
+	}
+	// Account-wide event candidates are not attempt identity. Even if an
+	// evaluator accidentally omits its attribution finding, a candidate cannot
+	// autonomously close non-UI work or be presented to the agent as completed.
+	if stepHasHumanReview(session, nodeNumber) {
+		policy.decision = decisionNeedsHuman
+		policy.requiresOverride = true
+		return
+	}
+	policy.decision = decisionPending
+}
+
+func normalizeEvaluationPolicy(session *coop.Session, node *coop.SessionNode, nodeNumber int, attempt *coop.NodeAttempt, policy *resultPolicy) {
+	if policy == nil {
+		return
+	}
+	if node != nil && node.Type == coop.NodeAsyncHandler && policy.decision == decisionConfirmed {
+		// Stripe state can prove the object transitioned, but not that the
+		// developer's webhook endpoint received or processed the event.
+		policy.decision = decisionUnverified
+	}
+	protectCandidateCompletion(session, nodeNumber, attempt, policy)
+	if policy.decision == decisionUnverified && len(policy.unavailable) > 0 && stepHasHumanReview(session, nodeNumber) {
+		policy.decision = decisionNeedsHuman
+		policy.requiresOverride = true
+	}
 }
 
 func (s *Service) mergeEvaluation(node *coop.SessionNode, attemptNumber int, snapshotAt time.Time, evaluation Evaluation) (bool, error) {
@@ -556,6 +590,9 @@ func (s *Service) evaluationResponse(session *coop.Session, nodeNumber, attemptN
 }
 
 func unverifiedCompletionMessage(nodeNumber int, node *coop.SessionNode, unavailable bool) string {
+	if summary := coop.AsyncHandlerCompletionSummary(node); summary != "" {
+		return fmt.Sprintf("Node %d completed. %s. Continue.", nodeNumber, summary)
+	}
 	if node != nil && node.Type == coop.NodeAsyncHandler {
 		return fmt.Sprintf("Node %d completed without automatic confirmation. Stripe state alone cannot prove that the application's webhook handler received or processed the event.", nodeNumber)
 	}

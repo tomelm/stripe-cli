@@ -43,6 +43,36 @@
       "predicates": [
         {"op": "equals_input", "field": "mode", "input": "mode"},
         {"op": "equals_binding", "field": "customer", "input": "customer"}
+      ],
+      "evidence": [
+        {
+          "id": "line_items",
+          "retrieve": "/v1/checkout/sessions/{id}/line_items",
+          "predicates": [
+            {"op": "equals_binding", "field": "data.0.price", "input": "line_items.0.price"}
+          ],
+          "correlates_attempt": true,
+          "repair": "Use the Price returned by the referenced step for the Checkout line item."
+        },
+        {
+          "id": "subscription",
+          "retrieve": "/v1/subscriptions/{id}",
+          "from_field": "subscription",
+          "id_prefixes": ["sub_"],
+          "when_input": "subscription_data.trial_period_days",
+          "eventual": true,
+          "predicates": [
+            {
+              "op": "difference_equals_input",
+              "field": "trial_end",
+              "base_field": "trial_start",
+              "input": "subscription_data.trial_period_days",
+              "multiplier": 86400
+            },
+            {"op": "equals_binding", "field": "items.data.0.price", "input": "line_items.0.price"}
+          ],
+          "repair": "Create and complete a new Checkout Session whose trial duration and subscription Price match the blueprint."
+        }
       ]
     },
     {
@@ -147,7 +177,22 @@
       "role": "product",
       "create": {"method": "POST", "path": "/v1/products"},
       "retrieve": "/v1/products/{id}",
-      "id_prefixes": ["prod_"]
+      "id_prefixes": ["prod_"],
+      "evidence": [
+        {
+          "id": "default_price",
+          "retrieve": "/v1/prices/{id}",
+          "from_field": "default_price",
+          "id_prefixes": ["price_"],
+          "predicates": [
+            {"op": "equals_input", "field": "currency", "input": "default_price_data.currency"},
+            {"op": "equals_input", "field": "unit_amount", "input": "default_price_data.unit_amount"},
+            {"op": "equals_input", "field": "recurring.interval", "input": "default_price_data.recurring.interval"},
+            {"op": "equals_input", "field": "recurring.interval_count", "input": "default_price_data.recurring.interval_count"}
+          ],
+          "repair": "Create the Product with default_price_data matching the required currency, amount, and recurring interval, then use its returned default Price."
+        }
+      ]
     },
     {
       "type": "setup_intent",

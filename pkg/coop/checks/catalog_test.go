@@ -1,6 +1,7 @@
 package checks
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -28,6 +29,11 @@ func TestLoadCatalogIncludesEveryFixedPredicateAndRule(t *testing.T) {
 		for _, predicate := range resource.Predicates {
 			kinds[predicate.Kind] = true
 		}
+		for _, evidence := range resource.Evidence {
+			for _, predicate := range evidence.Predicates {
+				kinds[predicate.Kind] = true
+			}
+		}
 	}
 	for _, event := range catalog.Events {
 		for _, predicate := range event.Predicates {
@@ -41,6 +47,7 @@ func TestLoadCatalogIncludesEveryFixedPredicateAndRule(t *testing.T) {
 		PredicatePositive,
 		PredicateEqualsInput,
 		PredicateEqualsBinding,
+		PredicateDifferenceEqualsInput,
 	} {
 		assert.Truef(t, kinds[kind], "catalog does not exercise %s", kind)
 	}
@@ -82,7 +89,7 @@ func TestCatalogValidateRejectsAmbiguousOrInvalidDefinitions(t *testing.T) {
 			Field: "status",
 			Input: "status",
 		}}
-		require.ErrorContains(t, catalog.Validate(), "is not valid for an event rule")
+		require.ErrorContains(t, catalog.Validate(), "requires request context")
 	})
 
 	t.Run("terminal condition cannot duplicate pass condition", func(t *testing.T) {
@@ -113,6 +120,81 @@ func TestCatalogValidateRejectsAmbiguousOrInvalidDefinitions(t *testing.T) {
 			}
 		}
 		require.ErrorContains(t, catalog.Validate(), `must be "blocking"`)
+	})
+
+	t.Run("duplicate evidence id", func(t *testing.T) {
+		catalog := testCatalog(t)
+		for index := range catalog.Resources {
+			if len(catalog.Resources[index].Evidence) == 1 {
+				catalog.Resources[index].Evidence = append(catalog.Resources[index].Evidence, catalog.Resources[index].Evidence[0])
+				require.ErrorContains(t, catalog.Validate(), "duplicate id")
+				return
+			}
+		}
+		t.Fatal("catalog has no evidence rule")
+	})
+
+	t.Run("evidence gate is a bounded input selector", func(t *testing.T) {
+		catalog := testCatalog(t)
+		for resourceIndex := range catalog.Resources {
+			if len(catalog.Resources[resourceIndex].Evidence) > 0 {
+				catalog.Resources[resourceIndex].Evidence[0].WhenInput = "items[0].price"
+				require.ErrorContains(t, catalog.Validate(), "when_input")
+				return
+			}
+		}
+		t.Fatal("catalog has no evidence rule")
+	})
+
+	t.Run("predicate result ids must be unique", func(t *testing.T) {
+		catalog := testCatalog(t)
+		catalog.Resources[0].Predicates = []PredicateTemplate{
+			{Kind: PredicatePresent, Field: "a.b"},
+			{Kind: PredicatePresent, Field: "a_b"},
+		}
+		require.ErrorContains(t, catalog.Validate(), "duplicate result id")
+	})
+
+	t.Run("predicate count matches evaluator bound", func(t *testing.T) {
+		catalog := testCatalog(t)
+		predicates := make([]PredicateTemplate, 0, maxPredicates+1)
+		for index := 0; index <= maxPredicates; index++ {
+			predicates = append(predicates, PredicateTemplate{
+				Kind: PredicatePresent, Field: fmt.Sprintf("field_%d", index),
+			})
+		}
+		catalog.Resources[0].Predicates = predicates
+		require.ErrorContains(t, catalog.Validate(), "exceeds 8 entries")
+	})
+
+	t.Run("attempt correlation requires only binding predicates", func(t *testing.T) {
+		catalog := testCatalog(t)
+		for resourceIndex := range catalog.Resources {
+			if len(catalog.Resources[resourceIndex].Evidence) == 0 {
+				continue
+			}
+			evidence := &catalog.Resources[resourceIndex].Evidence[0]
+			evidence.CorrelatesAttempt = true
+			evidence.Predicates = []PredicateTemplate{{Kind: PredicatePresent, Field: "id"}}
+			require.ErrorContains(t, catalog.Validate(), "correlates_attempt")
+			return
+		}
+		t.Fatal("catalog has no evidence rule")
+	})
+
+	t.Run("eventual evidence requires a related field", func(t *testing.T) {
+		catalog := testCatalog(t)
+		for resourceIndex := range catalog.Resources {
+			for evidenceIndex := range catalog.Resources[resourceIndex].Evidence {
+				evidence := &catalog.Resources[resourceIndex].Evidence[evidenceIndex]
+				if evidence.FromField == "" {
+					evidence.Eventual = true
+					require.ErrorContains(t, catalog.Validate(), "eventual requires from_field")
+					return
+				}
+			}
+		}
+		t.Fatal("catalog has no child-collection evidence rule")
 	})
 }
 

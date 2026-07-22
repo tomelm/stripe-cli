@@ -14,6 +14,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
+	"github.com/stripe/stripe-cli/pkg/coop/checks"
 	"github.com/stripe/stripe-cli/pkg/coop/observe"
 	"github.com/stripe/stripe-cli/pkg/coop/tui"
 	"github.com/stripe/stripe-cli/pkg/coop/workflow"
@@ -64,17 +65,20 @@ type observerStreamConfig struct {
 
 type observerStreamFactory func(context.Context, observerStreamConfig) ([]<-chan websocket.IElement, error)
 type observerAuthorizer func(context.Context, observerCredentials) error
+type observerProjectionCompiler func(*coop.Session) ([]checks.UIEventProjection, error)
 
 type coopObserverController struct {
-	store           observerStore
-	workflow        func() observerWorkflow
-	credentials     func() (observerCredentials, bool)
-	authorize       observerAuthorizer
-	streams         observerStreamFactory
-	pollEvery       time.Duration
-	standbyEvery    time.Duration
-	now             func() time.Time
-	sandboxClaimURL func() string
+	store                 observerStore
+	workflow              func() observerWorkflow
+	credentials           func() (observerCredentials, bool)
+	authorize             observerAuthorizer
+	streams               observerStreamFactory
+	compileProjections    observerProjectionCompiler
+	reportProjectionError func(error)
+	pollEvery             time.Duration
+	standbyEvery          time.Duration
+	now                   func() time.Time
+	sandboxClaimURL       func() string
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -82,6 +86,7 @@ type coopObserverController struct {
 }
 
 func newCoopObserver(store *coop.Store) *coopObserverController {
+	catalog, catalogErr := checks.LoadCatalog()
 	return &coopObserverController{
 		store: store,
 		workflow: func() observerWorkflow {
@@ -91,9 +96,18 @@ func newCoopObserver(store *coop.Store) *coopObserverController {
 			}
 			return workflow.NewService(store, workflow.WithEvaluator(evaluator))
 		},
-		credentials:     configuredObserverCredentials,
-		authorize:       authorizeObserverCredentials,
-		streams:         startStockObserverStreams,
+		credentials: configuredObserverCredentials,
+		authorize:   authorizeObserverCredentials,
+		streams:     startStockObserverStreams,
+		compileProjections: func(session *coop.Session) ([]checks.UIEventProjection, error) {
+			if catalogErr != nil {
+				return nil, fmt.Errorf("loading Co-op verification catalog: %w", catalogErr)
+			}
+			return checks.CompileUIEventProjections(catalog, session)
+		},
+		reportProjectionError: func(err error) {
+			log.WithError(err).Warn("Co-op observer UI event matching is unavailable")
+		},
 		pollEvery:       coopObserverPollInterval,
 		standbyEvery:    coopObserverStandbyRetry,
 		now:             time.Now,
@@ -244,6 +258,8 @@ func (controller *coopObserverController) stream(ctx context.Context, sessionID 
 	if retryEvery <= 0 {
 		retryEvery = coopObserverStandbyRetry
 	}
+	var projections []checks.UIEventProjection
+	projectionsCompiled := false
 	for {
 		if ctx.Err() != nil {
 			return
@@ -282,6 +298,19 @@ func (controller *coopObserverController) stream(ctx context.Context, sessionID 
 				continue
 			}
 		}
+		if !projectionsCompiled {
+			projectionsCompiled = true
+			if controller.compileProjections != nil {
+				compiled, compileErr := controller.compileProjections(session)
+				if compileErr != nil {
+					if controller.reportProjectionError != nil {
+						controller.reportProjectionError(compileErr)
+					}
+				} else {
+					projections = compiled
+				}
+			}
+		}
 		service := controller.workflow()
 		if service == nil {
 			if !waitObserverRetry(ctx, retryEvery) {
@@ -309,7 +338,7 @@ func (controller *coopObserverController) stream(ctx context.Context, sessionID 
 			consumers.Add(1)
 			go func(stream <-chan websocket.IElement) {
 				defer consumers.Done()
-				controller.consume(streamCtx, service, sessionID, stream)
+				controller.consume(streamCtx, service, sessionID, projections, stream)
 				closed <- struct{}{}
 			}(source)
 		}
@@ -339,7 +368,13 @@ func waitObserverRetry(ctx context.Context, retryEvery time.Duration) bool {
 	}
 }
 
-func (controller *coopObserverController) consume(ctx context.Context, service observerWorkflow, sessionID string, stream <-chan websocket.IElement) {
+func (controller *coopObserverController) consume(
+	ctx context.Context,
+	service observerWorkflow,
+	sessionID string,
+	projections []checks.UIEventProjection,
+	stream <-chan websocket.IElement,
+) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -350,17 +385,23 @@ func (controller *coopObserverController) consume(ctx context.Context, service o
 			}
 			switch data := element.(type) {
 			case websocket.DataElement:
-				controller.observe(ctx, service, sessionID, data)
+				controller.observe(ctx, service, sessionID, projections, data)
 			case *websocket.DataElement:
 				if data != nil {
-					controller.observe(ctx, service, sessionID, *data)
+					controller.observe(ctx, service, sessionID, projections, *data)
 				}
 			}
 		}
 	}
 }
 
-func (controller *coopObserverController) observe(ctx context.Context, service observerWorkflow, sessionID string, data websocket.DataElement) {
+func (controller *coopObserverController) observe(
+	ctx context.Context,
+	service observerWorkflow,
+	sessionID string,
+	projections []checks.UIEventProjection,
+	data websocket.DataElement,
+) {
 	fact, ok := observe.Normalize(data)
 	if !ok {
 		return
@@ -369,7 +410,7 @@ func (controller *coopObserverController) observe(ctx context.Context, service o
 	if err != nil {
 		return
 	}
-	match := observe.MatchSession(session, fact)
+	match := observe.MatchSession(session, fact, projections...)
 	if result, ok := supportingResult(match.Attribution, controller.now()); ok {
 		_ = service.RecordSupportingResult(sessionID, match.Attribution.Target.NodeNumber, match.Attribution.Target.AttemptNumber, result)
 	}

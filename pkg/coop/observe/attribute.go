@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
+	"github.com/stripe/stripe-cli/pkg/coop/checks"
 )
 
 // TriggerTarget identifies one open attempt whose rules should be rerun.
@@ -39,56 +40,22 @@ type SessionMatch struct {
 }
 
 // MatchSession maps one normalized fact onto a frozen session without
-// mutating it. Ambiguous facts may trigger several authoritative rereads but
-// cannot attach evidence or failures to any attempt.
-func MatchSession(session *coop.Session, fact Fact) SessionMatch {
+// mutating it. The optional projections are compiler-proven bridges from a UI
+// to the immediately following async-handler step; without them, matching
+// remains strictly step-local. Ambiguous facts may trigger several
+// authoritative rereads but cannot attach evidence or failures to an attempt.
+func MatchSession(session *coop.Session, fact Fact, projections ...checks.UIEventProjection) SessionMatch {
 	if session == nil || session.Status == coop.SessionCompleted || session.Status == coop.SessionAborted ||
 		(fact.Request == nil) == (fact.Event == nil) {
 		return SessionMatch{}
 	}
 
-	match := SessionMatch{}
-	nodeNumber := 0
-	for stepIndex := range session.Steps {
-		for nodeIndex := range session.Steps[stepIndex].Nodes {
-			nodeNumber++
-			node := &session.Steps[stepIndex].Nodes[nodeIndex]
-			attempt := node.CurrentAttempt()
-			if attempt == nil || attempt.Number <= 0 || !nodeMatches(&session.Steps[stepIndex], node, attempt, fact) {
-				continue
-			}
-			match.Triggers = append(match.Triggers, TriggerTarget{
-				NodeNumber: nodeNumber, AttemptNumber: attempt.Number,
-			})
-		}
-	}
-	// If nothing open declared the fact directly, a completed sibling may
-	// describe activity exercised through the same step's one open UI. The UI
-	// attempt is the only target; ended declaration attempts remain immutable.
+	match := SessionMatch{Triggers: directTriggers(session, fact)}
 	if len(match.Triggers) == 0 {
-		nodeOffset := 0
-		for stepIndex := range session.Steps {
-			step := &session.Steps[stepIndex]
-			declared := false
-			candidate := TriggerTarget{}
-			candidateCount := 0
-			var candidateAttempt *coop.NodeAttempt
-			for nodeIndex := range step.Nodes {
-				node := &step.Nodes[nodeIndex]
-				declared = declared || nodeDeclares(node, fact)
-				attempt := reportedOpenedUIAttempt(node)
-				if attempt == nil {
-					continue
-				}
-				candidateCount++
-				candidate = TriggerTarget{NodeNumber: nodeOffset + nodeIndex + 1, AttemptNumber: attempt.Number}
-				candidateAttempt = attempt
-			}
-			if declared && candidateCount == 1 && (fact.Request != nil || eventCorrelates(step, candidateAttempt, fact.Event.Discoveries)) {
-				match.Triggers = append(match.Triggers, candidate)
-			}
-			nodeOffset += len(step.Nodes)
-		}
+		match.Triggers = sameStepUITriggers(session, fact)
+	}
+	if len(match.Triggers) == 0 && fact.Event != nil {
+		match.Triggers = projectedUITriggers(session, *fact.Event, projections)
 	}
 	if len(match.Triggers) != 1 {
 		return match
@@ -106,6 +73,109 @@ func MatchSession(session *coop.Session, fact Fact) SessionMatch {
 	}
 	match.Attribution = attribution
 	return match
+}
+
+func directTriggers(session *coop.Session, fact Fact) []TriggerTarget {
+	var triggers []TriggerTarget
+	nodeNumber := 0
+	for stepIndex := range session.Steps {
+		for nodeIndex := range session.Steps[stepIndex].Nodes {
+			nodeNumber++
+			node := &session.Steps[stepIndex].Nodes[nodeIndex]
+			attempt := node.CurrentAttempt()
+			if attempt == nil || attempt.Number <= 0 || !nodeMatches(&session.Steps[stepIndex], node, attempt, fact) {
+				continue
+			}
+			triggers = append(triggers, TriggerTarget{
+				NodeNumber: nodeNumber, AttemptNumber: attempt.Number,
+			})
+		}
+	}
+	return triggers
+}
+
+// sameStepUITriggers lets one open app surface inherit a fact declared by a
+// completed sibling in the same step. Ended declaration attempts stay frozen.
+func sameStepUITriggers(session *coop.Session, fact Fact) []TriggerTarget {
+	var triggers []TriggerTarget
+	// If nothing open declared the fact directly, a completed sibling may
+	// describe activity exercised through the same step's one open UI. The UI
+	// attempt is the only target; ended declaration attempts remain immutable.
+	nodeOffset := 0
+	for stepIndex := range session.Steps {
+		step := &session.Steps[stepIndex]
+		declared := false
+		candidate := TriggerTarget{}
+		candidateCount := 0
+		var candidateAttempt *coop.NodeAttempt
+		for nodeIndex := range step.Nodes {
+			node := &step.Nodes[nodeIndex]
+			declared = declared || nodeDeclares(node, fact)
+			attempt := reportedOpenedUIAttempt(node)
+			if attempt == nil {
+				continue
+			}
+			candidateCount++
+			candidate = TriggerTarget{NodeNumber: nodeOffset + nodeIndex + 1, AttemptNumber: attempt.Number}
+			candidateAttempt = attempt
+		}
+		if declared && candidateCount == 1 && (fact.Request != nil || eventCorrelates(step, candidateAttempt, fact.Event.Discoveries)) {
+			triggers = append(triggers, candidate)
+		}
+		nodeOffset += len(step.Nodes)
+	}
+	return triggers
+}
+
+func projectedUITriggers(session *coop.Session, event EventFact, projections []checks.UIEventProjection) []TriggerTarget {
+	var triggers []TriggerTarget
+	// A UI may exercise a resource whose event contract lives in the next
+	// implementation step. Only a compiler-proven projection, an exact event
+	// and resource type, and a reported/open UI attempt can propose that
+	// resource identity. The evaluator performs the authoritative reread.
+	nodeOffset := 0
+	seen := make(map[TriggerTarget]bool)
+	for stepIndex := range session.Steps {
+		step := &session.Steps[stepIndex]
+		for nodeIndex := range step.Nodes {
+			node := &step.Nodes[nodeIndex]
+			attempt := reportedOpenedUIAttempt(node)
+			if attempt == nil {
+				continue
+			}
+			for _, projection := range projections {
+				if projection.UI.Step != step.Key || projection.UI.Node != node.Key ||
+					projection.State.EventType != event.Type ||
+					!projectedEventCorrelates(attempt, projection.State.ResourceType, event.Discoveries) {
+					continue
+				}
+				target := TriggerTarget{NodeNumber: nodeOffset + nodeIndex + 1, AttemptNumber: attempt.Number}
+				if !seen[target] {
+					seen[target] = true
+					triggers = append(triggers, target)
+				}
+			}
+		}
+		nodeOffset += len(step.Nodes)
+	}
+	return triggers
+}
+
+func projectedEventCorrelates(attempt *coop.NodeAttempt, resourceType string, discoveries []Discovery) bool {
+	if attempt == nil || len(discoveries) != 1 {
+		return false
+	}
+	discovery := discoveries[0]
+	normalizedType := strings.ReplaceAll(strings.TrimSpace(discovery.Type), ".", "_")
+	if normalizedType == "" || normalizedType != resourceType || strings.TrimSpace(discovery.ID) == "" {
+		return false
+	}
+	for _, binding := range attempt.Resources {
+		if binding.Type == resourceType && binding.ID == discovery.ID {
+			return true
+		}
+	}
+	return !attemptBlocksDiscoveryType(attempt, discovery.Type)
 }
 
 func reportedOpenedUIAttempt(node *coop.SessionNode) *coop.NodeAttempt {

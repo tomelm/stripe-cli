@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
@@ -127,7 +128,7 @@ func (compiler *stepCompiler) compileRequest(source Source, request coop.APIRequ
 		return nil
 	}
 
-	predicates, gaps, err := compileResourcePredicates(resource.Predicates, request.Params)
+	predicates, gaps, err := compileResourcePredicates(resource.Predicates, flattenRequestInputs(request))
 	if err != nil {
 		return fmt.Errorf("compiling resource check for node %q: %w", sourceKey(source), err)
 	}
@@ -136,6 +137,26 @@ func (compiler *stepCompiler) compileRequest(source Source, request coop.APIRequ
 	if err != nil {
 		return err
 	}
+	evidence, evidenceGaps, err := compileEvidence(resource.Evidence, request)
+	if err != nil {
+		return fmt.Errorf("compiling evidence checks for node %q: %w", sourceKey(source), err)
+	}
+	coveredByEvidence := make(map[string]bool)
+	for _, evidenceCheck := range evidence {
+		for _, predicate := range evidenceCheck.Predicates {
+			if predicate.Kind == PredicateEqualsBinding {
+				coveredByEvidence[predicate.Input] = true
+			}
+		}
+	}
+	filteredGaps := gaps[:0]
+	for _, gap := range gaps {
+		if !gap.interpolated && coveredByEvidence[gap.input] {
+			continue
+		}
+		filteredGaps = append(filteredGaps, gap)
+	}
+	gaps = filteredGaps
 	compiler.plan.Resources = append(compiler.plan.Resources, ResourceCheck{
 		CheckMeta:    resourceMeta,
 		ResourceType: resource.Type,
@@ -143,7 +164,9 @@ func (compiler *stepCompiler) compileRequest(source Source, request coop.APIRequ
 		RetrievePath: resource.Retrieve,
 		IDPrefixes:   append([]string(nil), resource.IDPrefixes...),
 		Predicates:   predicates,
+		Evidence:     evidence,
 	})
+	gaps = append(gaps, evidenceGaps...)
 	for _, gap := range gaps {
 		compiler.addGap(
 			RuleResourceMatches,
@@ -238,14 +261,13 @@ func (gap predicateCoverageGap) reason(resourceType string) string {
 	return fmt.Sprintf("request input %q references another node, but %s has no supported resource-field mapping for it", gap.input, resourceType)
 }
 
-func compileResourcePredicates(templates []PredicateTemplate, params any) ([]Predicate, []predicateCoverageGap, error) {
-	inputs := flattenInputs(params)
+func compileResourcePredicates(templates []PredicateTemplate, inputs map[string][]any) ([]Predicate, []predicateCoverageGap, error) {
 	mappedBindings := make(map[string]bool)
 	compiled := make([]Predicate, 0, len(templates))
 	var gaps []predicateCoverageGap
 	for _, template := range templates {
 		switch template.Kind {
-		case PredicateEqualsInput:
+		case PredicateEqualsInput, PredicateDifferenceEqualsInput:
 			values := inputs[template.Input]
 			if len(values) != 1 {
 				continue
@@ -261,7 +283,7 @@ func compileResourcePredicates(templates []PredicateTemplate, params any) ([]Pre
 				})
 				continue
 			}
-			compiled = append(compiled, Predicate{Kind: template.Kind, Field: template.Field, Input: template.Input})
+			compiled = append(compiled, predicateFromTemplate(template))
 		case PredicateEqualsBinding:
 			mappedBindings[template.Input] = true
 			values := inputs[template.Input]
@@ -322,6 +344,57 @@ func compileResourcePredicates(templates []PredicateTemplate, params any) ([]Pre
 	return compiled, gaps, nil
 }
 
+func compileEvidence(rules []EvidenceRule, request coop.APIRequest) ([]EvidenceCheck, []predicateCoverageGap, error) {
+	compiled := make([]EvidenceCheck, 0, len(rules))
+	var allGaps []predicateCoverageGap
+	inputs := flattenRequestInputs(request)
+	for _, rule := range rules {
+		if rule.WhenInput != "" {
+			if _, present := requestInput(request, rule.WhenInput); !present {
+				continue
+			}
+		}
+		predicates, gaps, err := compileResourcePredicates(rule.Predicates, inputs)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, gap := range gaps {
+			// Each evidence rule sees the whole request. Unmapped references
+			// belong to some other rule and are reported once by the parent
+			// resource compiler; only a selected-but-interpolated input is an
+			// evidence-specific coverage gap.
+			if !gap.interpolated {
+				continue
+			}
+			gap.discriminator = "evidence:" + rule.ID + ":" + gap.discriminator
+			allGaps = append(allGaps, gap)
+		}
+		// Correlation is an attribution boundary, so it must not silently
+		// degrade to a subset of the catalog-declared relationships. If any
+		// binding comparison is inapplicable to this request, omit the entire
+		// correlation read rather than treating a weaker match as ownership.
+		if rule.CorrelatesAttempt && len(predicates) != len(rule.Predicates) {
+			continue
+		}
+		// Evidence exists to support predicates selected by this exact request.
+		// If none apply, omit the read instead of fetching unrelated objects.
+		if len(predicates) == 0 {
+			continue
+		}
+		compiled = append(compiled, EvidenceCheck{
+			ID:                rule.ID,
+			RetrievePath:      rule.Retrieve,
+			FromField:         rule.FromField,
+			IDPrefixes:        append([]string(nil), rule.IDPrefixes...),
+			Eventual:          rule.Eventual,
+			CorrelatesAttempt: rule.CorrelatesAttempt,
+			Predicates:        predicates,
+			Repair:            rule.Repair,
+		})
+	}
+	return compiled, allGaps, nil
+}
+
 func compileStaticPredicates(templates []PredicateTemplate) []Predicate {
 	predicates := make([]Predicate, 0, len(templates))
 	for _, template := range templates {
@@ -343,12 +416,44 @@ func compileTerminalFailures(templates []TerminalFailTemplate) []TerminalFail {
 
 func predicateFromTemplate(template PredicateTemplate) Predicate {
 	return Predicate{
-		Kind:   template.Kind,
-		Field:  template.Field,
-		Input:  template.Input,
-		Value:  template.Value,
-		Values: append([]string(nil), template.Values...),
+		Kind:       template.Kind,
+		Field:      template.Field,
+		BaseField:  template.BaseField,
+		Input:      template.Input,
+		Multiplier: template.Multiplier,
+		Value:      template.Value,
+		Values:     append([]string(nil), template.Values...),
 	}
+}
+
+func requestInput(request coop.APIRequest, path string) (any, bool) {
+	if value, ok := valueAtInput(request.Params, path); ok {
+		return value, true
+	}
+	return valueAtInput(request.HiddenParams, path)
+}
+
+func valueAtInput(root any, path string) (any, bool) {
+	current := root
+	for _, part := range strings.Split(path, ".") {
+		if object, ok := current.(map[string]any); ok {
+			current, ok = object[part]
+			if !ok {
+				return nil, false
+			}
+			continue
+		}
+		if list, ok := current.([]any); ok {
+			index, err := strconv.Atoi(part)
+			if err != nil || index < 0 || index >= len(list) {
+				return nil, false
+			}
+			current = list[index]
+			continue
+		}
+		return nil, false
+	}
+	return current, current != nil
 }
 
 func flattenInputs(params any) map[string][]any {
@@ -383,8 +488,12 @@ func flattenInputs(params any) map[string][]any {
 				walk(path, typed[key])
 			}
 		case []any:
-			for _, item := range typed {
-				walk(prefix, item)
+			for index, item := range typed {
+				path := strconv.Itoa(index)
+				if prefix != "" {
+					path = prefix + "." + path
+				}
+				walk(path, item)
 			}
 		default:
 			if prefix != "" {
@@ -394,6 +503,14 @@ func flattenInputs(params any) map[string][]any {
 	}
 	walk("", params)
 	return flat
+}
+
+func flattenRequestInputs(request coop.APIRequest) map[string][]any {
+	inputs := flattenInputs(request.HiddenParams)
+	for path, values := range flattenInputs(request.Params) {
+		inputs[path] = values
+	}
+	return inputs
 }
 
 func parseBindingRef(value string) (BindingRef, bool) {

@@ -38,33 +38,39 @@ func TestCatalogResourceOperationsMatchBundledOpenAPI(t *testing.T) {
 				resource.Create.Method, resource.Create.Path,
 			)
 
-			if resource.Retrieve == "" {
-				return
+			if resource.Retrieve != "" {
+				requireCatalogGETMatchesOpenAPI(t, spec, resource.Retrieve)
 			}
-			require.Equalf(t, 1, strings.Count(resource.Retrieve, "{id}"),
-				"catalog retrieve path %q must contain exactly one {id} placeholder", resource.Retrieve,
-			)
-
-			shape := normalizeOpenAPIPath(resource.Retrieve)
-			var matchingPaths []string
-			for specPath := range spec.Paths {
-				if len(openAPIPathParameter.FindAllStringIndex(specPath, -1)) == 1 &&
-					normalizeOpenAPIPath(specPath) == shape {
-					matchingPaths = append(matchingPaths, specPath)
-				}
+			for _, evidence := range resource.Evidence {
+				requireCatalogGETMatchesOpenAPI(t, spec, evidence.Retrieve)
 			}
-			sort.Strings(matchingPaths)
-			require.Lenf(t, matchingPaths, 1,
-				"catalog retrieve path %q must match exactly one bundled OpenAPI path with a single named parameter; matches: %v",
-				resource.Retrieve, matchingPaths,
-			)
-			retrievePath := matchingPaths[0]
-			require.Truef(t, hasOpenAPIOperation(spec.Paths[retrievePath], "get"),
-				"catalog retrieve path %q normalizes to bundled path %q, but that path has no GET operation",
-				resource.Retrieve, retrievePath,
-			)
 		})
 	}
+}
+
+func requireCatalogGETMatchesOpenAPI(t *testing.T, spec catalogOpenAPISpec, catalogPath string) {
+	t.Helper()
+	require.Equalf(t, 1, strings.Count(catalogPath, "{id}"),
+		"catalog retrieve path %q must contain exactly one {id} placeholder", catalogPath,
+	)
+
+	shape := normalizeOpenAPIPath(catalogPath)
+	var matchingPaths []string
+	for specPath := range spec.Paths {
+		if len(openAPIPathParameter.FindAllStringIndex(specPath, -1)) == 1 && normalizeOpenAPIPath(specPath) == shape {
+			matchingPaths = append(matchingPaths, specPath)
+		}
+	}
+	sort.Strings(matchingPaths)
+	require.Lenf(t, matchingPaths, 1,
+		"catalog retrieve path %q must match exactly one bundled OpenAPI path with a single named parameter; matches: %v",
+		catalogPath, matchingPaths,
+	)
+	retrievePath := matchingPaths[0]
+	require.Truef(t, hasOpenAPIOperation(spec.Paths[retrievePath], "get"),
+		"catalog retrieve path %q normalizes to bundled path %q, but that path has no GET operation",
+		catalogPath, retrievePath,
+	)
 }
 
 func loadCatalogOpenAPISpec(t *testing.T) catalogOpenAPISpec {

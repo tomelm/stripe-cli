@@ -22,14 +22,15 @@ const (
 	MaxTargetsPerRun       = 8
 	MaxPredicatesPerTarget = 8
 	MaxTerminalPerTarget   = 8
-	MaxResultsPerRun       = 89 // target invariants + predicates + one coverage result
+	MaxEvidencePerTarget   = 2
+	MaxResultsPerRun       = MaxTargetsPerRun*(5+MaxPredicatesPerTarget+MaxEvidencePerTarget*(1+MaxPredicatesPerTarget)) + 1
 	maxReadAttempts        = 2
 	evaluationTimeout      = 10 * time.Second
 	eventDiscoveryWindow   = 5 * time.Minute
 )
 
-// StateObservation selects state checks. Event callers supply ResourceID;
-// polling callers leave it empty and reuse the attempt's observed binding.
+// StateObservation supplies an event identity to the matching state target.
+// Every evaluation still returns the plan's complete automatic snapshot.
 type StateObservation struct {
 	EventType  string
 	ResourceID string
@@ -92,7 +93,8 @@ func (e *Evaluator) Evaluate(ctx context.Context, input Input) (Report, error) {
 	runCtx, cancel := context.WithTimeout(ctx, evaluationTimeout)
 	defer cancel()
 	run := evaluation{ctx: runCtx, evaluator: e, session: input.Session, node: node,
-		attempt: attempt, step: step.Key, at: at, cache: map[string]objectRead{}}
+		attempt: attempt, step: step.Key, at: at, cache: map[string]objectRead{},
+		candidateCorrelationRules: make(map[string]bool), candidateCorrelations: make(map[string]bool)}
 	targets := run.targets(input.Plan, input.State)
 	if len(targets) > MaxTargetsPerRun {
 		run.coverage(fmt.Sprintf("%d compiled checks exceeded the %d-target bound", len(targets), MaxTargetsPerRun))
@@ -107,8 +109,23 @@ func (e *Evaluator) Evaluate(ctx context.Context, input Input) (Report, error) {
 			run.coverage("terminal predicates exceeded the per-target bound")
 			target.terminalFailures = target.terminalFailures[:MaxTerminalPerTarget]
 		}
+		if len(target.evidence) > MaxEvidencePerTarget {
+			run.coverage("compiled evidence reads exceeded the per-target bound")
+			target.evidence = target.evidence[:MaxEvidencePerTarget]
+		}
+		for index := range target.evidence {
+			if len(target.evidence[index].Predicates) > MaxPredicatesPerTarget {
+				run.coverage("compiled evidence predicates exceeded the per-target bound")
+				// Correlation is all-or-nothing. A truncated relationship may
+				// still produce ordinary findings, but it cannot establish that
+				// an account-wide event belongs to this attempt.
+				target.evidence[index].CorrelatesAttempt = false
+				target.evidence[index].Predicates = target.evidence[index].Predicates[:MaxPredicatesPerTarget]
+			}
+		}
 		run.evaluate(target)
 	}
+	run.finalizeCandidates()
 	return Report{Results: run.results, Bindings: run.bindings}, nil
 }
 
@@ -121,6 +138,7 @@ type target struct {
 	actionThroughReview          bool
 	prefixes                     []string
 	predicates                   []checks.Predicate
+	evidence                     []checks.EvidenceCheck
 	terminalFailures             []checks.TerminalFail
 	created, discovered          bool
 	candidateBinding             bool
@@ -135,21 +153,25 @@ type objectRead struct {
 }
 
 type evaluation struct {
-	ctx       context.Context
-	evaluator *Evaluator
-	session   *coop.Session
-	node      *coop.SessionNode
-	attempt   *coop.NodeAttempt
-	step      string
-	at        time.Time
-	cache     map[string]objectRead
-	results   []coop.CheckResult
-	bindings  []coop.ResourceBinding
-	covered   bool
+	ctx                       context.Context
+	evaluator                 *Evaluator
+	session                   *coop.Session
+	node                      *coop.SessionNode
+	attempt                   *coop.NodeAttempt
+	step                      string
+	at                        time.Time
+	cache                     map[string]objectRead
+	results                   []coop.CheckResult
+	bindings                  []coop.ResourceBinding
+	resultCandidates          []string
+	candidateCorrelationRules map[string]bool
+	candidateCorrelations     map[string]bool
+	covered                   bool
 }
 
 func (run *evaluation) targets(plan checks.StepPlan, state *StateObservation) []target {
 	var result []target
+	reviewActive := !run.discoveryWindowStart().IsZero()
 	var eventType, eventResourceID string
 	if state != nil {
 		eventType, eventResourceID = state.EventType, strings.TrimSpace(state.ResourceID)
@@ -161,45 +183,56 @@ func (run *evaluation) targets(plan checks.StepPlan, state *StateObservation) []
 			key := check.Role + "\x00" + check.ResourceType
 			uiDiscovery[key] = true
 			binding, bound := findBinding(run.attempt, check.Role, check.ResourceType)
-			if eventType == check.EventType && eventResourceID != "" && bound &&
-				binding.Source == coop.BindingObservedCandidate && binding.ID != eventResourceID && run.uiOpened() {
+			replaceable := (!bound && !hasBindingRole(run.attempt, check.Role)) ||
+				(bound && binding.Source == coop.BindingObservedCandidate && binding.ID != eventResourceID)
+			if eventType == check.EventType && eventResourceID != "" && replaceable && reviewActive {
 				replacements[key] = eventResourceID
 			}
 		}
 	}
 	for _, check := range plan.Resources {
 		binding, bindingAttempt, bound := run.binding(check.Source, check.Role, check.ResourceType)
-		replacementID := replacements[check.Role+"\x00"+check.ResourceType]
+		bindingGroup := check.Role + "\x00" + check.ResourceType
+		replacementID := replacements[bindingGroup]
 		if replacementID != "" {
-			binding = coop.ResourceBinding{Role: check.Role, Type: check.ResourceType, ID: replacementID, Source: coop.BindingObservedCandidate}
+			binding = coop.ResourceBinding{ID: replacementID, Source: coop.BindingObservedCandidate}
 			bindingAttempt, bound = run.attempt, true
 		}
 		unboundAfterOpen := !bound && run.uiOpened() && !hasBindingRole(run.attempt, check.Role)
-		canDiscover := uiDiscovery[check.Role+"\x00"+check.ResourceType]
+		canDiscover := uiDiscovery[bindingGroup]
+		persistedCandidate := binding.Source == coop.BindingObservedCandidate && bindingAttempt == run.attempt
 		reviewBinding := (binding.Source == coop.BindingObservedCandidate || binding.Source == coop.BindingObserved) &&
-			bindingAttempt == run.attempt && run.uiOpened()
+			bindingAttempt == run.attempt && reviewActive
 		result = append(result, target{meta: check.CheckMeta, kind: coop.CheckResource,
 			resourceType: check.ResourceType, role: check.Role, path: check.RetrievePath,
 			id: binding.ID, actionAttempt: bindingAttempt, prefixes: check.IDPrefixes,
 			predicates: check.Predicates, created: true,
+			evidence:            check.Evidence,
 			discovered:          replacementID != "",
-			actionThroughReview: reviewBinding, candidateBinding: binding.Source == coop.BindingObservedCandidate && reviewBinding,
+			actionThroughReview: reviewBinding, candidateBinding: persistedCandidate,
 			validateDiscoveryWindow: reviewBinding,
 			awaitingDiscovery:       unboundAfterOpen && canDiscover, unavailableWithoutDiscovery: unboundAfterOpen && !canDiscover,
 			discoveryWindow: run.discoveryWindowStart()})
 	}
 	for _, check := range plan.States {
-		if eventType != "" && eventType != check.EventType {
-			continue
+		bindingGroup := check.Role + "\x00" + check.ResourceType
+		replacementID := replacements[bindingGroup]
+		observedResourceID := ""
+		if eventType == check.EventType {
+			observedResourceID = eventResourceID
 		}
 		binding, bound := findBinding(run.attempt, check.Role, check.ResourceType)
 		id := binding.ID
 		discovered := false
-		replaceableCandidate := bound && binding.Source == coop.BindingObservedCandidate && run.uiOpened()
-		if replaceableCandidate && eventResourceID != "" && eventResourceID != id {
-			id, discovered = eventResourceID, true
-		} else if !bound && !hasBindingRole(run.attempt, check.Role) {
-			if id = eventResourceID; id != "" {
+		persistedCandidate := bound && binding.Source == coop.BindingObservedCandidate
+		replaceableCandidate := persistedCandidate && reviewActive
+		switch {
+		case replacementID != "":
+			id, discovered = replacementID, replacementID != binding.ID
+		case replaceableCandidate && observedResourceID != "" && observedResourceID != id:
+			id, discovered = observedResourceID, true
+		case !bound && !hasBindingRole(run.attempt, check.Role):
+			if id = observedResourceID; id != "" {
 				discovered = true
 			} else if !run.uiOpened() {
 				sourceBinding, _, sourceBound := run.sourceBinding(check.Source, check.Role, check.ResourceType)
@@ -209,13 +242,13 @@ func (run *evaluation) targets(plan checks.StepPlan, state *StateObservation) []
 			}
 		}
 		unboundAfterOpen := id == "" && run.uiOpened() && !hasBindingRole(run.attempt, check.Role)
-		canDiscover := uiDiscovery[check.Role+"\x00"+check.ResourceType]
-		reviewBinding := bound && (binding.Source == coop.BindingObservedCandidate || binding.Source == coop.BindingObserved) && run.uiOpened()
+		canDiscover := uiDiscovery[bindingGroup]
+		reviewBinding := bound && (binding.Source == coop.BindingObservedCandidate || binding.Source == coop.BindingObserved) && reviewActive
 		result = append(result, target{meta: check.CheckMeta, kind: coop.CheckState,
 			resourceType: check.ResourceType, role: check.Role, path: check.RetrievePath,
 			id: id, prefixes: run.evaluator.rulePrefixes(check.ResourceType),
 			predicates: check.Predicates, terminalFailures: check.TerminalFailures,
-			discovered: discovered, candidateBinding: (discovered && run.uiOpened()) || replaceableCandidate,
+			discovered: discovered, candidateBinding: (discovered && reviewActive) || persistedCandidate,
 			awaitingDiscovery:           unboundAfterOpen && canDiscover,
 			unavailableWithoutDiscovery: unboundAfterOpen && !canDiscover,
 			validateDiscoveryWindow:     discovered || reviewBinding,
@@ -254,6 +287,19 @@ func (run *evaluation) sourceBinding(source checks.Source, role, resourceType st
 }
 
 func (run *evaluation) evaluate(target target) {
+	if target.candidateBinding {
+		for _, evidence := range target.evidence {
+			if evidence.CorrelatesAttempt {
+				run.candidateCorrelationRules[candidateKey(target)] = true
+				break
+			}
+		}
+	}
+	if target.candidateBinding && !target.discovered {
+		// A persisted candidate remains non-attributable even if its app
+		// window has ended or its ID is malformed for the compiled role.
+		run.bind(target, coop.BindingObservedCandidate)
+	}
 	if target.id == "" {
 		status := coop.CheckFailed
 		repair := "Report the Stripe resource ID observed for this step."
@@ -298,10 +344,11 @@ func (run *evaluation) evaluate(target target) {
 			"event observed outside the current app review window", "Report the matching Stripe resource ID, or start a new attempt and exercise the app again.")
 		return
 	}
-	if target.discovered && run.uiOpened() {
+	if target.candidateBinding && target.discovered && !target.discoveryWindow.IsZero() {
 		// Preserve a safe, attributable event identity before the read so a
-		// transient outage cannot lose a one-shot event. Later reads still
-		// validate the resource's creation time against this review window.
+		// transient outage cannot lose a one-shot event. It remains replaceable
+		// until the complete candidate passes or declarative relationship
+		// evidence correlates it with this attempt.
 		run.bind(target, coop.BindingObservedCandidate)
 	}
 	path, ok := retrievePath(target.path, target.id)
@@ -329,15 +376,12 @@ func (run *evaluation) evaluate(target target) {
 	}
 	run.add(target, "exists", coop.CheckPassed, "resource exists in the authorized test account", target.resourceType+" "+target.id, target.meta.Repair)
 
-	testMode := true
 	if value, present := read.object["livemode"]; present {
 		live, valid := value.(bool)
 		switch {
 		case !valid:
-			testMode = false
 			run.add(target, "test-mode", coop.CheckUnavailable, "test mode", "unreadable mode", "Retry the Stripe read.")
 		case live:
-			testMode = false
 			run.add(target, "test-mode", coop.CheckFailed, "test mode", "live mode", "Use the authorized test-mode account and recreate the resource.")
 		default:
 			run.add(target, "test-mode", coop.CheckPassed, "test mode", "test mode", target.meta.Repair)
@@ -346,13 +390,17 @@ func (run *evaluation) evaluate(target target) {
 		run.add(target, "test-mode", coop.CheckPassed, "test mode", "authorized test account", target.meta.Repair)
 	}
 	if target.validateDiscoveryWindow && !run.discoveryInWindow(target, read.object["created"]) {
+		// A newly proposed event may be discarded and replaced. A candidate
+		// already persisted on the attempt cannot be deleted by the workflow's
+		// upsert-only merge, so retain it here and let its attribution finding
+		// age to unavailable instead of leaving review pending forever.
+		if target.discovered {
+			run.discardCandidate(target)
+		}
 		return
 	}
 	if target.created {
 		run.actionWindow(target, read.object["created"])
-	}
-	if target.candidateBinding && testMode {
-		run.bind(target, coop.BindingObserved)
 	}
 	if target.kind == coop.CheckState {
 		run.state(target, read.object)
@@ -360,9 +408,78 @@ func (run *evaluation) evaluate(target target) {
 		for _, predicate := range target.predicates {
 			run.predicate(target, read.object, predicate)
 		}
+		for _, evidence := range target.evidence {
+			if evidence.Eventual && !run.uiOpened() {
+				if _, present := valueAt(read.object, evidence.FromField); !present {
+					continue
+				}
+			}
+			run.evaluateEvidence(target, read.object, evidence)
+		}
 	}
-	if target.discovered && !run.uiOpened() && testMode {
-		run.bind(target, coop.BindingObserved)
+}
+
+func (run *evaluation) evaluateEvidence(target target, parent map[string]any, evidence checks.EvidenceCheck) {
+	evidenceID := target.id
+	if evidence.FromField != "" {
+		value, present := valueAt(parent, evidence.FromField)
+		if !present {
+			status := coop.CheckFailed
+			repair := evidence.Repair
+			if evidence.Eventual && run.uiOpened() {
+				status = coop.CheckPending
+				repair = "Complete the app flow so Stripe creates the related resource."
+				if !target.discoveryWindow.IsZero() && run.at.After(target.discoveryWindow.Add(eventDiscoveryWindow)) {
+					status = coop.CheckUnavailable
+					repair = "Continue with explicit human review, or start a new attempt and exercise the app again."
+				}
+			}
+			run.add(target, evidenceSuffix(evidence.ID, "exists"), status,
+				"a related Stripe object ID in "+evidence.FromField, "missing related resource ID", repair)
+			return
+		}
+		var scalarValue bool
+		evidenceID, scalarValue = scalar(value)
+		if !scalarValue || !coop.IsSafeStripeObjectID(evidenceID) || !hasPrefix(evidenceID, evidence.IDPrefixes) {
+			run.add(target, evidenceSuffix(evidence.ID, "exists"), coop.CheckFailed,
+				"a valid related Stripe object ID in "+evidence.FromField, "malformed or unexpected related resource ID", evidence.Repair)
+			return
+		}
+	}
+	path, ok := retrievePath(evidence.RetrievePath, evidenceID)
+	if !ok || run.evaluator.reader == nil {
+		run.add(target, evidenceSuffix(evidence.ID, "exists"), coop.CheckUnavailable,
+			"supporting Stripe evidence readable in the authorized test account", "read unavailable", evidence.Repair)
+		return
+	}
+	read := run.read(path)
+	if read.err != nil {
+		observed := "read unavailable"
+		if errors.Is(read.err, ErrNotFound) {
+			observed = "supporting resource not found in the authorized account scope"
+		}
+		run.add(target, evidenceSuffix(evidence.ID, "exists"), coop.CheckUnavailable,
+			"supporting Stripe evidence readable in the authorized test account", observed, evidence.Repair)
+		return
+	}
+	if evidence.FromField != "" {
+		objectID, _ := scalar(read.object["id"])
+		if objectID != evidenceID {
+			run.add(target, evidenceSuffix(evidence.ID, "exists"), coop.CheckUnavailable,
+				"response identity "+evidenceID, "malformed identity", evidence.Repair)
+			return
+		}
+	}
+	run.add(target, evidenceSuffix(evidence.ID, "exists"), coop.CheckPassed,
+		"supporting Stripe evidence exists in the authorized test account", "supporting evidence read", evidence.Repair)
+	correlated := evidence.CorrelatesAttempt
+	for _, predicate := range evidence.Predicates {
+		match := run.predicateWithSuffix(target, read.object, predicate,
+			evidenceSuffix(evidence.ID, fieldSuffix(predicate.Field)), evidence.Repair)
+		correlated = correlated && match.available && match.matched
+	}
+	if correlated && target.candidateBinding {
+		run.candidateCorrelations[candidateKey(target)] = true
 	}
 }
 
@@ -450,6 +567,10 @@ func (run *evaluation) actionWindow(target target, value any) {
 }
 
 func (run *evaluation) predicate(target target, object map[string]any, predicate checks.Predicate) {
+	run.predicateWithSuffix(target, object, predicate, fieldSuffix(predicate.Field), target.meta.Repair)
+}
+
+func (run *evaluation) predicateWithSuffix(target target, object map[string]any, predicate checks.Predicate, suffix, repair string) predicateMatch {
 	match := run.match(target, object, predicate)
 	status := coop.CheckFailed
 	if !match.available {
@@ -457,7 +578,8 @@ func (run *evaluation) predicate(target target, object map[string]any, predicate
 	} else if match.matched {
 		status = coop.CheckPassed
 	}
-	run.add(target, fieldSuffix(predicate.Field), status, match.expected, match.observed, target.meta.Repair)
+	run.add(target, suffix, status, match.expected, match.observed, repair)
+	return match
 }
 
 // State is one grouped finding: ordinary mismatches are still progressing;
@@ -526,12 +648,34 @@ func (run *evaluation) match(target target, object map[string]any, predicate che
 		result.matched = present && scalarValue && result.observed == result.expected
 	case checks.PredicateEqualsBinding:
 		var err error
-		result.expected, err = run.bindingValue(predicate.Binding, predicate.Input)
+		result.expected, err = run.bindingValue(predicate.Binding)
 		if err != nil {
 			result.available, result.expected = false, "value from the referenced Stripe resource"
 			break
 		}
 		result.matched = present && scalarValue && observed == result.expected
+	case checks.PredicateDifferenceEqualsInput:
+		input, inputAvailable := run.inputValue(target.meta.Source, predicate.Input)
+		inputInteger, validInput := integer(input)
+		if !inputAvailable || !validInput || inputInteger < 0 || predicate.Multiplier <= 0 ||
+			inputInteger > (1<<63-1)/predicate.Multiplier {
+			result.available = false
+			result.expected = "duration derived from the request input"
+			break
+		}
+		expectedDuration := inputInteger * predicate.Multiplier
+		result.expected = fmt.Sprintf("%d seconds (%d x %d)", expectedDuration, inputInteger, predicate.Multiplier)
+		base, basePresent := valueAt(object, predicate.BaseField)
+		baseInteger, validBase := integer(base)
+		fieldInteger, validField := integer(value)
+		if !present || !validField || !basePresent || !validBase || fieldInteger < 0 || baseInteger < 0 {
+			result.matched = false
+			result.observed = predicate.Field + " or " + predicate.BaseField + " is missing or non-integer"
+			break
+		}
+		observedDuration := fieldInteger - baseInteger
+		result.observed = fmt.Sprintf("%d seconds", observedDuration)
+		result.matched = observedDuration == expectedDuration
 	default:
 		result.available, result.expected, result.observed = false, "a supported predicate", "unsupported predicate"
 	}
@@ -557,24 +701,26 @@ func (run *evaluation) inputValue(source checks.Source, path string) (any, bool)
 
 // bindingValue fetches the source binding live; no arbitrary source output is
 // retained in the session or returned from this package.
-func (run *evaluation) bindingValue(reference *checks.BindingRef, role string) (string, error) {
+func (run *evaluation) bindingValue(reference *checks.BindingRef) (string, error) {
 	if reference == nil || reference.Field == "" {
 		return "", ErrUnavailable
 	}
 	node := findNode(run.session, reference.Step, reference.Node)
+	request := requestFor(node, reference.Request)
+	rule := run.evaluator.ruleForRequest(request)
 	attempt := latestAttempt(node)
-	if attempt == nil {
+	if attempt == nil || rule == nil {
 		return "", ErrUnavailable
 	}
 	var binding coop.ResourceBinding
 	for _, candidate := range attempt.Resources {
-		if candidate.Role == role {
+		if candidate.Role == rule.Role && candidate.Type == rule.Type {
 			binding = candidate
 			break
 		}
 	}
-	rule := run.evaluator.rule(binding.Type)
-	if binding.ID == "" || rule == nil || !coop.IsSafeStripeObjectID(binding.ID) || !hasPrefix(binding.ID, rule.IDPrefixes) {
+	if binding.ID == "" || binding.Source == coop.BindingObservedCandidate ||
+		!coop.IsSafeStripeObjectID(binding.ID) || !hasPrefix(binding.ID, rule.IDPrefixes) {
 		return "", ErrUnavailable
 	}
 	path, ok := retrievePath(rule.Retrieve, binding.ID)
@@ -618,6 +764,11 @@ func (run *evaluation) add(target target, suffix string, status coop.CheckStatus
 		Importance: checkImportance(target.meta.Importance), Status: status,
 		Expected: bounded(expected), Observed: bounded(observed), Repair: bounded(repair), UpdatedAt: run.at,
 	})
+	key := ""
+	if target.candidateBinding {
+		key = candidateKey(target)
+	}
+	run.resultCandidates = append(run.resultCandidates, key)
 }
 
 func (run *evaluation) coverage(observed string) {
@@ -630,16 +781,99 @@ func (run *evaluation) coverage(observed string) {
 		Status: coop.CheckUnavailable, Expected: "complete bounded coverage", Observed: bounded(observed),
 		Repair: "Narrow the compiled checks and run verification again.", UpdatedAt: run.at,
 	})
+	run.resultCandidates = append(run.resultCandidates, "")
+}
+
+// finalizeCandidates separates account-wide event candidates from bindings
+// that are safe to use for agent-attributed failures. Only catalog-declared
+// relationship evidence may promote a candidate. Passing checks prove facts
+// about the Stripe object, not that the account-wide event belongs to this
+// attempt. Uncorrelated findings remain replaceable and non-blaming. A stable
+// attribution finding makes that uncertainty explicit: it remains pending
+// while a declared relationship can still match, then becomes unavailable so
+// human review can override it instead of waiting forever.
+func (run *evaluation) finalizeCandidates() {
+	for bindingIndex := range run.bindings {
+		binding := &run.bindings[bindingIndex]
+		if binding.Source != coop.BindingObservedCandidate {
+			continue
+		}
+		key := bindingKey(binding.Role, binding.Type, binding.ID)
+		window := run.discoveryWindowStart()
+		correlationWindowActive := run.discoveryWindowActive(window)
+		if run.candidateCorrelations[key] && correlationWindowActive {
+			binding.Source = coop.BindingObserved
+			continue
+		}
+		canCorrelate := run.candidateCorrelationRules[key]
+		expired := !correlationWindowActive
+		repairPrefix := "Exercise the app again; this account-wide event remains a candidate until it matches this attempt's blueprint wiring. "
+		if expired {
+			repairPrefix = "Automatic attribution was unavailable; continue with explicit human review or start a new attempt. "
+		}
+		attributionStatus := coop.CheckPending
+		attributionObserved := "catalog-declared relationship evidence has not matched"
+		attributionRepair := "Exercise the app again while Co-op waits for an event tied to this attempt's blueprint wiring."
+		if !canCorrelate {
+			repairPrefix = "Automatic attribution was unavailable; continue with explicit human review. "
+			attributionStatus = coop.CheckUnavailable
+			attributionObserved = "the compiled plan has no relationship rule for this event binding"
+			attributionRepair = "Continue with explicit human review; Co-op cannot attribute this account-wide event to the attempt."
+		} else if expired {
+			attributionStatus = coop.CheckUnavailable
+			attributionObserved = "the attribution window expired without a relationship match"
+			attributionRepair = "Continue with explicit human review, or start a new attempt and exercise the app again."
+		}
+		for resultIndex, resultKey := range run.resultCandidates {
+			if resultKey != key {
+				continue
+			}
+			result := &run.results[resultIndex]
+			if expired || !canCorrelate {
+				if result.Status != coop.CheckPassed {
+					result.Status = coop.CheckUnavailable
+					result.Repair = bounded(repairPrefix + result.Repair)
+				}
+				continue
+			}
+			if result.Status == coop.CheckFailed {
+				result.Status = coop.CheckPending
+				result.Repair = bounded(repairPrefix + result.Repair)
+			}
+		}
+		run.results = append(run.results, coop.CheckResult{
+			ID:         boundedID("checkrun.attribution." + binding.Type + "." + binding.Role),
+			Kind:       coop.CheckResource,
+			Importance: coop.CheckRequired,
+			Status:     attributionStatus,
+			Detail:     "Co-op could not attribute the observed Stripe object to this attempt.",
+			Expected:   "event linked to this attempt's blueprint wiring",
+			Observed:   bounded(attributionObserved),
+			Repair:     bounded(attributionRepair),
+			UpdatedAt:  run.at,
+		})
+		run.resultCandidates = append(run.resultCandidates, key)
+	}
+}
+
+func candidateKey(target target) string {
+	return bindingKey(target.role, target.resourceType, target.id)
+}
+
+func bindingKey(role, resourceType, id string) string {
+	return role + "\x00" + resourceType + "\x00" + id
 }
 
 func (run *evaluation) bind(target target, source coop.BindingSource) {
 	for index, existing := range run.bindings {
-		if existing.Role == target.role && existing.Type == target.resourceType && existing.ID == target.id {
-			if existing.Source == coop.BindingObservedCandidate && source == coop.BindingObserved {
-				run.bindings[index].Source = source
-			}
-			return
+		if existing.Role != target.role {
+			continue
 		}
+		if existing.Type == target.resourceType && existing.ID == target.id &&
+			existing.Source == coop.BindingObservedCandidate && source == coop.BindingObserved {
+			run.bindings[index].Source = source
+		}
+		return
 	}
 	if len(run.bindings) < MaxTargetsPerRun {
 		run.bindings = append(run.bindings, coop.ResourceBinding{
@@ -648,9 +882,35 @@ func (run *evaluation) bind(target target, source coop.BindingSource) {
 	}
 }
 
+func (run *evaluation) discardCandidate(target target) {
+	for index := range run.bindings {
+		binding := run.bindings[index]
+		if binding.Role == target.role && binding.Type == target.resourceType && binding.ID == target.id &&
+			binding.Source == coop.BindingObservedCandidate {
+			run.bindings = append(run.bindings[:index], run.bindings[index+1:]...)
+			return
+		}
+	}
+}
+
 func (e *Evaluator) rule(resourceType string) *checks.ResourceRule {
 	for index := range e.resources {
 		if e.resources[index].Type == resourceType {
+			return &e.resources[index]
+		}
+	}
+	return nil
+}
+
+func (e *Evaluator) ruleForRequest(request *coop.APIRequest) *checks.ResourceRule {
+	if request == nil {
+		return nil
+	}
+	method := strings.ToUpper(strings.TrimSpace(request.Method))
+	path := strings.TrimSpace(request.Path)
+	for index := range e.resources {
+		create := e.resources[index].Create
+		if strings.ToUpper(strings.TrimSpace(create.Method)) == method && strings.TrimSpace(create.Path) == path {
 			return &e.resources[index]
 		}
 	}
@@ -805,6 +1065,15 @@ func unixSeconds(value any) (int64, bool) {
 	return result, err == nil
 }
 
+func integer(value any) (int64, bool) {
+	text, ok := scalar(value)
+	if !ok {
+		return 0, false
+	}
+	result, err := strconv.ParseInt(text, 10, 64)
+	return result, err == nil
+}
+
 func nonempty(value any) bool {
 	switch value := value.(type) {
 	case nil:
@@ -838,6 +1107,10 @@ func checkImportance(value checks.Importance) coop.CheckImportance {
 
 func fieldSuffix(field string) string {
 	return "field-" + strings.NewReplacer(".", "-", "_", "-", "[", "-", "]", "").Replace(field)
+}
+
+func evidenceSuffix(evidenceID, suffix string) string {
+	return "evidence-" + evidenceID + "-" + suffix
 }
 
 func boundedID(value string) string {

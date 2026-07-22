@@ -132,12 +132,35 @@ func TestCompileResourceUsesOnlyCatalogedBindingMappings(t *testing.T) {
 	customer := findPredicate(t, resource.Predicates, PredicateEqualsBinding, "customer")
 	require.NotNil(t, customer.Binding)
 	assert.Equal(t, "create-customer", customer.Binding.Node)
-	assertNoPredicate(t, resource.Predicates, PredicateEqualsBinding, "line_items.price")
+	require.Len(t, resource.Evidence, 1)
+	lineItemPrice := findPredicate(t, resource.Evidence[0].Predicates, PredicateEqualsBinding, "data.0.price")
+	require.NotNil(t, lineItemPrice.Binding)
+	assert.Equal(t, BindingRef{Step: "setup", Node: "create-price", Field: "id"}, *lineItemPrice.Binding)
 	assertNoPredicate(t, resource.Predicates, PredicateEqualsBinding, "payment_intent_data.transfer_data.destination")
 
-	require.Len(t, plan.CoverageGaps, 2)
-	assert.Contains(t, plan.CoverageGaps[0].Reason+plan.CoverageGaps[1].Reason, "line_items.price")
-	assert.Contains(t, plan.CoverageGaps[0].Reason+plan.CoverageGaps[1].Reason, "payment_intent_data.transfer_data.destination")
+	require.Len(t, plan.CoverageGaps, 1)
+	assert.NotContains(t, plan.CoverageGaps[0].Reason, "line_items.0.price")
+	assert.Contains(t, plan.CoverageGaps[0].Reason, "payment_intent_data.transfer_data.destination")
+}
+
+func TestCompileLineItemBindingKeepsArrayIndex(t *testing.T) {
+	plan, err := CompileNodes(testCatalog(t), "checkout", []coop.NodeDefinition{{
+		Key: "create-checkout", Request: &coop.APIRequest{
+			Method: "POST", Path: "/v1/checkout/sessions",
+			Params: map[string]any{"line_items": []any{
+				map[string]any{"price": "${node.setup.first:id}"},
+				map[string]any{"price": "${node.setup.second:id}"},
+			}},
+		},
+	}})
+	require.NoError(t, err)
+	require.Len(t, plan.Resources, 1)
+	require.Len(t, plan.Resources[0].Evidence, 1)
+	predicate := findPredicate(t, plan.Resources[0].Evidence[0].Predicates, PredicateEqualsBinding, "data.0.price")
+	require.NotNil(t, predicate.Binding)
+	assert.Equal(t, "first", predicate.Binding.Node)
+	require.Len(t, plan.CoverageGaps, 1)
+	assert.Contains(t, plan.CoverageGaps[0].Reason, `"line_items.1.price"`)
 }
 
 func TestCompileVariableReferenceWithNamedRequest(t *testing.T) {
@@ -189,6 +212,91 @@ func TestCompileReportsInterpolatedEqualsInputAsAdvisoryCoverage(t *testing.T) {
 		assert.Equal(t, Source{Step: "checkout", Node: "create-checkout"}, gap.Source)
 		assert.Contains(t, gap.Reason, `input "mode" is resolved at runtime`)
 	}
+}
+
+func TestCompileReportsInterpolatedEvidenceInputWithoutPerformingRead(t *testing.T) {
+	catalog := testCatalog(t)
+	for index := range catalog.Resources {
+		resource := &catalog.Resources[index]
+		if resource.Type != "checkout_session" {
+			continue
+		}
+		resource.Predicates = nil
+		resource.Evidence = []EvidenceRule{{
+			ID: "line_items", Retrieve: "/v1/checkout/sessions/{id}/line_items",
+			Predicates: []PredicateTemplate{{
+				Kind: PredicateEqualsInput, Field: "data.0.description", Input: "mode",
+			}},
+			Repair: "Use the configured value.",
+		}}
+	}
+
+	plan, err := CompileNodes(catalog, "checkout", []coop.NodeDefinition{{
+		Key: "create-checkout", Request: &coop.APIRequest{
+			Method: "POST", Path: "/v1/checkout/sessions",
+			Params: map[string]any{"mode": "${settings.checkout:mode}"},
+		},
+	}})
+	require.NoError(t, err)
+	require.Len(t, plan.Resources, 1)
+	assert.Empty(t, plan.Resources[0].Evidence)
+	require.Len(t, plan.CoverageGaps, 1)
+	assert.Contains(t, plan.CoverageGaps[0].Reason, `input "mode" is resolved at runtime`)
+}
+
+func TestCompileEvidenceUsesHiddenRequestInputs(t *testing.T) {
+	catalog := testCatalog(t)
+	for index := range catalog.Resources {
+		resource := &catalog.Resources[index]
+		if resource.Type != "checkout_session" {
+			continue
+		}
+		resource.Evidence = []EvidenceRule{{
+			ID: "line_items", Retrieve: "/v1/checkout/sessions/{id}/line_items",
+			Predicates: []PredicateTemplate{{
+				Kind: PredicateEqualsInput, Field: "data.0.description", Input: "private_label",
+			}},
+			Repair: "Use the configured value.",
+		}}
+	}
+	plan, err := CompileNodes(catalog, "checkout", []coop.NodeDefinition{{
+		Key: "create-checkout", Request: &coop.APIRequest{
+			Method: "POST", Path: "/v1/checkout/sessions",
+			HiddenParams: map[string]any{"private_label": "internal"},
+		},
+	}})
+	require.NoError(t, err)
+	require.Len(t, plan.Resources, 1)
+	require.Len(t, plan.Resources[0].Evidence, 1)
+	assert.Equal(t, "private_label", plan.Resources[0].Evidence[0].Predicates[0].Input)
+}
+
+func TestCompileCorrelationEvidenceIsAllOrNothing(t *testing.T) {
+	rules := []EvidenceRule{{
+		ID: "line_items", Retrieve: "/v1/checkout/sessions/{id}/line_items",
+		CorrelatesAttempt: true,
+		Predicates: []PredicateTemplate{
+			{Kind: PredicateEqualsBinding, Field: "data.0.price", Input: "line_items.0.price"},
+			{Kind: PredicateEqualsBinding, Field: "data.0.product", Input: "metadata.product"},
+		},
+		Repair: "Use both referenced Stripe resources.",
+	}}
+	params := map[string]any{
+		"line_items": []any{map[string]any{"price": "${node.setup.create-price:id}"}},
+		"metadata":   map[string]any{"product": "literal-product"},
+	}
+	request := coop.APIRequest{Params: params}
+
+	evidence, _, err := compileEvidence(rules, request)
+	require.NoError(t, err)
+	assert.Empty(t, evidence, "one compiled relationship must not weaken a two-relationship attribution rule")
+
+	params["metadata"] = map[string]any{"product": "${node.setup.create-product:id}"}
+	evidence, _, err = compileEvidence(rules, request)
+	require.NoError(t, err)
+	require.Len(t, evidence, 1)
+	assert.True(t, evidence[0].CorrelatesAttempt)
+	assert.Len(t, evidence[0].Predicates, 2)
 }
 
 func TestCompileEmbeddedFormModeHasExplicitCoverageGap(t *testing.T) {

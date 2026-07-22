@@ -362,10 +362,11 @@ func (s *Service) ConfirmReviewAttempts(sessionID string, refs []AttemptRef, ove
 			if len(policy.pending) > 0 {
 				return fmt.Errorf("automatic verification is still pending for node %d", ref.Node)
 			}
-			if policy.requiresOverride && !overrideUnavailable {
+			requiresOverride := policy.requiresOverride || attemptHasObservedCandidate(attempt)
+			if requiresOverride && !overrideUnavailable {
 				return fmt.Errorf("automatic verification is unavailable for node %d; confirm again with an explicit override", ref.Node)
 			}
-			if policy.requiresOverride {
+			if requiresOverride {
 				if err := node.RecordVerificationOverride(ref.Attempt, s.now(), overrideReason); err != nil {
 					return err
 				}
