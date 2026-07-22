@@ -1,0 +1,268 @@
+{
+  "rules": [
+    {
+      "id": "resource.matches",
+      "importance": "blocking",
+      "repair": "Make the created Stripe resource match the step, then report the work again."
+    },
+    {
+      "id": "state.matches",
+      "importance": "blocking",
+      "repair": "Correct the flow so the affected Stripe resource reaches the expected state."
+    }
+  ],
+  "resources": [
+    {
+      "type": "account",
+      "role": "connected_account",
+      "create": {"method": "POST", "path": "/v1/accounts"},
+      "retrieve": "/v1/accounts/{id}",
+      "id_prefixes": ["acct_"],
+      "predicates": [
+        {"op": "equals_input", "field": "controller.fees.payer", "input": "controller.fees.payer"},
+        {"op": "equals_input", "field": "controller.losses.payments", "input": "controller.losses.payments"},
+        {"op": "equals_input", "field": "controller.requirement_collection", "input": "controller.requirement_collection"}
+      ]
+    },
+    {
+      "type": "billing_meter",
+      "role": "meter",
+      "create": {"method": "POST", "path": "/v1/billing/meters"},
+      "retrieve": "/v1/billing/meters/{id}",
+      "id_prefixes": ["mtr_"],
+      "predicates": [
+        {"op": "equals_input", "field": "default_aggregation.formula", "input": "default_aggregation.formula"}
+      ]
+    },
+    {
+      "type": "checkout_session",
+      "role": "checkout_session",
+      "create": {"method": "POST", "path": "/v1/checkout/sessions"},
+      "retrieve": "/v1/checkout/sessions/{id}",
+      "id_prefixes": ["cs_"],
+      "predicates": [
+        {"op": "equals_input", "field": "mode", "input": "mode"},
+        {"op": "equals_binding", "field": "customer", "input": "customer"}
+      ]
+    },
+    {
+      "type": "customer",
+      "role": "customer",
+      "create": {"method": "POST", "path": "/v1/customers"},
+      "retrieve": "/v1/customers/{id}",
+      "id_prefixes": ["cus_"]
+    },
+    {
+      "type": "entitlement_feature",
+      "role": "feature",
+      "create": {"method": "POST", "path": "/v1/entitlements/features"},
+      "id_prefixes": ["feat_"]
+    },
+    {
+      "type": "financial_connections_session",
+      "role": "financial_connections_session",
+      "create": {"method": "POST", "path": "/v1/financial_connections/sessions"},
+      "retrieve": "/v1/financial_connections/sessions/{id}",
+      "id_prefixes": ["fcsess_"]
+    },
+    {
+      "type": "invoice",
+      "role": "invoice",
+      "create": {"method": "POST", "path": "/v1/invoices"},
+      "retrieve": "/v1/invoices/{id}",
+      "id_prefixes": ["in_"],
+      "predicates": [
+        {"op": "equals_input", "field": "collection_method", "input": "collection_method"},
+        {"op": "equals_binding", "field": "customer", "input": "customer"},
+        {"op": "equals_binding", "field": "subscription", "input": "subscription"}
+      ]
+    },
+    {
+      "type": "invoice_item",
+      "role": "invoice_item",
+      "create": {"method": "POST", "path": "/v1/invoiceitems"},
+      "retrieve": "/v1/invoiceitems/{id}",
+      "id_prefixes": ["ii_"],
+      "predicates": [
+        {"op": "equals_binding", "field": "customer", "input": "customer"},
+        {"op": "equals_binding", "field": "invoice", "input": "invoice"}
+      ]
+    },
+    {
+      "type": "issuing_card",
+      "role": "card",
+      "create": {"method": "POST", "path": "/v1/issuing/cards"},
+      "retrieve": "/v1/issuing/cards/{id}",
+      "id_prefixes": ["ic_"],
+      "predicates": [
+        {"op": "equals_input", "field": "type", "input": "type"},
+        {"op": "equals_input", "field": "status", "input": "status"},
+        {"op": "equals_binding", "field": "cardholder", "input": "cardholder"},
+        {"op": "equals_binding", "field": "financial_account", "input": "financial_account"}
+      ]
+    },
+    {
+      "type": "issuing_cardholder",
+      "role": "cardholder",
+      "create": {"method": "POST", "path": "/v1/issuing/cardholders"},
+      "retrieve": "/v1/issuing/cardholders/{id}",
+      "id_prefixes": ["ich_"],
+      "predicates": [
+        {"op": "equals_input", "field": "type", "input": "type"},
+        {"op": "equals_input", "field": "status", "input": "status"}
+      ]
+    },
+    {
+      "type": "payment_intent",
+      "role": "payment_intent",
+      "create": {"method": "POST", "path": "/v1/payment_intents"},
+      "retrieve": "/v1/payment_intents/{id}",
+      "id_prefixes": ["pi_"],
+      "predicates": [
+        {"op": "equals_binding", "field": "customer", "input": "customer"},
+        {"op": "equals_binding", "field": "payment_method", "input": "payment_method"}
+      ]
+    },
+    {
+      "type": "payment_method",
+      "role": "payment_method",
+      "create": {"method": "POST", "path": "/v1/payment_methods"},
+      "retrieve": "/v1/payment_methods/{id}",
+      "id_prefixes": ["pm_", "card_"]
+    },
+    {
+      "type": "price",
+      "role": "price",
+      "create": {"method": "POST", "path": "/v1/prices"},
+      "retrieve": "/v1/prices/{id}",
+      "id_prefixes": ["price_"],
+      "predicates": [
+        {"op": "equals_input", "field": "billing_scheme", "input": "billing_scheme"},
+        {"op": "equals_input", "field": "recurring.usage_type", "input": "recurring.usage_type"},
+        {"op": "equals_binding", "field": "product", "input": "product"}
+      ]
+    },
+    {
+      "type": "product",
+      "role": "product",
+      "create": {"method": "POST", "path": "/v1/products"},
+      "retrieve": "/v1/products/{id}",
+      "id_prefixes": ["prod_"]
+    },
+    {
+      "type": "setup_intent",
+      "role": "setup_intent",
+      "create": {"method": "POST", "path": "/v1/setup_intents"},
+      "retrieve": "/v1/setup_intents/{id}",
+      "id_prefixes": ["seti_"],
+      "predicates": [
+        {"op": "equals_binding", "field": "customer", "input": "customer"},
+        {"op": "equals_binding", "field": "payment_method", "input": "payment_method"}
+      ]
+    },
+    {
+      "type": "subscription",
+      "role": "subscription",
+      "create": {"method": "POST", "path": "/v1/subscriptions"},
+      "retrieve": "/v1/subscriptions/{id}",
+      "id_prefixes": ["sub_"],
+      "predicates": [
+        {"op": "equals_binding", "field": "customer", "input": "customer"}
+      ]
+    },
+    {
+      "type": "treasury_financial_account",
+      "role": "financial_account",
+      "create": {"method": "POST", "path": "/v1/treasury/financial_accounts"},
+      "retrieve": "/v1/treasury/financial_accounts/{id}",
+      "id_prefixes": ["fa_"]
+    },
+    {
+      "type": "treasury_inbound_transfer",
+      "role": "inbound_transfer",
+      "create": {"method": "POST", "path": "/v1/treasury/inbound_transfers"},
+      "retrieve": "/v1/treasury/inbound_transfers/{id}"
+    }
+  ],
+  "events": [
+    {
+      "type": "checkout.session.completed",
+      "resource": "checkout_session",
+      "predicates": [
+        {"op": "eq", "field": "status", "value": "complete"},
+        {"op": "one_of", "field": "payment_status", "values": ["paid", "no_payment_required"]}
+      ],
+      "terminal_fail": [
+        {
+          "when": {"op": "eq", "field": "status", "value": "expired"},
+          "repair": "Create a new Checkout Session and complete it before it expires."
+        }
+      ]
+    },
+    {
+      "type": "customer.subscription.created",
+      "resource": "subscription",
+      "predicates": [
+        {"op": "one_of", "field": "status", "values": ["active", "trialing"]},
+        {"op": "present", "field": "items.data"}
+      ]
+    },
+    {
+      "type": "financial_account.features_status_updated",
+      "resource": "treasury_financial_account",
+      "predicates": [
+        {"op": "present", "field": "id"}
+      ]
+    },
+    {
+      "type": "inbound_transfer.succeeded",
+      "resource": "treasury_inbound_transfer",
+      "predicates": [
+        {"op": "eq", "field": "status", "value": "succeeded"}
+      ]
+    },
+    {
+      "type": "invoice.created",
+      "resource": "invoice",
+      "predicates": [
+        {"op": "present", "field": "id"}
+      ]
+    },
+    {
+      "type": "invoice.paid",
+      "resource": "invoice",
+      "predicates": [
+        {"op": "eq", "field": "status", "value": "paid"}
+      ]
+    },
+    {
+      "type": "invoice.payment_succeeded",
+      "resource": "invoice",
+      "predicates": [
+        {"op": "eq", "field": "status", "value": "paid"}
+      ]
+    },
+    {
+      "type": "payment_intent.succeeded",
+      "resource": "payment_intent",
+      "predicates": [
+        {"op": "eq", "field": "status", "value": "succeeded"},
+        {"op": "positive", "field": "amount"}
+      ]
+    },
+    {
+      "type": "setup_intent.succeeded",
+      "resource": "setup_intent",
+      "predicates": [
+        {"op": "eq", "field": "status", "value": "succeeded"}
+      ]
+    },
+    {
+      "type": "treasury.inbound_transfer.succeeded",
+      "resource": "treasury_inbound_transfer",
+      "predicates": [
+        {"op": "eq", "field": "status", "value": "succeeded"}
+      ]
+    }
+  ]
+}

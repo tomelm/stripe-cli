@@ -20,11 +20,12 @@ import (
 
 // Model is the root bubbletea model for the co-op TUI.
 type Model struct {
-	store           *coop.Store
-	sessionID       string
-	session         *coop.Session
-	lastVersion     int
-	sandboxClaimURL string
+	store                   *coop.Store
+	sessionID               string
+	session                 *coop.Session
+	lastVersion             int
+	sandboxClaimURL         string
+	sandboxClaimURLProvider func() string
 
 	selectionCursor int // node index in work view, completion option index in completion view
 	selected        navigationItem
@@ -41,6 +42,7 @@ type Model struct {
 	rejectionError  string
 	statusMessage   string
 	statusExpiresAt time.Time
+	overrideTarget  string
 
 	keys  keyMap
 	help  help.Model
@@ -66,6 +68,7 @@ type Model struct {
 	existingSessionIDs map[string]bool
 	lastUpdateTime     time.Time
 	agentIsIdle        bool
+	observer           ObserverController
 
 	isDark  bool
 	focused bool // true when terminal has focus (default: true, updated via FocusMsg/BlurMsg)
@@ -207,35 +210,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.waitingMessage = ""
 		m.sessionID = msg.sessionID
 		m.resetSessionViewState()
+		if m.observer != nil {
+			m.observer.Start(msg.sessionID)
+		}
 		return m, m.loadSession()
 
 	case sessionUpdatedMsg:
-		wasComplete := m.session != nil && m.session.IsComplete()
-		m.session = msg.session
-		m.lastVersion = msg.session.Version
-		m.lastUpdateTime = time.Now()
-		m.agentIsIdle = false
-
-		// Child session completed → return to parent with step marked done
-		if !wasComplete && m.session.IsComplete() && m.session.ParentSessionID != "" {
-			return m, m.returnToParent()
-		}
-
-		// Reset selection when transitioning to completion view.
-		if !wasComplete && m.session.IsComplete() {
-			m.resetSelectionState()
-			m.clearStatus()
-			m.clearRejectionState()
-			if m.ready {
-				m.viewport.SetYOffset(0)
-			}
-		}
-		if !m.userMoved {
-			m.autoScroll()
-		}
-		m.resizeViewport()
-		m.syncViewport()
-		return m, tickCmd()
+		return m.applySessionUpdate(msg)
 
 	case errMsg:
 		m.err = msg.err
@@ -279,9 +260,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.BlurMsg:
 		m.focused = false
 		return m, nil
+
 	}
 
 	return m, nil
+}
+
+func (m Model) applySessionUpdate(msg sessionUpdatedMsg) (tea.Model, tea.Cmd) {
+	wasComplete := m.session != nil && m.session.IsComplete()
+	m.clearVerificationOverride()
+	m.session = msg.session
+	m.lastVersion = msg.session.Version
+	m.lastUpdateTime = time.Now()
+	m.agentIsIdle = false
+
+	// Child session completed → return to parent with step marked done.
+	if !wasComplete && m.session.IsComplete() && m.session.ParentSessionID != "" {
+		return m, m.returnToParent()
+	}
+	if !wasComplete && m.session.IsComplete() {
+		m.resetSelectionState()
+		m.clearStatus()
+		m.clearRejectionState()
+		if m.ready {
+			m.viewport.SetYOffset(0)
+		}
+	}
+	if !m.userMoved {
+		m.autoScroll()
+	}
+	m.resizeViewport()
+	m.syncViewport()
+	return m, tickCmd()
 }
 
 func (m Model) View() tea.View {
@@ -380,7 +390,11 @@ func (m Model) rejectionCursor(content string) *tea.Cursor {
 		if cursor == nil {
 			cursor = tea.NewCursor(0, 0)
 		}
-		cursor.X += lipgloss.Width(plain[:idx+len(prefix)])
+		if cursor.Y == 0 {
+			cursor.X += lipgloss.Width(plain[:idx+len(prefix)])
+		} else {
+			cursor.X += lipgloss.Width(plain[:idx])
+		}
 		cursor.Y += y
 		cursor.Shape = tea.CursorBar
 		cursor.Color = m.theme.Purple500
@@ -395,6 +409,7 @@ func (m Model) rejectionCursor(content string) *tea.Cursor {
 func (m *Model) resetSessionViewState() {
 	m.resetSelectionState()
 	m.clearRejectionState()
+	m.clearVerificationOverride()
 	m.clearStatus()
 	m.clearSDKSnippetState()
 }
@@ -460,7 +475,21 @@ func (m *Model) resizeViewport() {
 	m.viewport.YPosition = lipgloss.Height(m.renderHeader())
 	if m.rejecting {
 		m.rejectionInput.SetWidth(m.requestChangesInputWidth())
+		m.rejectionInput.SetHeight(m.rejectionInputHeight())
 	}
+}
+
+func (m Model) rejectionInputHeight() int {
+	if m.height <= 0 {
+		return 3
+	}
+	// Rejection mode renders only the textarea, an optional error, and the
+	// one-line action footer. Always reserve at least one visible input row.
+	available := m.footerHeightBudget() - 1
+	if m.rejectionError != "" {
+		available--
+	}
+	return max(1, min(3, available))
 }
 
 func (m *Model) syncViewport() {
@@ -620,6 +649,9 @@ func (m Model) handleCompletionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Enter):
 		return m.handleEnter()
 	case key.Matches(msg, m.keys.OpenClaim):
+		if _, ok := m.selectedAppSurface(); ok {
+			return m, m.openSelectedApp()
+		}
 		if claimURL := m.sandboxClaimLink(); claimURL != "" {
 			return m, openBrowserCmd(claimURL)
 		}
@@ -731,6 +763,9 @@ func (m Model) handleActionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Confirm):
 		return m, m.handleConfirm()
 	case key.Matches(msg, m.keys.OpenClaim):
+		if _, ok := m.selectedAppSurface(); ok {
+			return m, m.openSelectedApp()
+		}
 		if claimURL := m.sandboxClaimLink(); claimURL != "" {
 			return m, openBrowserCmd(claimURL)
 		}
@@ -849,11 +884,29 @@ func (m *Model) handleConfirm() tea.Cmd {
 	if !ok {
 		return nil
 	}
-	session, err := workflow.NewService(m.store).ConfirmReview(m.session.ID, target.nodeNumbers)
+	refs, err := m.attemptRefs(target.nodeNumbers)
 	if err != nil {
-		m.err = fmt.Errorf("failed to confirm review: %w", err)
+		m.clearVerificationOverride()
+		m.setStatus(err.Error(), 5*time.Second)
 		return nil
 	}
+	overrideTarget := verificationOverrideTarget(m.session.ID, refs)
+	session, err := workflow.NewService(m.store).ConfirmReviewAttempts(
+		m.session.ID, refs, m.overrideTarget == overrideTarget, "Developer confirmed the visible UI despite unavailable automatic verification.",
+	)
+	if err != nil {
+		if strings.Contains(err.Error(), "explicit override") {
+			m.overrideTarget = overrideTarget
+			m.setStatus("Automatic check unavailable. Press c again to confirm with a recorded override.", 0)
+		} else {
+			m.clearVerificationOverride()
+			m.setStatus(err.Error(), 5*time.Second)
+		}
+		m.resizeViewport()
+		m.syncViewport()
+		return nil
+	}
+	m.clearVerificationOverride()
 	m.session = session
 	m.lastVersion = m.session.Version
 	if target.kind == "node" && len(target.nodeNumbers) > 0 {
@@ -930,9 +983,16 @@ func (m *Model) handleReject(note string) {
 		return
 	}
 	target := m.rejectTarget
-	session, err := workflow.NewService(m.store).RequestChanges(m.session.ID, target.nodeNumbers, note)
+	refs, err := m.attemptRefs(target.nodeNumbers)
 	if err != nil {
-		m.err = fmt.Errorf("failed to request changes: %w", err)
+		m.rejectionError = err.Error()
+		return
+	}
+	session, err := workflow.NewService(m.store).RequestChangesAttempts(m.session.ID, refs, note)
+	if err != nil {
+		m.rejectionError = fmt.Sprintf("Could not send feedback: %v", err)
+		m.resizeViewport()
+		m.syncViewport()
 		return
 	}
 	m.session = session
@@ -941,10 +1001,97 @@ func (m *Model) handleReject(note string) {
 		m.selectNode(target.nodeNumbers[0] - 1)
 	}
 	m.userMoved = false
+	m.clearVerificationOverride()
 	m.clearRejectionState()
 	m.setStatus("Feedback sent. Waiting for agent...", 5*time.Second)
 	m.resizeViewport()
 	m.syncViewport()
+}
+
+func (m Model) attemptRefs(nodeNumbers []int) ([]workflow.AttemptRef, error) {
+	refs := make([]workflow.AttemptRef, 0, len(nodeNumbers))
+	for _, nodeNumber := range nodeNumbers {
+		node, err := m.session.NodeByNumber(nodeNumber)
+		if err != nil {
+			return nil, err
+		}
+		attempt := node.CurrentAttempt()
+		if attempt == nil {
+			return nil, fmt.Errorf("node %d no longer has an open review attempt", nodeNumber)
+		}
+		refs = append(refs, workflow.AttemptRef{Node: nodeNumber, Attempt: attempt.Number})
+	}
+	return refs, nil
+}
+
+func verificationOverrideTarget(sessionID string, refs []workflow.AttemptRef) string {
+	var target strings.Builder
+	target.WriteString(sessionID)
+	for _, ref := range refs {
+		fmt.Fprintf(&target, "|%d:%d", ref.Node, ref.Attempt)
+	}
+	return target.String()
+}
+
+func (m *Model) clearVerificationOverride() {
+	m.overrideTarget = ""
+}
+
+type appSurfaceSelection struct {
+	node    int
+	attempt int
+	url     string
+}
+
+func (m Model) selectedAppSurface() (appSurfaceSelection, bool) {
+	if m.session == nil {
+		return appSurfaceSelection{}, false
+	}
+	var candidates []int
+	// Prefer the concrete outline node. Reviews are step-scoped, and one
+	// canonical step contains two UI nodes; selecting each node must open its
+	// own submitted surface rather than repeatedly opening the first in the
+	// containing review target.
+	if index, found := m.selectedNodeIndex(); found {
+		candidates = []int{index + 1}
+	}
+	if target, found := m.selectedReviewTarget(); found {
+		for _, candidate := range target.nodeNumbers {
+			if len(candidates) == 0 || candidate != candidates[0] {
+				candidates = append(candidates, candidate)
+			}
+		}
+	}
+	for _, candidate := range candidates {
+		node, err := m.session.NodeByNumber(candidate)
+		if err != nil || node.Type != coop.NodeUIComponent {
+			continue
+		}
+		attempt := node.CurrentAttempt()
+		if attempt != nil && attempt.AppSurface != nil && attempt.AppSurface.URL != "" {
+			return appSurfaceSelection{node: candidate, attempt: attempt.Number, url: attempt.AppSurface.URL}, true
+		}
+	}
+	return appSurfaceSelection{}, false
+}
+
+func (m *Model) openSelectedApp() tea.Cmd {
+	selection, ok := m.selectedAppSurface()
+	if !ok {
+		return nil
+	}
+	appURL, err := workflow.NewService(m.store).MarkAppOpened(m.session.ID, selection.node, selection.attempt)
+	if err != nil {
+		m.setStatus("Could not record app open: "+err.Error(), 5*time.Second)
+		return nil
+	}
+	// MarkAppOpened commits the timestamp before this command invokes the OS.
+	if session, readErr := m.store.Read(m.session.ID); readErr == nil {
+		m.session = session
+		m.lastVersion = session.Version
+	}
+	m.setStatus("Opening the app. Exercise the visible flow, then confirm or request changes.", 5*time.Second)
+	return openBrowserCmd(appURL)
 }
 
 type reviewTarget struct {

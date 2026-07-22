@@ -35,7 +35,6 @@ func TestNewSessionFromGuidedActionIsParentedSession(t *testing.T) {
 		UsedSandbox:     true,
 	})
 
-	assert.Equal(t, CurrentSessionSchemaVersion, session.SchemaVersion)
 	assert.Equal(t, "coop_followup", session.ID)
 	assert.Equal(t, "Test follow-up", session.Blueprint)
 	assert.Equal(t, SessionActive, session.Status)

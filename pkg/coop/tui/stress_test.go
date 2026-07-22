@@ -23,7 +23,7 @@ func TestUILayoutStressSessions(t *testing.T) {
 		{name: "crowded_step_review", model: stressCrowdedStepReviewModel, expectReviewCard: true},
 		{name: "long_claim_url_active", model: stressLongClaimURLModel},
 		{name: "many_steps_manual_navigation", model: stressManyStepsManualNavigationModel},
-		{name: "long_rejection_input", model: stressLongRejectionInputModel, expectReviewCard: true},
+		{name: "long_rejection_input", model: stressLongRejectionInputModel},
 	}
 
 	for _, scenario := range scenarios {
@@ -82,14 +82,14 @@ func TestUILayoutCopyAudit(t *testing.T) {
 func stressLongReviewModel() Model {
 	m := reviewStepLongPromptLayoutModel()
 	m.session.Steps[0].Nodes[0].Title = "Review Checkout Session creation, saved IDs, redirect behavior, and webhook assumptions"
-	m.session.Steps[0].Nodes[0].Implementation = &coop.Implementation{
+	testPresentationAttempt(&m.session.Steps[0].Nodes[0]).Implementation = &coop.Implementation{
 		File:    "server/src/very/long/path/to/payments/checkout/session/create_checkout_session_handler_with_extremely_specific_name.ts",
 		Lines:   "128-276",
 		Snippet: strings.Repeat("await stripe.checkout.sessions.create({ mode: 'payment', line_items: [{ price: savedPriceID, quantity: 1 }] })\n", 6),
 		Note:    "Created the Checkout Session endpoint, persisted the returned IDs, and reused the saved price ID for later payment confirmation.",
 	}
 	m.session.Steps[0].Nodes[0].ReviewPrompt = "Open the app, start Checkout, inspect the server logs, confirm the saved price ID is reused instead of creating a new Price, confirm the redirect URL is correct, confirm errors are handled without exposing secrets, and confirm the success page reflects the completed payment."
-	m.session.Steps[0].Nodes[0].Verifications = []coop.Verification{
+	testPresentationAttempt(&m.session.Steps[0].Nodes[0]).AgentChecks = []coop.Verification{
 		{Check: "Created product", Passed: true},
 		{Check: "Created price", Passed: true},
 		{Check: "Created Checkout Session", Passed: true},
@@ -120,12 +120,14 @@ func stressCrowdedStepReviewModel() Model {
 				ReviewPrompt: fmt.Sprintf("Confirm item %d is observable, documented by verification evidence, and does not require hidden context from previous steps.", i+1),
 			},
 			State: coop.NodeReview,
-			Implementation: &coop.Implementation{
-				File:  fmt.Sprintf("app/src/features/payments/checkout/step_%d/component_or_handler_with_long_name.tsx", i+1),
-				Lines: fmt.Sprintf("%d-%d", 20+i*12, 31+i*12),
-			},
-			Verifications: []coop.Verification{{Check: fmt.Sprintf("Verification %d passed", i+1), Passed: true}},
 		})
+		node := &m.session.Steps[0].Nodes[len(m.session.Steps[0].Nodes)-1]
+		attempt := testPresentationAttempt(node)
+		attempt.Implementation = &coop.Implementation{
+			File:  fmt.Sprintf("app/src/features/payments/checkout/step_%d/component_or_handler_with_long_name.tsx", i+1),
+			Lines: fmt.Sprintf("%d-%d", 20+i*12, 31+i*12),
+		}
+		attempt.AgentChecks = []coop.Verification{{Check: fmt.Sprintf("Verification %d passed", i+1), Passed: true}}
 	}
 	m.selectStep(0)
 	return m
@@ -164,11 +166,12 @@ func stressManyStepsManualNavigationModel() Model {
 					ReviewPrompt: "Confirm this generated stress step has a visible acceptance check.",
 				},
 				State: state,
-				Implementation: &coop.Implementation{
-					File:  fmt.Sprintf("generated/step_%d/step_%d/payment_flow_handler.go", ch+1, node+1),
-					Lines: "1-20",
-				},
 			})
+			attempt := testPresentationAttempt(&step.Nodes[len(step.Nodes)-1])
+			attempt.Implementation = &coop.Implementation{
+				File:  fmt.Sprintf("generated/step_%d/step_%d/payment_flow_handler.go", ch+1, node+1),
+				Lines: "1-20",
+			}
 			stepCount++
 		}
 		m.session.Steps = append(m.session.Steps, step)

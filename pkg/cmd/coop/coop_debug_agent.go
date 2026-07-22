@@ -67,6 +67,27 @@ type coopDebugAgent struct {
 	waitForNextStepSelection bool
 }
 
+// debugAgentEvaluator makes the hidden demo agent use the same workflow policy
+// as a real agent without performing Stripe reads. Non-UI nodes complete from
+// this explicit result; UI and Dashboard nodes still wait for human review.
+type debugAgentEvaluator struct{}
+
+func (debugAgentEvaluator) Requirements(*coop.Session, int) ([]coop.ResourceRequirement, error) {
+	return nil, nil
+}
+
+func (debugAgentEvaluator) Evaluate(context.Context, workflow.EvaluationInput) (workflow.Evaluation, error) {
+	return workflow.Evaluation{Results: []coop.CheckResult{{
+		ID: "debug.agent.completed", Kind: coop.CheckCoverage,
+		Importance: coop.CheckRequired, Status: coop.CheckPassed,
+		Detail: "The deterministic debug agent completed this node.",
+	}}}, nil
+}
+
+func (a *coopDebugAgent) workflowService() *workflow.Service {
+	return workflow.NewService(a.store, workflow.WithEvaluator(debugAgentEvaluator{}))
+}
+
 func (a *coopDebugAgent) run(ctx context.Context) error {
 	a.logf("debug agent attached to %s", a.sessionID)
 
@@ -137,7 +158,7 @@ func (a *coopDebugAgent) startStep(step int) error {
 		return nil
 	}
 
-	resp, err := workflow.NewService(a.store).StartWork(a.sessionID, step, "Debug agent working: "+node.Title)
+	resp, err := a.workflowService().StartWork(a.sessionID, step, "Debug agent working: "+node.Title)
 	if err != nil {
 		return err
 	}
@@ -164,20 +185,28 @@ func (a *coopDebugAgent) completeActiveStep(ctx context.Context, step int) error
 	if node.State != coop.NodeActive {
 		return nil
 	}
+	attempt := node.CurrentAttempt()
+	if attempt == nil {
+		return fmt.Errorf("active step %d has no current attempt", step)
+	}
 
-	service := workflow.NewService(a.store)
-	resp, err := service.ReportCheck(a.sessionID, step, "Debug agent deterministic check", true)
+	service := a.workflowService()
+	resp, err := service.ReportCheckAttempt(a.sessionID, step, attempt.Number, "Debug agent deterministic check", true)
 	if err != nil {
 		return err
 	}
 	if !resp.OK {
 		return fmt.Errorf("%s", resp.Error)
 	}
-	resp, err = service.ReportWork(a.sessionID, step, workflow.ReportWorkInput{
+	input := workflow.ReportWorkInput{
 		File:  "debug/" + safeDebugFileName(node.Key) + ".txt",
 		Lines: "1-1",
 		Note:  "Deterministic debug agent completed " + node.Title,
-	}, false)
+	}
+	if node.Type == coop.NodeUIComponent {
+		input.AppURL = "http://localhost:3000"
+	}
+	resp, err = service.ReportWorkAttempt(ctx, a.sessionID, step, attempt.Number, input)
 	if err != nil {
 		return err
 	}

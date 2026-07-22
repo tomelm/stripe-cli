@@ -42,7 +42,6 @@ func TestStoreWriteRead(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "test_001", loaded.ID)
 	assert.Equal(t, "one-time-payment", loaded.Blueprint)
-	assert.Equal(t, CurrentSessionSchemaVersion, loaded.SchemaVersion)
 	assert.Equal(t, 1, loaded.Version)
 	assert.Equal(t, NodePending, loaded.Steps[0].Nodes[0].State)
 }
@@ -58,6 +57,81 @@ func TestStoreWriteIncrementsVersion(t *testing.T) {
 
 	store.Write(session)
 	assert.Equal(t, 2, session.Version)
+}
+
+func TestPinStripeAccountRejectsInvalidIdentityAndInactiveSession(t *testing.T) {
+	store, err := NewStoreAt(t.TempDir())
+	require.NoError(t, err)
+	active := &Session{ID: "active_pin", Status: SessionActive}
+	completed := &Session{ID: "completed_pin", Status: SessionCompleted}
+	require.NoError(t, store.Write(active))
+	require.NoError(t, store.Write(completed))
+
+	for _, invalid := range []string{"not_an_account", "acct_", "acct_not-safe"} {
+		_, err = store.PinStripeAccount(active.ID, invalid)
+		require.Error(t, err)
+	}
+	_, err = store.PinStripeAccount(completed.ID, "acct_valid")
+	require.Error(t, err)
+
+	loadedActive, err := store.Read(active.ID)
+	require.NoError(t, err)
+	assert.Empty(t, loadedActive.StripeAccountID)
+	assert.Equal(t, 1, loadedActive.Version)
+	loadedCompleted, err := store.Read(completed.ID)
+	require.NoError(t, err)
+	assert.Empty(t, loadedCompleted.StripeAccountID)
+	assert.Equal(t, 1, loadedCompleted.Version)
+}
+
+func TestObserverLeaseIsExclusiveAndOwnerSafe(t *testing.T) {
+	store, err := NewStoreAt(t.TempDir())
+	require.NoError(t, err)
+
+	firstRelease, err := store.AcquireObserverLease("session")
+	require.NoError(t, err)
+	_, err = store.AcquireObserverLease("session")
+	require.ErrorIs(t, err, ErrObserverLeaseHeld)
+
+	firstRelease()
+	secondRelease, err := store.AcquireObserverLease("session")
+	require.NoError(t, err)
+	firstRelease()
+	_, err = store.AcquireObserverLease("session")
+	require.ErrorIs(t, err, ErrObserverLeaseHeld, "an old release must not remove a newer lease")
+	secondRelease()
+}
+
+func TestStorePersistsCompleteAttemptHistory(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStoreAt(dir)
+	require.NoError(t, err)
+
+	now := time.Now().UTC()
+	node := testSessionNode("node", "Node", NodeReview)
+	first, err := node.StartAttempt(now, "initial")
+	require.NoError(t, err)
+	require.NoError(t, node.UpsertResult(first.Number, CheckResult{
+		ID: "mode", Kind: CheckResource, Importance: CheckRequired, Status: CheckFailed, Detail: "wrong mode", UpdatedAt: now,
+	}))
+	require.NoError(t, node.CloseAttempt(first.Number, now.Add(time.Second), AttemptVerificationChanges))
+	second, err := node.StartAttempt(now.Add(2*time.Second), "correct mode")
+	require.NoError(t, err)
+	require.NoError(t, node.UpsertResource(second.Number, ResourceBinding{
+		Role: "checkout_session", Type: "checkout.session", ID: "cs_test_123", Source: BindingAgent,
+	}))
+
+	session := &Session{ID: "history", Status: SessionActive, Steps: []SessionStep{{Nodes: []SessionNode{node}}}}
+	require.NoError(t, store.Write(session))
+	loaded, err := store.Read("history")
+	require.NoError(t, err)
+	loadedNode := &loaded.Steps[0].Nodes[0]
+	require.Len(t, loadedNode.Attempts, 2)
+	assert.Equal(t, AttemptVerificationChanges, loadedNode.Attempts[0].EndReason)
+	assert.Equal(t, CheckFailed, loadedNode.Attempts[0].Results[0].Status)
+	require.NotNil(t, loadedNode.CurrentAttempt())
+	assert.Equal(t, 2, loadedNode.CurrentAttempt().Number)
+	assert.Equal(t, "cs_test_123", loadedNode.CurrentAttempt().Resources[0].ID)
 }
 
 func TestStoreWriteDetectsVersionConflict(t *testing.T) {
@@ -100,7 +174,6 @@ func TestStoreUpdateMutatesAndVersionsSession(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, 2, updated.Version)
-	assert.Equal(t, CurrentSessionSchemaVersion, updated.SchemaVersion)
 	assert.Equal(t, "working", updated.Steps[0].Nodes[0].Activity)
 
 	loaded, err := store.Read("update_test")
@@ -108,28 +181,31 @@ func TestStoreUpdateMutatesAndVersionsSession(t *testing.T) {
 	assert.Equal(t, "working", loaded.Steps[0].Nodes[0].Activity)
 }
 
-func TestStoreDefaultsSchemaOnReadWriteAndUpdate(t *testing.T) {
+func TestStoreUpdateDoesNotVersionAnUnchangedSession(t *testing.T) {
+	store, err := NewStoreAt(t.TempDir())
+	require.NoError(t, err)
+	session := &Session{ID: "unchanged_update", Status: SessionActive}
+	require.NoError(t, store.Write(session))
+	before, err := store.Read(session.ID)
+	require.NoError(t, err)
+
+	updated, err := store.Update(session.ID, func(*Session) error { return nil })
+
+	require.NoError(t, err)
+	assert.Equal(t, before.Version, updated.Version)
+	assert.Equal(t, before.UpdatedAt, updated.UpdatedAt)
+}
+
+func TestStoreDoesNotInjectSchemaMetadata(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewStoreAt(dir)
 	require.NoError(t, err)
 
-	rawPath := filepath.Join(dir, "missing_schema.json")
-	require.NoError(t, os.WriteFile(rawPath, []byte(`{"id":"missing_schema","status":"active","version":7}`), 0600))
-
-	readSession, err := store.Read("missing_schema")
-	require.NoError(t, err)
-	assert.Equal(t, CurrentSessionSchemaVersion, readSession.SchemaVersion)
-
-	updated, err := store.Update("missing_schema", func(session *Session) error {
-		session.Blueprint = "updated"
-		return nil
-	})
-	require.NoError(t, err)
-	assert.Equal(t, CurrentSessionSchemaVersion, updated.SchemaVersion)
-
-	written := &Session{ID: "new_missing_schema", Status: SessionActive}
+	written := &Session{ID: "no_schema", Status: SessionActive}
 	require.NoError(t, store.Write(written))
-	assert.Equal(t, CurrentSessionSchemaVersion, written.SchemaVersion)
+	raw, err := os.ReadFile(filepath.Join(dir, "no_schema.json"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "schema_version")
 }
 
 func TestStoreUpdateInvalidSessionID(t *testing.T) {

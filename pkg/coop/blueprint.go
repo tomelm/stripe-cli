@@ -259,7 +259,8 @@ func ListBlueprintsWithMetadata() ([]Blueprint, error) {
 func NewSessionFromBlueprint(bp *Blueprint, sessionID string, settings, params map[string]string) *Session {
 	now := time.Now().UTC()
 
-	// Prepend a context-gathering step (auto-confirmed, no human sign-off needed)
+	// Prepend a context-gathering step. With no direct Stripe rule it completes
+	// explicitly unverified under the same evaluator policy as every other node.
 	contextStep := SessionStep{
 		StepDefinition: StepDefinition{
 			Key:   "context-step",
@@ -272,7 +273,6 @@ func NewSessionFromBlueprint(bp *Blueprint, sessionID string, settings, params m
 					Type:        NodeTestHelper,
 					Title:       "Understand the project",
 					Description: "Scan the codebase to identify language, framework, dependencies, and existing Stripe code. Report what you find.",
-					AutoConfirm: true,
 				},
 				State: NodePending,
 			},
@@ -297,14 +297,13 @@ func NewSessionFromBlueprint(bp *Blueprint, sessionID string, settings, params m
 	}
 
 	return &Session{
-		SchemaVersion: CurrentSessionSchemaVersion,
-		ID:            sessionID,
-		Blueprint:     bp.ID,
-		Status:        SessionActive,
-		Settings:      settings,
-		Params:        params,
-		Steps:         steps,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		ID:        sessionID,
+		Blueprint: bp.ID,
+		Status:    SessionActive,
+		Settings:  settings,
+		Params:    params,
+		Steps:     steps,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 }

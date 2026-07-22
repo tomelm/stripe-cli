@@ -1,0 +1,614 @@
+package coopcmd
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/url"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	log "github.com/sirupsen/logrus"
+
+	"github.com/stripe/stripe-cli/pkg/coop"
+	"github.com/stripe/stripe-cli/pkg/coop/observe"
+	"github.com/stripe/stripe-cli/pkg/coop/tui"
+	"github.com/stripe/stripe-cli/pkg/coop/workflow"
+	"github.com/stripe/stripe-cli/pkg/logtailing"
+	"github.com/stripe/stripe-cli/pkg/proxy"
+	"github.com/stripe/stripe-cli/pkg/stripe"
+	"github.com/stripe/stripe-cli/pkg/websocket"
+)
+
+const (
+	coopObserverPollInterval   = 3 * time.Second
+	coopObserverStandbyRetry   = time.Second
+	coopObserverHeartbeatFresh = 5 * time.Second
+	coopObserverStreamBuffer   = 64
+	maxObserverFilters         = 128
+)
+
+type observerStore interface {
+	Read(string) (*coop.Session, error)
+	Update(string, func(*coop.Session) error) (*coop.Session, error)
+	PinStripeAccount(string, string) (*coop.Session, error)
+	AcquireObserverLease(string) (func(), error)
+	HeartbeatAge(string) (time.Duration, error)
+}
+
+type observerWorkflow interface {
+	RecordSupportingResult(string, int, int, coop.CheckResult) error
+	Reevaluate(context.Context, string, int, int, workflow.EvaluationTrigger) (coop.CommandResponse, error)
+	ReevaluateState(context.Context, string, int, int, string, string) (coop.CommandResponse, error)
+}
+
+type observerPlan struct {
+	Methods    []string
+	Events     []string
+	ThinEvents []string
+}
+
+type observerCredentials struct {
+	APIKey     string
+	AccountID  string
+	DeviceName string
+}
+
+type observerStreamConfig struct {
+	observerCredentials
+	observerPlan
+}
+
+type observerStreamFactory func(context.Context, observerStreamConfig) ([]<-chan websocket.IElement, error)
+type observerAuthorizer func(context.Context, observerCredentials) error
+
+type coopObserverController struct {
+	store           observerStore
+	workflow        func() observerWorkflow
+	credentials     func() (observerCredentials, bool)
+	authorize       observerAuthorizer
+	streams         observerStreamFactory
+	pollEvery       time.Duration
+	standbyEvery    time.Duration
+	now             func() time.Time
+	sandboxClaimURL func() string
+
+	mu     sync.Mutex
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+}
+
+func newCoopObserver(store *coop.Store) *coopObserverController {
+	return &coopObserverController{
+		store: store,
+		workflow: func() observerWorkflow {
+			evaluator, err := newCoopEvaluator()
+			if err != nil {
+				return nil
+			}
+			return workflow.NewService(store, workflow.WithEvaluator(evaluator))
+		},
+		credentials:     configuredObserverCredentials,
+		authorize:       authorizeObserverCredentials,
+		streams:         startStockObserverStreams,
+		pollEvery:       coopObserverPollInterval,
+		standbyEvery:    coopObserverStandbyRetry,
+		now:             time.Now,
+		sandboxClaimURL: coopSandboxClaimURL,
+	}
+}
+
+func coopTUIOptions(store *coop.Store) []tui.Option {
+	claim := &sandboxClaimState{url: coopSandboxClaimURL()}
+	observer := newCoopObserver(store)
+	observer.sandboxClaimURL = func() string {
+		claimURL := coopSandboxClaimURL()
+		claim.set(claimURL)
+		return claimURL
+	}
+	return []tui.Option{
+		tui.WithSandboxClaimURLProvider(claim.get),
+		tui.WithObserver(observer),
+	}
+}
+
+type sandboxClaimState struct {
+	mu  sync.RWMutex
+	url string
+}
+
+func (state *sandboxClaimState) get() string {
+	state.mu.RLock()
+	defer state.mu.RUnlock()
+	return state.url
+}
+
+func (state *sandboxClaimState) set(claimURL string) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.url = strings.TrimSpace(claimURL)
+}
+
+func (controller *coopObserverController) Start(sessionID string) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	controller.stopLocked()
+
+	session, err := controller.store.Read(sessionID)
+	if err != nil || session.Status != coop.SessionActive {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	controller.cancel = cancel
+	controller.wg.Add(1)
+	go controller.run(ctx, sessionID)
+}
+
+func (controller *coopObserverController) Close() {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	controller.stopLocked()
+}
+
+func (controller *coopObserverController) stopLocked() {
+	if controller.cancel == nil {
+		return
+	}
+	controller.cancel()
+	controller.wg.Wait()
+	controller.cancel = nil
+}
+
+func (controller *coopObserverController) run(ctx context.Context, sessionID string) {
+	defer controller.wg.Done()
+	retryEvery := controller.standbyEvery
+	if retryEvery <= 0 {
+		retryEvery = coopObserverStandbyRetry
+	}
+	for {
+		release, err := controller.store.AcquireObserverLease(sessionID)
+		if err == nil {
+			controller.runOwner(ctx, sessionID, release)
+			return
+		}
+		if !errors.Is(err, coop.ErrObserverLeaseHeld) {
+			return
+		}
+		timer := time.NewTimer(retryEvery)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		session, readErr := controller.store.Read(sessionID)
+		if readErr != nil || session.Status != coop.SessionActive {
+			return
+		}
+	}
+}
+
+func (controller *coopObserverController) runOwner(ctx context.Context, sessionID string, release func()) {
+	defer release()
+	session, err := controller.store.Read(sessionID)
+	if err != nil || session.Status != coop.SessionActive {
+		return
+	}
+	ownerCtx, cancel := context.WithCancel(ctx)
+	var workers sync.WaitGroup
+	if controller.streams != nil && controller.credentials != nil {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			controller.stream(ownerCtx, sessionID)
+		}()
+	}
+	if controller.pollEvery > 0 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			controller.poll(ownerCtx, sessionID)
+		}()
+	}
+	statusEvery := controller.standbyEvery
+	if statusEvery <= 0 {
+		statusEvery = coopObserverStandbyRetry
+	}
+	ticker := time.NewTicker(statusEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			cancel()
+			workers.Wait()
+			return
+		case <-ticker.C:
+			current, readErr := controller.store.Read(sessionID)
+			if readErr != nil || current.Status != coop.SessionActive {
+				cancel()
+				workers.Wait()
+				return
+			}
+		}
+	}
+}
+
+// stream waits for a usable test identity, atomically pins it to an unclaimed
+// session, and starts the stock streams. Polling remains active independently,
+// so stream startup failure or loss cannot wedge verification.
+func (controller *coopObserverController) stream(ctx context.Context, sessionID string) {
+	retryEvery := controller.standbyEvery
+	if retryEvery <= 0 {
+		retryEvery = coopObserverStandbyRetry
+	}
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		credentials, ok := controller.credentials()
+		if !ok {
+			if !waitObserverRetry(ctx, retryEvery) {
+				return
+			}
+			continue
+		}
+		if controller.authorize == nil || controller.authorize(ctx, credentials) != nil {
+			if !waitObserverRetry(ctx, retryEvery) {
+				return
+			}
+			continue
+		}
+		session, pinErr := controller.store.PinStripeAccount(sessionID, credentials.AccountID)
+		if pinErr != nil || session.StripeAccountID != credentials.AccountID || session.Status != coop.SessionActive {
+			if !waitObserverRetry(ctx, retryEvery) {
+				return
+			}
+			continue
+		}
+		if controller.sandboxClaimURL != nil && strings.TrimSpace(controller.sandboxClaimURL()) != "" && !session.UsedSandbox {
+			session, pinErr = controller.store.Update(sessionID, func(current *coop.Session) error {
+				if current.Status == coop.SessionActive && current.StripeAccountID == credentials.AccountID {
+					current.UsedSandbox = true
+				}
+				return nil
+			})
+			if pinErr != nil || !session.UsedSandbox {
+				if !waitObserverRetry(ctx, retryEvery) {
+					return
+				}
+				continue
+			}
+		}
+		service := controller.workflow()
+		if service == nil {
+			if !waitObserverRetry(ctx, retryEvery) {
+				return
+			}
+			continue
+		}
+		config := observerStreamConfig{observerCredentials: credentials, observerPlan: planObservation(session)}
+		streamCtx, stopStreams := context.WithCancel(ctx)
+		streams, streamErr := controller.streams(streamCtx, config)
+		if streamErr != nil {
+			stopStreams()
+			if !waitObserverRetry(ctx, retryEvery) {
+				return
+			}
+			continue
+		}
+		if len(streams) == 0 {
+			stopStreams()
+			return
+		}
+		var consumers sync.WaitGroup
+		closed := make(chan struct{}, len(streams))
+		for _, source := range streams {
+			consumers.Add(1)
+			go func(stream <-chan websocket.IElement) {
+				defer consumers.Done()
+				controller.consume(streamCtx, service, sessionID, stream)
+				closed <- struct{}{}
+			}(source)
+		}
+		select {
+		case <-ctx.Done():
+			stopStreams()
+			consumers.Wait()
+			return
+		case <-closed:
+			stopStreams()
+			consumers.Wait()
+			if !waitObserverRetry(ctx, retryEvery) {
+				return
+			}
+		}
+	}
+}
+
+func waitObserverRetry(ctx context.Context, retryEvery time.Duration) bool {
+	timer := time.NewTimer(retryEvery)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func (controller *coopObserverController) consume(ctx context.Context, service observerWorkflow, sessionID string, stream <-chan websocket.IElement) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case element, ok := <-stream:
+			if !ok {
+				return
+			}
+			switch data := element.(type) {
+			case websocket.DataElement:
+				controller.observe(ctx, service, sessionID, data)
+			case *websocket.DataElement:
+				if data != nil {
+					controller.observe(ctx, service, sessionID, *data)
+				}
+			}
+		}
+	}
+}
+
+func (controller *coopObserverController) observe(ctx context.Context, service observerWorkflow, sessionID string, data websocket.DataElement) {
+	fact, ok := observe.Normalize(data)
+	if !ok {
+		return
+	}
+	session, err := controller.store.Read(sessionID)
+	if err != nil {
+		return
+	}
+	match := observe.MatchSession(session, fact)
+	if result, ok := supportingResult(match.Attribution, controller.now()); ok {
+		_ = service.RecordSupportingResult(sessionID, match.Attribution.Target.NodeNumber, match.Attribution.Target.AttemptNumber, result)
+	}
+
+	resourceID := ""
+	if fact.Event != nil && match.Attribution != nil && len(fact.Event.Discoveries) == 1 {
+		resourceID = fact.Event.Discoveries[0].ID
+	}
+	for _, target := range match.Triggers {
+		if ctx.Err() != nil {
+			return
+		}
+		if fact.Event != nil {
+			_, _ = service.ReevaluateState(ctx, sessionID, target.NodeNumber, target.AttemptNumber, fact.Event.Type, resourceID)
+		} else {
+			_, _ = service.Reevaluate(ctx, sessionID, target.NodeNumber, target.AttemptNumber, workflow.TriggerRequest)
+		}
+	}
+}
+
+func (controller *coopObserverController) poll(ctx context.Context, sessionID string) {
+	ticker := time.NewTicker(controller.pollEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if age, err := controller.store.HeartbeatAge(sessionID); err == nil && age >= 0 && age < coopObserverHeartbeatFresh {
+				continue
+			}
+			session, err := controller.store.Read(sessionID)
+			if err != nil {
+				continue
+			}
+			if session.Status != coop.SessionActive {
+				return
+			}
+			service := controller.workflow()
+			if service == nil {
+				continue
+			}
+			nodeNumber := 0
+			for stepIndex := range session.Steps {
+				for nodeIndex := range session.Steps[stepIndex].Nodes {
+					nodeNumber++
+					attempt := session.Steps[stepIndex].Nodes[nodeIndex].CurrentAttempt()
+					if attempt != nil && attempt.Number > 0 && attempt.ReportedAt != nil && attemptNeedsPolling(attempt) {
+						_, _ = service.Reevaluate(ctx, sessionID, nodeNumber, attempt.Number, workflow.TriggerPoll)
+					}
+				}
+			}
+		}
+	}
+}
+
+func attemptNeedsPolling(attempt *coop.NodeAttempt) bool {
+	if attempt == nil {
+		return false
+	}
+	if attempt.AppSurface != nil && attempt.AppSurface.OpenedAt != nil &&
+		(attempt.AutomaticResultsAt == nil || !attempt.AutomaticResultsAt.After(*attempt.AppSurface.OpenedAt)) {
+		return true
+	}
+	for _, result := range attempt.Results {
+		if result.Importance != coop.CheckRequired {
+			continue
+		}
+		switch result.Status {
+		case coop.CheckPending, coop.CheckUnavailable:
+			return true
+		}
+	}
+	return false
+}
+
+func supportingResult(attribution *observe.Attribution, observedAt time.Time) (coop.CheckResult, bool) {
+	if attribution == nil {
+		return coop.CheckResult{}, false
+	}
+	if event := attribution.Fact.Event; event != nil {
+		return coop.CheckResult{
+			ID: "passive.event", Kind: coop.CheckEvent, Importance: coop.CheckAdvisory, Status: coop.CheckObserved,
+			Detail:   boundedVerificationText("Stripe observed event " + event.Type + "; direct state checks decide completion."),
+			Observed: event.Type, UpdatedAt: observedAt.UTC(),
+		}, true
+	}
+	request := attribution.Fact.Request
+	if request == nil || (attribution.Failure == nil && (request.Status < 200 || request.Status >= 300)) {
+		return coop.CheckResult{}, false
+	}
+	observed := fmt.Sprintf("HTTP %d", request.Status)
+	result := coop.CheckResult{
+		ID: "passive.request", Kind: coop.CheckRequest, Importance: coop.CheckAdvisory, Status: coop.CheckObserved,
+		Detail:   boundedVerificationText(fmt.Sprintf("Stripe observed %s %s return %s; direct checks decide completion.", request.Method, request.Path, observed)),
+		Observed: observed, UpdatedAt: observedAt.UTC(),
+	}
+	if failure := attribution.Failure; failure != nil {
+		code := failure.DeclineCode
+		if code == "" {
+			code = failure.ErrorCode
+		}
+		if code == "" {
+			code = failure.ErrorType
+		}
+		if code != "" {
+			observed += " " + code
+		}
+		// Request logs are account-wide and carry no Co-op attempt token. Even
+		// when exactly one node in this session matches method/path, another app
+		// may have made the request. Preserve the failure as useful evidence, but
+		// never wake or blame the agent without a stronger correlation key.
+		result.Importance = coop.CheckAdvisory
+		result.Status = coop.CheckFailed
+		result.Detail = boundedVerificationText(fmt.Sprintf("Stripe observed %s %s fail with %s.", request.Method, request.Path, observed))
+		result.Expected = "successful API request"
+		result.Observed = boundedVerificationText(observed)
+		result.Repair = "Inspect the request if it belongs to this attempt, then exercise the flow again."
+	}
+	return result, true
+}
+
+func planObservation(session *coop.Session) observerPlan {
+	methods := map[string]bool{}
+	events := map[string]bool{}
+	thinEvents := map[string]bool{}
+	addMethod := func(method string) {
+		method = strings.ToUpper(strings.TrimSpace(method))
+		if method != "" && len(method) <= 16 {
+			methods[method] = true
+		}
+	}
+	for _, step := range session.Steps {
+		for _, node := range step.Nodes {
+			if node.Request != nil {
+				addMethod(node.Request.Method)
+			}
+			for _, request := range node.TestRequests {
+				addMethod(request.Method)
+			}
+			for _, eventType := range node.Events {
+				if eventType == "" || len(eventType) > 128 || strings.ContainsAny(eventType, "\r\n\x00") {
+					continue
+				}
+				if strings.HasPrefix(eventType, "v1.") || strings.HasPrefix(eventType, "v2.") {
+					thinEvents[eventType] = true
+				} else {
+					events[eventType] = true
+				}
+			}
+		}
+	}
+	return observerPlan{Methods: sortedObserverFilters(methods), Events: sortedObserverFilters(events), ThinEvents: sortedObserverFilters(thinEvents)}
+}
+
+func sortedObserverFilters(values map[string]bool) []string {
+	result := make([]string, 0, len(values))
+	for value := range values {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	if len(result) > maxObserverFilters {
+		result = result[:maxObserverFilters]
+	}
+	return result
+}
+
+func configuredObserverCredentials() (observerCredentials, bool) {
+	if options.TestModeAPIKey == nil || options.AccountID == nil || options.DeviceName == nil {
+		return observerCredentials{}, false
+	}
+	key, keyErr := options.TestModeAPIKey()
+	accountID, accountErr := options.AccountID()
+	deviceName, deviceErr := options.DeviceName()
+	key = strings.TrimSpace(key)
+	accountID = strings.TrimSpace(accountID)
+	deviceName = strings.TrimSpace(deviceName)
+	if keyErr != nil || accountErr != nil || deviceErr != nil ||
+		(!strings.HasPrefix(key, "sk_test_") && !strings.HasPrefix(key, "rk_test_") && !strings.HasPrefix(key, "rkcs_test_")) || len(key) > 512 ||
+		!strings.HasPrefix(accountID, "acct_") || len(accountID) > 128 || deviceName == "" || len(deviceName) > 128 ||
+		strings.ContainsAny(accountID+deviceName, "\r\n\x00") {
+		return observerCredentials{}, false
+	}
+	return observerCredentials{APIKey: key, AccountID: accountID, DeviceName: deviceName}, true
+}
+
+func authorizeObserverCredentials(ctx context.Context, credentials observerCredentials) error {
+	reader, err := newCoopStripeReader(credentials.APIKey, credentials.AccountID)
+	if err != nil {
+		return err
+	}
+	return reader.Authorize(ctx)
+}
+
+func startStockObserverStreams(ctx context.Context, config observerStreamConfig) ([]<-chan websocket.IElement, error) {
+	baseURL, err := url.Parse(stripe.DefaultAPIBaseURL)
+	if err != nil {
+		return nil, err
+	}
+	logger := log.New()
+	logger.Out = io.Discard
+
+	var eventProxy *proxy.Proxy
+	var eventOutput chan websocket.IElement
+	if len(config.Events)+len(config.ThinEvents) > 0 {
+		features := make([]string, 0, 2)
+		if len(config.Events) > 0 {
+			features = append(features, "webhooks")
+		}
+		if len(config.ThinEvents) > 0 {
+			features = append(features, "v2_events")
+		}
+		deviceToken := ""
+		eventOutput = make(chan websocket.IElement, coopObserverStreamBuffer)
+		eventProxy, err = proxy.Init(ctx, &proxy.Config{
+			Client: &stripe.Client{APIKey: config.APIKey, BaseURL: baseURL}, DeviceName: config.DeviceName, DeviceToken: &deviceToken,
+			Events: config.Events, ThinEvents: config.ThinEvents, WebSocketFeatures: features,
+			OutCh: eventOutput, Log: logger, LoggedInAccountID: config.AccountID,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	streams := make([]<-chan websocket.IElement, 0, 2)
+	if len(config.Methods) > 0 {
+		requestOutput := make(chan websocket.IElement, coopObserverStreamBuffer)
+		tailer := logtailing.New(&logtailing.Config{
+			Client: &stripe.Client{APIKey: config.APIKey, BaseURL: baseURL}, DeviceName: config.DeviceName,
+			Filters: &logtailing.LogFilters{FilterHTTPMethod: config.Methods}, OutCh: requestOutput, Log: logger,
+		})
+		go func() { _ = tailer.Run(ctx) }()
+		streams = append(streams, requestOutput)
+	}
+	if eventProxy != nil {
+		go func() { _ = eventProxy.Run(ctx) }()
+		streams = append(streams, eventOutput)
+	}
+	return streams, nil
+}
+
+var _ tui.ObserverController = (*coopObserverController)(nil)

@@ -1,8 +1,10 @@
 package coopcmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -20,13 +22,16 @@ type coopAgentActionCmd struct {
 	cmd     *cobra.Command
 	session string
 	step    int
+	attempt int
 	note    string
 
-	file    string
-	lines   string
-	snippet string
-	check   string
-	passed  bool
+	file            string
+	lines           string
+	snippet         string
+	check           string
+	passed          bool
+	appURL          string
+	stripeResources []string
 
 	completed string
 	action    string
@@ -56,7 +61,7 @@ func newCoopAgentStartWorkCmd() *coopAgentActionCmd {
 		Use:   "start-work",
 		Short: "Mark a node as active",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			service, err := newWorkflowService()
+			service, err := newWorkflowService(c.session)
 			if err != nil {
 				return outputAgentError(err)
 			}
@@ -75,24 +80,29 @@ func newCoopAgentReportWorkCmd() *coopAgentActionCmd {
 		Use:   "report-work",
 		Short: "Report completed implementation work",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			service, err := newWorkflowService()
+			resources, err := parseStripeResourceInputs(c.stripeResources)
 			if err != nil {
 				return outputAgentError(err)
 			}
-			resp, err := service.ReportWork(c.session, c.step, workflow.ReportWorkInput{
-				File:    c.file,
-				Lines:   c.lines,
-				Snippet: c.snippet,
-				Note:    c.note,
-			}, false)
+			service, err := newWorkflowService(c.session)
+			if err != nil {
+				return outputAgentError(err)
+			}
+			resp, err := service.ReportWorkAttempt(cmd.Context(), c.session, c.step, c.attempt, workflow.ReportWorkInput{
+				File: c.file, Lines: c.lines, Snippet: c.snippet, Note: c.note,
+				AppURL: c.appURL, StripeResources: resources,
+			})
 			return outputAgentResponse(resp, err)
 		},
 	}
 	c.addSessionStepFlags()
+	c.addAttemptFlag()
 	c.cmd.Flags().StringVar(&c.file, "file", "", "File path for implementation")
 	c.cmd.Flags().StringVar(&c.lines, "lines", "", "Line range, e.g. 1-15")
 	c.cmd.Flags().StringVar(&c.snippet, "snippet", "", "Code snippet")
 	c.cmd.Flags().StringVar(&c.note, "note", "", "Implementation summary")
+	c.cmd.Flags().StringVar(&c.appURL, "app-url", "", "Absolute URL in the developer's app for UI review")
+	c.cmd.Flags().StringArrayVar(&c.stripeResources, "stripe-resource", nil, "Stripe resource as <role>=<id> (repeatable)")
 	return c
 }
 
@@ -102,15 +112,16 @@ func newCoopAgentReportCheckCmd() *coopAgentActionCmd {
 		Use:   "report-check",
 		Short: "Report a verification check",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			service, err := newWorkflowService()
+			service, err := newWorkflowService(c.session)
 			if err != nil {
 				return outputAgentError(err)
 			}
-			resp, err := service.ReportCheck(c.session, c.step, c.check, c.passed)
+			resp, err := service.ReportCheckAttempt(c.session, c.step, c.attempt, c.check, c.passed)
 			return outputAgentResponse(resp, err)
 		},
 	}
 	c.addSessionStepFlags()
+	c.addAttemptFlag()
 	c.cmd.Flags().StringVar(&c.check, "check", "", "Verification check label")
 	c.cmd.Flags().BoolVar(&c.passed, "passed", false, "Whether the verification passed")
 	return c
@@ -122,15 +133,16 @@ func newCoopAgentSkipCmd() *coopAgentActionCmd {
 		Use:   "skip",
 		Short: "Skip a node",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			service, err := newWorkflowService()
+			service, err := newWorkflowService(c.session)
 			if err != nil {
 				return outputAgentError(err)
 			}
-			resp, err := service.Skip(c.session, c.step, c.note)
+			resp, err := service.SkipAttempt(c.session, c.step, c.attempt, c.note)
 			return outputAgentResponse(resp, err)
 		},
 	}
 	c.addSessionStepFlags()
+	c.addAttemptFlag()
 	c.cmd.Flags().StringVar(&c.note, "note", "", "Skip reason")
 	return c
 }
@@ -141,15 +153,16 @@ func newCoopAgentAwaitReviewCmd() *coopAgentActionCmd {
 		Use:   "await-review",
 		Short: "Block until the developer confirms or requests changes",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			service, err := newWorkflowService()
+			service, err := newWorkflowService(c.session)
 			if err != nil {
 				return outputAgentError(err)
 			}
-			resp, err := service.AwaitReview(c.session, c.step)
+			resp, err := service.AwaitReviewAttempt(cmd.Context(), c.session, c.step, c.attempt)
 			return outputAgentResponse(resp, err)
 		},
 	}
 	c.addSessionStepFlags()
+	c.addAttemptFlag()
 	return c
 }
 
@@ -192,12 +205,54 @@ func (c *coopAgentActionCmd) addSessionStepFlags() {
 	mustMarkFlagRequired(c.cmd, "step")
 }
 
-func newWorkflowService() (*workflow.Service, error) {
+func (c *coopAgentActionCmd) addAttemptFlag() {
+	c.cmd.Flags().IntVar(&c.attempt, "attempt", 0, "Attempt number returned by start-work")
+	mustMarkFlagRequired(c.cmd, "attempt")
+}
+
+func parseStripeResourceInputs(values []string) (map[string]string, error) {
+	resources := make(map[string]string, len(values))
+	for _, value := range values {
+		role, id, ok := strings.Cut(value, "=")
+		role, id = strings.TrimSpace(role), strings.TrimSpace(id)
+		if !ok || !validResourceRole(role) || !coop.IsSafeStripeObjectID(id) {
+			return nil, errors.New("--stripe-resource must be a safe <role>=<id> value")
+		}
+		if _, exists := resources[role]; exists {
+			return nil, fmt.Errorf("--stripe-resource role %q was supplied more than once", role)
+		}
+		resources[role] = id
+	}
+	return resources, nil
+}
+
+func validResourceRole(role string) bool {
+	if role == "" || len(role) > 64 || role[0] < 'a' || role[0] > 'z' {
+		return false
+	}
+	for _, character := range role[1:] {
+		if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func newWorkflowService(sessionID string) (*workflow.Service, error) {
 	store, err := coop.NewStore(coopConfigFolder())
 	if err != nil {
 		return nil, fmt.Errorf("creating store: %w", err)
 	}
-	return workflow.NewService(store), nil
+	evaluator, err := newCoopEvaluator()
+	if err != nil {
+		return nil, fmt.Errorf("loading verification catalog: %w", err)
+	}
+	if accountID, authorizeErr := evaluator.authorizeAccount(context.Background()); authorizeErr == nil {
+		if _, err := store.PinStripeAccount(sessionID, accountID); err != nil {
+			return nil, fmt.Errorf("pinning Stripe account: %w", err)
+		}
+	}
+	return workflow.NewService(store, workflow.WithEvaluator(evaluator)), nil
 }
 
 func runCoopNextAction(sessionID, completed string) error {
@@ -260,6 +315,7 @@ func runCoopStartFollowup(parentSessionID, actionID, target string) error {
 		Settings:        settings,
 		UsedSandbox:     parent.UsedSandbox || coopSandboxClaimURL() != "",
 	})
+	session.StripeAccountID = parent.StripeAccountID
 	if err := store.Write(session); err != nil {
 		return fmt.Errorf("writing guided follow-up session: %w", err)
 	}

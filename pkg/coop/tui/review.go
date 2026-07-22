@@ -36,6 +36,12 @@ func (m Model) renderFooter() string {
 	h.SetWidth(m.width - 2)
 	h.ShortSeparator = " · "
 	actionLine := m.theme.FooterStyle.MaxWidth(m.width).Render("  " + h.View(m))
+	if m.rejecting {
+		// Once the developer starts typing, the editor is the primary action.
+		// Keep it outside the review-card clipping path so narrow terminals
+		// cannot hide the text or cursor behind review evidence.
+		return strings.Join([]string{m.renderRejectionEditor(), actionLine}, "\n")
+	}
 
 	if _, ok := m.selectedReviewTarget(); ok && !m.expanded {
 		budget := m.footerHeightBudget()
@@ -100,8 +106,15 @@ func (m Model) renderReviewCardWithMaxHeight(maxHeight int) string {
 	if changed := m.reviewChangedLabel(target.nodeNumbers); changed != "" {
 		lines = append(lines, m.theme.MutedStyle.Render("Agent changed: ")+changed)
 	}
+	if app := m.reviewAppLabel(target.nodeNumbers); app != "" {
+		lines = append(lines, m.theme.ConfirmationHeaderStyle.Render("Open app: ")+app+m.theme.DimmedStyle.Render("  (press o)"))
+	}
+	if correction := m.reviewCorrectionLabel(target.nodeNumbers); correction != "" {
+		lines = append(lines, m.theme.AttentionStyle.Render("Correction addressed: ")+correction)
+	}
+	lines = append(lines, m.reviewAutomaticLabels(target.nodeNumbers)...)
 	if verified := m.reviewVerificationLabel(target.nodeNumbers); verified != "" {
-		lines = append(lines, m.theme.MutedStyle.Render("Agent verified: ")+verified)
+		lines = append(lines, m.theme.MutedStyle.Render("Agent reported: ")+verified)
 	}
 	if command := m.reviewCommandLabel(target.nodeNumbers); command != "" {
 		lines = append(lines, m.theme.MutedStyle.Render("Run: ")+command)
@@ -109,18 +122,6 @@ func (m Model) renderReviewCardWithMaxHeight(maxHeight int) string {
 	if len(lines) > metadataStart && check != "" {
 		lines = append(lines[:metadataStart], append([]string{""}, lines[metadataStart:]...)...)
 	}
-	if m.rejecting {
-		m.rejectionInput.SetWidth(m.requestChangesInputWidth())
-		inputView := m.rejectionInput.View()
-		if m.rejectionInput.Value() == "" {
-			inputView = m.theme.DimmedStyle.Render(m.rejectionInput.Placeholder)
-		}
-		lines = append(lines, m.theme.ErrorStyle.Render("Request changes: ")+inputView)
-		if m.rejectionError != "" {
-			lines = append(lines, m.theme.ErrorStyle.Render(m.rejectionError))
-		}
-	}
-
 	var wrapped []string
 	for _, line := range lines {
 		for _, segment := range strings.Split(line, "\n") {
@@ -139,6 +140,21 @@ func (m Model) renderReviewCardWithMaxHeight(maxHeight int) string {
 		}
 	}
 	return m.renderReviewCardLines(w, maxHeight, wrapped)
+}
+
+func (m Model) renderRejectionEditor() string {
+	m.rejectionInput.SetWidth(m.requestChangesInputWidth())
+	inputView := m.rejectionInput.View()
+	lines := []string{m.theme.ErrorStyle.Render("Request changes: ") + inputView}
+	if m.rejectionError != "" {
+		wrapped := strings.Split(wordWrap(m.rejectionError, max(m.width-2, 8)), "\n")
+		errorLine := wrapped[0]
+		if len(wrapped) > 1 {
+			errorLine = strings.TrimSpace(errorLine) + "…"
+		}
+		lines = append(lines, m.theme.ErrorStyle.Render(errorLine))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func footerLinesFit(lines []string, budget int) bool {
@@ -210,10 +226,14 @@ func (m Model) reviewChangedLabel(nodeNumbers []int) string {
 	seen := map[string]bool{}
 	for _, nodeNumber := range nodeNumbers {
 		node, err := m.session.NodeByNumber(nodeNumber)
-		if err != nil || node.Implementation == nil || node.Implementation.File == "" {
+		if err != nil {
 			continue
 		}
-		label := implementationFileLabel(node.Implementation)
+		attempt := presentationAttempt(node)
+		if attempt == nil || attempt.Implementation == nil || attempt.Implementation.File == "" {
+			continue
+		}
+		label := implementationFileLabel(attempt.Implementation)
 		if !seen[label] {
 			seen[label] = true
 			labels = append(labels, label)
@@ -228,6 +248,27 @@ func (m Model) reviewChangedLabel(nodeNumbers []int) string {
 	return strings.Join(labels, ", ")
 }
 
+func (m Model) reviewCorrectionLabel(nodeNumbers []int) string {
+	var labels []string
+	showNodeTitle := len(nodeNumbers) > 1
+	for _, nodeNumber := range nodeNumbers {
+		node, err := m.session.NodeByNumber(nodeNumber)
+		if err != nil || node.State != coop.NodeReview {
+			continue
+		}
+		attempt := node.CurrentAttempt()
+		if attempt == nil || strings.TrimSpace(attempt.Feedback) == "" {
+			continue
+		}
+		label := safeEvidenceText(strings.TrimSpace(attempt.Feedback))
+		if showNodeTitle && node.Title != "" {
+			label = node.Title + ": " + label
+		}
+		labels = append(labels, label)
+	}
+	return reviewConfirmationSummary(labels, 2)
+}
+
 func (m Model) reviewVerificationLabel(nodeNumbers []int) string {
 	passed := 0
 	total := 0
@@ -236,7 +277,11 @@ func (m Model) reviewVerificationLabel(nodeNumbers []int) string {
 		if err != nil {
 			continue
 		}
-		for _, v := range node.Verifications {
+		attempt := presentationAttempt(node)
+		if attempt == nil {
+			continue
+		}
+		for _, v := range attempt.AgentChecks {
 			total++
 			if v.Passed {
 				passed++
@@ -250,6 +295,76 @@ func (m Model) reviewVerificationLabel(nodeNumbers []int) string {
 		return fmt.Sprintf("%d check(s) passed", passed)
 	}
 	return fmt.Sprintf("%d/%d check(s) passed", passed, total)
+}
+
+func (m Model) reviewAppLabel(nodeNumbers []int) string {
+	for _, nodeNumber := range nodeNumbers {
+		node, err := m.session.NodeByNumber(nodeNumber)
+		if err != nil {
+			continue
+		}
+		attempt := node.CurrentAttempt()
+		if attempt != nil && attempt.AppSurface != nil && attempt.AppSurface.URL != "" {
+			return attempt.AppSurface.URL
+		}
+	}
+	return ""
+}
+
+func (m Model) reviewAutomaticLabels(nodeNumbers []int) []string {
+	var directPassed, directPending, directUnavailable, observed, observedFailures int
+	for _, nodeNumber := range nodeNumbers {
+		node, err := m.session.NodeByNumber(nodeNumber)
+		if err != nil || node.CurrentAttempt() == nil {
+			continue
+		}
+		for _, result := range node.CurrentAttempt().Results {
+			switch result.Kind {
+			case coop.CheckRequest, coop.CheckEvent:
+				if result.Status == coop.CheckObserved || result.Status == coop.CheckFailed {
+					observed++
+				}
+				if result.Status == coop.CheckFailed {
+					observedFailures++
+				}
+			case coop.CheckResource, coop.CheckState:
+				switch result.Status {
+				case coop.CheckPassed:
+					directPassed++
+				case coop.CheckPending:
+					directPending++
+				case coop.CheckUnavailable:
+					directUnavailable++
+				}
+			case coop.CheckCoverage:
+				if result.Importance == coop.CheckRequired && result.Status == coop.CheckUnavailable {
+					directUnavailable++
+				}
+			}
+		}
+	}
+	var labels []string
+	if directPassed > 0 || directPending > 0 {
+		parts := make([]string, 0, 2)
+		if directPassed > 0 {
+			parts = append(parts, fmt.Sprintf("%d passed", directPassed))
+		}
+		if directPending > 0 {
+			parts = append(parts, fmt.Sprintf("%d pending", directPending))
+		}
+		labels = append(labels, m.theme.MutedStyle.Render("Co-op checked: ")+strings.Join(parts, " · "))
+	}
+	if observed > 0 {
+		text := fmt.Sprintf("%d supporting signal(s)", observed)
+		if observedFailures > 0 {
+			text += fmt.Sprintf(" · %d failed request(s), supporting only", observedFailures)
+		}
+		labels = append(labels, m.theme.MutedStyle.Render("Stripe observed: ")+text)
+	}
+	if directUnavailable > 0 {
+		labels = append(labels, m.theme.AttentionStyle.Render(fmt.Sprintf("Automatic check unavailable: %d", directUnavailable)))
+	}
+	return labels
 }
 
 func (m Model) reviewNodeTitleLabel(nodeNumbers []int) string {
@@ -292,7 +407,11 @@ func (m Model) reviewAgentConfirmationLabel(nodeNumbers []int) string {
 		if err != nil {
 			continue
 		}
-		for _, verification := range node.Verifications {
+		attempt := presentationAttempt(node)
+		if attempt == nil {
+			continue
+		}
+		for _, verification := range attempt.AgentChecks {
 			check := strings.TrimSpace(verification.Check)
 			if !verification.Passed || check == "" || seen[check] {
 				continue

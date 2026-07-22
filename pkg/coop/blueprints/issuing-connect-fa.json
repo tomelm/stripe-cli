@@ -17,7 +17,7 @@
       "required": true,
       "nodes": [
         {
-          "type": "uiComponent",
+          "type": "dashboard",
           "key": "activateProducts",
           "title": "Activate in Dashboard",
           "description": "Activate Issuing and Treasury for platforms from the Dashboard to get API access.",

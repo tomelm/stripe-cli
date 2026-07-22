@@ -132,6 +132,12 @@ func (m Model) ShortHelp() []key.Binding {
 		}
 		bindings = append(bindings, confirm, reject)
 	}
+	_, hasApp := m.selectedAppSurface()
+	if hasApp {
+		openApp := m.keys.OpenClaim
+		openApp.SetHelp("o", "open app")
+		bindings = append(bindings, openApp)
+	}
 
 	bindings = append(bindings, m.keys.Enter, m.keys.Quit)
 
@@ -147,7 +153,7 @@ func (m Model) ShortHelp() []key.Binding {
 		bindings = append(bindings, m.keys.Tab, m.keys.Escape)
 	}
 
-	if m.sandboxClaimLink() != "" {
+	if !hasApp && m.sandboxClaimLink() != "" {
 		bindings = append(bindings, m.keys.OpenClaim)
 	}
 

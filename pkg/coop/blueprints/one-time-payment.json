@@ -66,7 +66,10 @@
           "key": "complete-checkout",
           "title": "Complete checkout",
           "description": "Open the Checkout Session URL to complete the payment.",
-          "review_prompt": "Open the app and confirm the user-facing flow works as described."
+          "review_prompt": "Open the app and confirm the user-facing flow works as described.",
+          "events": [
+            "checkout.session.completed"
+          ]
         }
       ]
     },

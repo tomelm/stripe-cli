@@ -278,6 +278,15 @@ func init() {
 		SandboxClaimURL: func() string {
 			return viper.GetString(Config.Profile.GetConfigField("sandbox_claim_url"))
 		},
+		TestModeAPIKey: func() (string, error) {
+			return Config.Profile.GetAPIKey(false)
+		},
+		AccountID: func() (string, error) {
+			return Config.Profile.GetAccountID()
+		},
+		DeviceName: func() (string, error) {
+			return Config.Profile.GetDeviceName()
+		},
 		AIAgentHelpAnnotationKey: AIAgentHelpAnnotationKey,
 	}))
 	rootCmd.AddCommand(newPluginCmd().cmd)

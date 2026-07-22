@@ -22,7 +22,6 @@ func NewSessionFromGuidedAction(action *GuidedAction, sessionID string, opts Gui
 	settings["guided_action"] = action.ID
 
 	return &Session{
-		SchemaVersion:   CurrentSessionSchemaVersion,
 		ID:              sessionID,
 		Blueprint:       action.Title,
 		Status:          SessionActive,

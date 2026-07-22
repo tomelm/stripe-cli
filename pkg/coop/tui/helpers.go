@@ -26,7 +26,13 @@ func (m Model) sandboxClaimLink() string {
 	if m.session == nil || !m.session.UsedSandbox {
 		return ""
 	}
-	return m.sandboxClaimURL
+	claimURL := m.sandboxClaimURL
+	if m.sandboxClaimURLProvider != nil {
+		if current := strings.TrimSpace(m.sandboxClaimURLProvider()); current != "" {
+			claimURL = current
+		}
+	}
+	return claimURL
 }
 
 func (m Model) contentWidth() int {

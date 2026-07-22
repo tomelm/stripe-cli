@@ -152,12 +152,12 @@ func TestMoveOntoReviewAfterDetailsToggleKeepsChromePinned(t *testing.T) {
 	m.spinner = staticSpinner()
 	m.session.Steps[0].Nodes[1].State = coop.NodeDone
 	m.session.Steps[1].Nodes[0].State = coop.NodeReview
-	m.session.Steps[1].Nodes[0].Implementation = &coop.Implementation{
+	testPresentationAttempt(&m.session.Steps[1].Nodes[0]).Implementation = &coop.Implementation{
 		File:  "server/webhooks/checkout_completed_handler_with_long_name.js",
 		Lines: "12-96",
 	}
 	m.session.Steps[1].Nodes[0].ReviewPrompt = "Confirm the webhook handler verifies the Stripe signature, handles duplicate events, stores the Checkout Session ID, and does not expose secrets in logs."
-	m.session.Steps[1].Nodes[0].Verifications = []coop.Verification{
+	testPresentationAttempt(&m.session.Steps[1].Nodes[0]).AgentChecks = []coop.Verification{
 		{Check: "Verified webhook signature", Passed: true},
 		{Check: "Handled duplicate events", Passed: true},
 		{Check: "Ran stripe trigger checkout.session.completed", Passed: true},
@@ -187,7 +187,7 @@ func attachTestStore(t *testing.T, m Model) Model {
 	t.Helper()
 	store, err := coop.NewStoreAt(t.TempDir())
 	require.NoError(t, err)
-	require.NoError(t, store.Write(m.session))
+	writeTestSession(t, store, m.session)
 	m.store = store
 	return m
 }

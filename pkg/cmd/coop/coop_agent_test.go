@@ -1,9 +1,15 @@
 package coopcmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -11,16 +17,25 @@ import (
 	"github.com/stripe/stripe-cli/pkg/coop"
 )
 
+type requestPerformerFunc func(context.Context, string, string, string, func(*http.Request) error) (*http.Response, error)
+
+func (perform requestPerformerFunc) PerformRequest(
+	ctx context.Context,
+	method, path, body string,
+	configure func(*http.Request) error,
+) (*http.Response, error) {
+	return perform(ctx, method, path, body, configure)
+}
+
 func setupAgentCommandTest(t *testing.T) (*coop.Store, *coop.Session) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	store, err := coop.NewStore(coopConfigFolder())
 	require.NoError(t, err)
 	session := &coop.Session{
-		SchemaVersion: coop.CurrentSessionSchemaVersion,
-		ID:            "agent_test_session",
-		Status:        coop.SessionActive,
-		Settings:      map[string]string{"language": "node"},
+		ID:       "agent_test_session",
+		Status:   coop.SessionActive,
+		Settings: map[string]string{"language": "node"},
 		Steps: []coop.SessionStep{
 			{
 				StepDefinition: coop.StepDefinition{
@@ -42,6 +57,92 @@ func setupAgentCommandTest(t *testing.T) (*coop.Store, *coop.Session) {
 	}
 	require.NoError(t, store.Write(session))
 	return store, session
+}
+
+func TestParseStripeResourceInputsRejectsCredentials(t *testing.T) {
+	for _, credential := range []string{
+		"sk_test_secret", "rk_test_secret", "rkcs_test_secret", "pk_test_secret", "whsec_secret",
+		"ek_test_secret", "ephkey_secret", "sess_secret", "pi_123_secret_abc",
+		"seti_123_SeCrEt_abc", "cs_123_secret_abc", "not-an-id",
+	} {
+		_, err := parseStripeResourceInputs([]string{"customer=" + credential})
+		require.Error(t, err, credential)
+	}
+	resources, err := parseStripeResourceInputs([]string{"customer=cus_secretary123"})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"customer": "cus_secretary123"}, resources)
+}
+
+func TestNewWorkflowServicePinsFirstUsableTestAccount(t *testing.T) {
+	previousOptions := options
+	t.Cleanup(func() { options = previousOptions })
+	configDir := t.TempDir()
+	servedAccount := "acct_first"
+	responseStatus := http.StatusOK
+	client := requestPerformerFunc(func(ctx context.Context, method, path, _ string, configure func(*http.Request) error) (*http.Response, error) {
+		assert.Equal(t, http.MethodGet, method)
+		assert.Equal(t, "/v1/account", path)
+		request := httptest.NewRequest(method, "https://api.stripe.test"+path, nil).WithContext(ctx)
+		require.NoError(t, configure(request))
+		return &http.Response{
+			StatusCode: responseStatus,
+			Body:       io.NopCloser(strings.NewReader(`{"id":"` + servedAccount + `"}`)),
+		}, nil
+	})
+	options = Options{
+		ConfigFolder:   func() string { return configDir },
+		TestModeAPIKey: func() (string, error) { return "sk_test_secret", nil },
+		AccountID:      func() (string, error) { return "acct_first", nil },
+		StripeClient:   client,
+	}
+	store, err := coop.NewStore(configDir)
+	require.NoError(t, err)
+	first := &coop.Session{ID: "first_valid_identity", Status: coop.SessionActive}
+	require.NoError(t, store.Write(first))
+
+	_, err = newWorkflowService(first.ID)
+	require.NoError(t, err)
+	pinned, err := store.Read(first.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "acct_first", pinned.StripeAccountID)
+	assert.Equal(t, 2, pinned.Version)
+
+	servedAccount = "acct_second"
+	options.AccountID = func() (string, error) { return "acct_second", nil }
+	_, err = newWorkflowService(first.ID)
+	require.NoError(t, err)
+	unchanged, err := store.Read(first.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "acct_first", unchanged.StripeAccountID)
+	assert.Equal(t, pinned.Version, unchanged.Version)
+
+	invalid := &coop.Session{ID: "invalid_identity", Status: coop.SessionActive}
+	require.NoError(t, store.Write(invalid))
+	options.TestModeAPIKey = func() (string, error) { return "sk_live_secret", nil }
+	_, err = newWorkflowService(invalid.ID)
+	require.NoError(t, err)
+	stillEmpty, err := store.Read(invalid.ID)
+	require.NoError(t, err)
+	assert.Empty(t, stillEmpty.StripeAccountID)
+
+	retry := &coop.Session{ID: "retry_identity", Status: coop.SessionActive}
+	require.NoError(t, store.Write(retry))
+	options.TestModeAPIKey = func() (string, error) { return "sk_test_secret", nil }
+	options.AccountID = func() (string, error) { return "acct_retry", nil }
+	servedAccount = "acct_retry"
+	responseStatus = http.StatusServiceUnavailable
+	_, err = newWorkflowService(retry.ID)
+	require.NoError(t, err)
+	unpinned, err := store.Read(retry.ID)
+	require.NoError(t, err)
+	assert.Empty(t, unpinned.StripeAccountID)
+
+	responseStatus = http.StatusOK
+	_, err = newWorkflowService(retry.ID)
+	require.NoError(t, err)
+	retried, err := store.Read(retry.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "acct_retry", retried.StripeAccountID)
 }
 
 func TestCoopAgentStartWorkCommand(t *testing.T) {
@@ -68,12 +169,17 @@ func TestCoopAgentStartWorkCommand(t *testing.T) {
 func TestCoopAgentReportCheckCommand(t *testing.T) {
 	store, session := setupAgentCommandTest(t)
 	_, err := store.Update(session.ID, func(session *coop.Session) error {
-		return session.TransitionNode(1, coop.NodeActive)
+		if err := session.TransitionNode(1, coop.NodeActive); err != nil {
+			return err
+		}
+		node, _ := session.NodeByNumber(1)
+		_, err := node.StartAttempt(time.Now().UTC(), "")
+		return err
 	})
 	require.NoError(t, err)
 
 	cmd := newCoopAgentReportCheckCmd().cmd
-	cmd.SetArgs([]string{"--session", session.ID, "--step", "1", "--check", "Manual checkout passed", "--passed"})
+	cmd.SetArgs([]string{"--session", session.ID, "--step", "1", "--attempt", "1", "--check", "Manual checkout passed", "--passed"})
 
 	output := captureStdout(t, func() {
 		require.NoError(t, cmd.Execute())
@@ -87,9 +193,11 @@ func TestCoopAgentReportCheckCommand(t *testing.T) {
 	require.NoError(t, err)
 	node, err := loaded.NodeByNumber(1)
 	require.NoError(t, err)
-	require.Len(t, node.Verifications, 1)
-	assert.Equal(t, "Manual checkout passed", node.Verifications[0].Check)
-	assert.True(t, node.Verifications[0].Passed)
+	attempt := node.CurrentAttempt()
+	require.NotNil(t, attempt)
+	require.Len(t, attempt.AgentChecks, 1)
+	assert.Equal(t, "Manual checkout passed", attempt.AgentChecks[0].Check)
+	assert.True(t, attempt.AgentChecks[0].Passed)
 }
 
 func TestCoopAgentNextActionReturnsStructuredErrorForHelperFailure(t *testing.T) {
@@ -119,11 +227,10 @@ func TestCoopAgentStartFollowupCreatesGuidedSession(t *testing.T) {
 	store, err := coop.NewStore(coopConfigFolder())
 	require.NoError(t, err)
 	parent := &coop.Session{
-		SchemaVersion: coop.CurrentSessionSchemaVersion,
-		ID:            "parent_session",
-		Blueprint:     "one-time-payment",
-		Status:        coop.SessionCompleted,
-		Settings:      map[string]string{"language": "node"},
+		ID:        "parent_session",
+		Blueprint: "one-time-payment",
+		Status:    coop.SessionCompleted,
+		Settings:  map[string]string{"language": "node"},
 		NextSteps: &coop.NextStepsState{
 			Suggestions: []coop.NextStepSuggestion{
 				{ID: "deploy-update", Title: "Deploy your changes"},
@@ -176,9 +283,8 @@ func TestCoopAgentStartFollowupRequiresCompletedParent(t *testing.T) {
 	store, err := coop.NewStore(coopConfigFolder())
 	require.NoError(t, err)
 	parent := &coop.Session{
-		SchemaVersion: coop.CurrentSessionSchemaVersion,
-		ID:            "parent_session",
-		Status:        coop.SessionActive,
+		ID:     "parent_session",
+		Status: coop.SessionActive,
 		NextSteps: &coop.NextStepsState{
 			Suggestions: []coop.NextStepSuggestion{
 				{ID: "deploy", Title: "Deploy with Stripe Projects"},
@@ -209,9 +315,8 @@ func TestCoopAgentStartFollowupRequiresSuggestedAction(t *testing.T) {
 	store, err := coop.NewStore(coopConfigFolder())
 	require.NoError(t, err)
 	parent := &coop.Session{
-		SchemaVersion: coop.CurrentSessionSchemaVersion,
-		ID:            "parent_session",
-		Status:        coop.SessionCompleted,
+		ID:     "parent_session",
+		Status: coop.SessionCompleted,
 		NextSteps: &coop.NextStepsState{
 			Suggestions: []coop.NextStepSuggestion{
 				{ID: "summarize", Title: "Write a STRIPE.md summary"},
@@ -242,9 +347,8 @@ func TestCoopAgentStartFollowupRejectsCompletedAction(t *testing.T) {
 	store, err := coop.NewStore(coopConfigFolder())
 	require.NoError(t, err)
 	parent := &coop.Session{
-		SchemaVersion: coop.CurrentSessionSchemaVersion,
-		ID:            "parent_session",
-		Status:        coop.SessionCompleted,
+		ID:     "parent_session",
+		Status: coop.SessionCompleted,
 		NextSteps: &coop.NextStepsState{
 			Suggestions: []coop.NextStepSuggestion{
 				{ID: "deploy", Title: "Deploy with Stripe Projects"},
@@ -276,9 +380,8 @@ func TestCoopAgentStartFollowupRejectsUnknownAction(t *testing.T) {
 	store, err := coop.NewStore(coopConfigFolder())
 	require.NoError(t, err)
 	parent := &coop.Session{
-		SchemaVersion: coop.CurrentSessionSchemaVersion,
-		ID:            "parent_session",
-		Status:        coop.SessionCompleted,
+		ID:     "parent_session",
+		Status: coop.SessionCompleted,
 	}
 	require.NoError(t, store.Write(parent))
 

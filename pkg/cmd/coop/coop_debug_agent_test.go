@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
+	"github.com/stripe/stripe-cli/pkg/coop/workflow"
 )
 
 const debugAgentTestTimeout = 10 * time.Second
@@ -43,7 +44,7 @@ func TestCoopDebugAgentRerunsRequestedChanges(t *testing.T) {
 			StepDefinition: coop.StepDefinition{Key: "step", Title: "Step"},
 			Nodes: []coop.SessionNode{
 				{
-					NodeDefinition: coop.NodeDefinition{Key: "checkout", Title: "Build Checkout", Type: coop.NodeAPIRequest},
+					NodeDefinition: coop.NodeDefinition{Key: "checkout", Title: "Build Checkout", Type: coop.NodeDashboard},
 					State:          coop.NodePending,
 				},
 			},
@@ -60,24 +61,28 @@ func TestCoopDebugAgentRerunsRequestedChanges(t *testing.T) {
 	})
 	waitForDebugHeartbeat(t, store, session.ID)
 
-	current, err := store.Read(session.ID)
+	service := workflow.NewService(store)
+	reviewed, err := store.Read(session.ID)
 	require.NoError(t, err)
-	require.NoError(t, current.TransitionNode(1, coop.NodeActive))
-	node, _ := current.NodeByNumber(1)
-	node.RejectionNote = "Use the stored price ID"
-	node.Implementation = nil
-	node.Verifications = nil
-	require.NoError(t, store.Write(current))
+	reviewedNode, err := reviewed.NodeByNumber(1)
+	require.NoError(t, err)
+	require.NotNil(t, reviewedNode.CurrentAttempt())
+	_, err = service.RequestChangesAttempts(session.ID, []workflow.AttemptRef{{Node: 1, Attempt: reviewedNode.CurrentAttempt().Number}}, "Use the stored price ID")
+	require.NoError(t, err)
 
 	waitForDebugSession(t, store, session.ID, func(s *coop.Session) bool {
 		node, _ := s.NodeByNumber(1)
-		return node.State == coop.NodeReview && len(node.Verifications) > 0 && node.Implementation != nil
+		attempt := node.CurrentAttempt()
+		return node.State == coop.NodeReview && attempt != nil && len(attempt.AgentChecks) > 0 && attempt.Implementation != nil
 	})
 
-	current, err = store.Read(session.ID)
+	corrected, err := store.Read(session.ID)
 	require.NoError(t, err)
-	require.NoError(t, current.TransitionNode(1, coop.NodeDone))
-	require.NoError(t, store.Write(current))
+	correctedNode, err := corrected.NodeByNumber(1)
+	require.NoError(t, err)
+	require.NotNil(t, correctedNode.CurrentAttempt())
+	_, err = service.ConfirmReviewAttempts(session.ID, []workflow.AttemptRef{{Node: 1, Attempt: correctedNode.CurrentAttempt().Number}}, false, "")
+	require.NoError(t, err)
 
 	require.NoError(t, <-done)
 	finalSession, err := store.Read(session.ID)
@@ -92,11 +97,11 @@ func TestCoopDebugAgentWaitsForStepReviewAfterStepIsReady(t *testing.T) {
 			StepDefinition: coop.StepDefinition{Key: "step", Title: "Step"},
 			Nodes: []coop.SessionNode{
 				{
-					NodeDefinition: coop.NodeDefinition{Key: "product", Title: "Create product", Type: coop.NodeAPIRequest},
+					NodeDefinition: coop.NodeDefinition{Key: "product", Title: "Create product", Type: coop.NodeDashboard},
 					State:          coop.NodePending,
 				},
 				{
-					NodeDefinition: coop.NodeDefinition{Key: "checkout", Title: "Build Checkout", Type: coop.NodeAPIRequest},
+					NodeDefinition: coop.NodeDefinition{Key: "checkout", Title: "Build Checkout", Type: coop.NodeDashboard},
 					State:          coop.NodePending,
 				},
 			},

@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
+	"github.com/stripe/stripe-cli/pkg/coop/workflow"
 )
 
 func readyModel() Model {
@@ -127,7 +128,7 @@ func TestUpdateKeyConfirm(t *testing.T) {
 	m.session.Steps[0].Nodes[0].State = coop.NodeReview
 	m.session.Steps[0].Nodes[1].State = coop.NodeDone
 	m.selectionCursor = 0
-	store.Write(m.session)
+	writeTestSession(t, store, m.session)
 
 	result, _ := m.Update(tea.KeyPressMsg{Code: 'c', Text: "c"})
 	updated := result.(Model)
@@ -145,13 +146,135 @@ func TestUpdateKeyConfirmIgnoresRepeat(t *testing.T) {
 	m.session.Steps[0].Nodes[0].State = coop.NodeReview
 	m.session.Steps[0].Nodes[1].State = coop.NodeDone
 	m.selectionCursor = 0
-	store.Write(m.session)
+	writeTestSession(t, store, m.session)
 
 	result, _ := m.Update(tea.KeyPressMsg{Code: 'c', Text: "c", IsRepeat: true})
 	updated := result.(Model)
 
 	node, _ := updated.session.NodeByNumber(1)
 	assert.Equal(t, coop.NodeReview, node.State)
+}
+
+func TestUpdateKeyOpenAppRecordsWindowBeforeOpening(t *testing.T) {
+	dir := t.TempDir()
+	store, err := coop.NewStoreAt(dir)
+	require.NoError(t, err)
+
+	m := readyModel()
+	m.store = store
+	m.session.ID = "open_app_test"
+	node := &m.session.Steps[0].Nodes[0]
+	node.Type = coop.NodeUIComponent
+	node.State = coop.NodeReview
+	m.session.Steps[0].Nodes[1].State = coop.NodeDone
+	m.selectionCursor = 0
+	attempt, err := node.StartAttempt(time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC), "")
+	require.NoError(t, err)
+	require.NoError(t, node.ReportAttempt(attempt.Number, time.Date(2026, 7, 21, 12, 1, 0, 0, time.UTC), &coop.Implementation{File: "checkout.tsx"}))
+	require.NoError(t, node.SetAppSurface(attempt.Number, coop.AppSurface{URL: "http://localhost:4242/checkout"}))
+	writeTestSession(t, store, m.session)
+
+	var opened string
+	oldOpen := openBrowserFn
+	openBrowserFn = func(appURL string) error {
+		opened = appURL
+		return nil
+	}
+	t.Cleanup(func() { openBrowserFn = oldOpen })
+
+	result, cmd := m.Update(tea.KeyPressMsg{Code: 'o', Text: "o"})
+	updated := result.(Model)
+	require.NotNil(t, cmd)
+	assert.Empty(t, opened, "the OS opener runs only after the session write")
+	stored, err := store.Read(m.session.ID)
+	require.NoError(t, err)
+	storedNode, err := stored.NodeByNumber(1)
+	require.NoError(t, err)
+	require.NotNil(t, storedNode.CurrentAttempt().AppSurface.OpenedAt)
+	require.NotNil(t, updated.session.Steps[0].Nodes[0].CurrentAttempt().AppSurface.OpenedAt)
+
+	assert.Nil(t, cmd())
+	assert.Equal(t, "http://localhost:4242/checkout", opened)
+}
+
+func TestSelectedAppSurfacePrefersSelectedUIWithinStepReview(t *testing.T) {
+	m := testModel()
+	now := time.Now().UTC()
+	step := &m.session.Steps[0]
+	step.Nodes = []coop.SessionNode{
+		{NodeDefinition: coop.NodeDefinition{Key: "preview", Title: "Preview", Type: coop.NodeUIComponent}, State: coop.NodeReview,
+			Attempts: []coop.NodeAttempt{{Number: 1, StartedAt: now, AppSurface: &coop.AppSurface{URL: "http://localhost:3000/preview"}}}},
+		{NodeDefinition: coop.NodeDefinition{Key: "success", Title: "Success", Type: coop.NodeUIComponent}, State: coop.NodeReview,
+			Attempts: []coop.NodeAttempt{{Number: 1, StartedAt: now, AppSurface: &coop.AppSurface{URL: "http://localhost:3000/success"}}}},
+	}
+	m.selectNode(1)
+
+	selection, ok := m.selectedAppSurface()
+
+	assert.True(t, ok)
+	assert.Equal(t, 2, selection.node)
+	assert.Equal(t, 1, selection.attempt)
+	assert.Equal(t, "http://localhost:3000/success", selection.url)
+}
+
+func TestUpdateKeyConfirmUnavailableRequiresTwoExplicitPresses(t *testing.T) {
+	dir := t.TempDir()
+	store, err := coop.NewStoreAt(dir)
+	require.NoError(t, err)
+
+	m := readyModel()
+	m.store = store
+	m.session.ID = "override_test"
+	node := &m.session.Steps[0].Nodes[0]
+	node.Type = coop.NodeUIComponent
+	node.State = coop.NodeReview
+	m.session.Steps[0].Nodes[1].State = coop.NodeDone
+	m.selectionCursor = 0
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	attempt, err := node.StartAttempt(now, "")
+	require.NoError(t, err)
+	require.NoError(t, node.ReportAttempt(attempt.Number, now, &coop.Implementation{File: "checkout.tsx"}))
+	require.NoError(t, node.SetAppSurface(attempt.Number, coop.AppSurface{URL: "http://localhost:4242/checkout", OpenedAt: &now}))
+	require.NoError(t, node.ReconcileAutomaticResults(attempt.Number, now.Add(time.Nanosecond), []coop.CheckResult{{
+		ID: "state.checkout", Kind: coop.CheckState, Importance: coop.CheckRequired,
+		Status: coop.CheckUnavailable, Detail: "Stripe read unavailable", UpdatedAt: now,
+	}}))
+	writeTestSession(t, store, m.session)
+
+	result, _ := m.Update(tea.KeyPressMsg{Code: 'c', Text: "c"})
+	updated := result.(Model)
+	assert.NotEmpty(t, updated.overrideTarget)
+	assert.Contains(t, updated.statusMessage, "Press c again")
+	assert.Equal(t, coop.NodeReview, updated.session.Steps[0].Nodes[0].State)
+
+	result, _ = updated.Update(sessionUpdatedMsg{session: updated.session})
+	updated = result.(Model)
+	assert.Empty(t, updated.overrideTarget, "a session refresh invalidates the override confirmation")
+
+	result, _ = updated.Update(tea.KeyPressMsg{Code: 'c', Text: "c"})
+	updated = result.(Model)
+	assert.NotEmpty(t, updated.overrideTarget)
+	assert.Equal(t, coop.NodeReview, updated.session.Steps[0].Nodes[0].State)
+
+	updated.selectNode(1)
+	updated.selectNode(0)
+	assert.Empty(t, updated.overrideTarget, "navigating invalidates the override confirmation")
+
+	result, _ = updated.Update(tea.KeyPressMsg{Code: 'c', Text: "c"})
+	updated = result.(Model)
+	assert.NotEmpty(t, updated.overrideTarget)
+	assert.Equal(t, coop.NodeReview, updated.session.Steps[0].Nodes[0].State)
+
+	result, _ = updated.Update(tea.KeyPressMsg{Code: 'c', Text: "c"})
+	updated = result.(Model)
+	assert.Empty(t, updated.overrideTarget)
+	assert.Equal(t, coop.NodeDone, updated.session.Steps[0].Nodes[0].State)
+	stored, err := store.Read(m.session.ID)
+	require.NoError(t, err)
+	storedAttempt := presentationAttempt(&stored.Steps[0].Nodes[0])
+	require.NotNil(t, storedAttempt)
+	require.NotNil(t, storedAttempt.Override)
+	assert.Contains(t, storedAttempt.Override.Reason, "visible UI")
 }
 
 func TestViewProgressBarReflectsSessionProgress(t *testing.T) {
@@ -332,9 +455,9 @@ func TestUpdateKeyReject(t *testing.T) {
 	m.store = store
 	m.session.Steps[0].Nodes[0].State = coop.NodeReview
 	m.session.Steps[0].Nodes[1].State = coop.NodeDone
-	m.session.Steps[0].Nodes[0].Implementation = &coop.Implementation{File: "a.js"}
+	testPresentationAttempt(&m.session.Steps[0].Nodes[0]).Implementation = &coop.Implementation{File: "a.js"}
 	m.selectionCursor = 0
-	store.Write(m.session)
+	writeTestSession(t, store, m.session)
 
 	result, _ := m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
 	updated := result.(Model)
@@ -347,7 +470,8 @@ func TestUpdateKeyReject(t *testing.T) {
 
 	node, _ := updated.session.NodeByNumber(1)
 	assert.Equal(t, coop.NodeActive, node.State)
-	assert.Nil(t, node.Implementation)
+	require.NotNil(t, node.CurrentAttempt())
+	assert.Nil(t, node.CurrentAttempt().Implementation)
 	assert.Equal(t, "Needs tests", node.RejectionNote)
 	assert.False(t, updated.rejecting)
 }
@@ -361,7 +485,7 @@ func TestUpdateKeyRejectRequiresNote(t *testing.T) {
 	m.session.Steps[0].Nodes[0].State = coop.NodeReview
 	m.session.Steps[0].Nodes[1].State = coop.NodeDone
 	m.selectionCursor = 0
-	store.Write(m.session)
+	writeTestSession(t, store, m.session)
 
 	result, _ := m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
 	updated := result.(Model)
@@ -372,6 +496,45 @@ func TestUpdateKeyRejectRequiresNote(t *testing.T) {
 	assert.Equal(t, coop.NodeReview, node.State)
 	assert.True(t, updated.rejecting)
 	assert.Contains(t, updated.rejectionError, "short note")
+}
+
+func TestRejectSubmissionFailureStaysInlineAndPreservesNote(t *testing.T) {
+	dir := t.TempDir()
+	store, err := coop.NewStoreAt(dir)
+	require.NoError(t, err)
+
+	m := readyModel()
+	m.store = store
+	m.session.Steps[0].Nodes[0].State = coop.NodeReview
+	m.session.Steps[0].Nodes[1].State = coop.NodeDone
+	testPresentationAttempt(&m.session.Steps[0].Nodes[0]).Implementation = &coop.Implementation{File: "a.js"}
+	m.selectionCursor = 0
+	writeTestSession(t, store, m.session)
+
+	result, _ := m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	updated := result.(Model)
+	result, _ = updated.Update(tea.KeyPressMsg{Code: 'N', Text: "Needs a clearer error state"})
+	updated = result.(Model)
+	staleAttempt := updated.session.Steps[0].Nodes[0].CurrentAttempt().Number
+
+	// Simulate another writer ending the exact attempt shown by the TUI before
+	// the developer submits. The editor should stay usable instead of replacing
+	// the whole application with a terminal error screen.
+	_, err = workflow.NewService(store).RequestChangesAttempts(
+		m.session.ID,
+		[]workflow.AttemptRef{{Node: 1, Attempt: staleAttempt}},
+		"Concurrent feedback",
+	)
+	require.NoError(t, err)
+
+	result, _ = updated.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	updated = result.(Model)
+
+	assert.True(t, updated.rejecting)
+	assert.Nil(t, updated.err)
+	assert.Equal(t, "Needs a clearer error state", updated.rejectionInput.Value())
+	assert.Contains(t, updated.rejectionError, "Could not send feedback")
+	assertContainsPlain(t, updated.View().Content, "Could not send feedback")
 }
 
 func TestRejectingViewSetsRealCursor(t *testing.T) {
@@ -414,7 +577,7 @@ func TestUpdateKeyConfirmStepReview(t *testing.T) {
 	m.session.Steps[0].Nodes[1].State = coop.NodeReview
 	m.selectStep(0)
 	m.userMoved = true
-	store.Write(m.session)
+	writeTestSession(t, store, m.session)
 
 	result, _ := m.Update(tea.KeyPressMsg{Code: 'c', Text: "c"})
 	updated := result.(Model)
@@ -435,7 +598,7 @@ func TestUpdateKeyConfirmStepReviewFromNodeSelection(t *testing.T) {
 	m.session.Steps[0].Nodes[0].State = coop.NodeReview
 	m.session.Steps[0].Nodes[1].State = coop.NodeReview
 	m.selectNode(0)
-	store.Write(m.session)
+	writeTestSession(t, store, m.session)
 
 	result, _ := m.Update(tea.KeyPressMsg{Code: 'c', Text: "c"})
 	updated := result.(Model)
@@ -477,14 +640,14 @@ func TestUpdateKeyRejectStepReview(t *testing.T) {
 	m := readyModel()
 	m.store = store
 	m.session.Steps[0].Nodes[0].State = coop.NodeReview
-	m.session.Steps[0].Nodes[0].Implementation = &coop.Implementation{File: "product.js"}
-	m.session.Steps[0].Nodes[0].Verifications = []coop.Verification{{Check: "product test", Passed: true}}
+	testPresentationAttempt(&m.session.Steps[0].Nodes[0]).Implementation = &coop.Implementation{File: "product.js"}
+	testPresentationAttempt(&m.session.Steps[0].Nodes[0]).AgentChecks = []coop.Verification{{Check: "product test", Passed: true}}
 	m.session.Steps[0].Nodes[1].State = coop.NodeReview
-	m.session.Steps[0].Nodes[1].Implementation = &coop.Implementation{File: "checkout.js"}
-	m.session.Steps[0].Nodes[1].Verifications = []coop.Verification{{Check: "checkout test", Passed: true}}
+	testPresentationAttempt(&m.session.Steps[0].Nodes[1]).Implementation = &coop.Implementation{File: "checkout.js"}
+	testPresentationAttempt(&m.session.Steps[0].Nodes[1]).AgentChecks = []coop.Verification{{Check: "checkout test", Passed: true}}
 	m.selectStep(0)
 	m.userMoved = true
-	store.Write(m.session)
+	writeTestSession(t, store, m.session)
 
 	result, _ := m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
 	updated := result.(Model)
@@ -499,10 +662,12 @@ func TestUpdateKeyRejectStepReview(t *testing.T) {
 	assert.Equal(t, coop.NodeActive, node2.State)
 	assert.Equal(t, "Rework both steps", node1.RejectionNote)
 	assert.Equal(t, "Rework both steps", node2.RejectionNote)
-	assert.Nil(t, node1.Implementation)
-	assert.Nil(t, node2.Implementation)
-	assert.Nil(t, node1.Verifications)
-	assert.Nil(t, node2.Verifications)
+	require.NotNil(t, node1.CurrentAttempt())
+	require.NotNil(t, node2.CurrentAttempt())
+	assert.Nil(t, node1.CurrentAttempt().Implementation)
+	assert.Nil(t, node2.CurrentAttempt().Implementation)
+	assert.Empty(t, node1.CurrentAttempt().AgentChecks)
+	assert.Empty(t, node2.CurrentAttempt().AgentChecks)
 	assert.False(t, updated.rejecting)
 	assert.False(t, updated.userMoved)
 }
@@ -535,7 +700,7 @@ func TestRejectSubmissionCancelsWhenTargetChanges(t *testing.T) {
 	m.session.Steps[0].Nodes[0].State = coop.NodeReview
 	m.session.Steps[0].Nodes[1].State = coop.NodeDone
 	m.selectionCursor = 0
-	store.Write(m.session)
+	writeTestSession(t, store, m.session)
 
 	result, _ := m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
 	updated := result.(Model)
@@ -625,7 +790,7 @@ func TestCheckForUpdatesNoChangeReturnsNoUpdate(t *testing.T) {
 	m := readyModel()
 	m.store = store
 	m.sessionID = m.session.ID
-	require.NoError(t, store.Write(m.session))
+	writeTestSession(t, store, m.session)
 	stored, err := store.Read(m.session.ID)
 	require.NoError(t, err)
 	m.lastVersion = stored.Version
@@ -809,7 +974,7 @@ func TestCompletionEnterSelectsDone(t *testing.T) {
 		}
 	}
 	m.session.ID = "done_selection"
-	store.Write(m.session)
+	writeTestSession(t, store, m.session)
 	// "Finish" is the last suggestion
 	suggestions := m.getCompletionSuggestions()
 	m.selectionCursor = len(suggestions) - 1
@@ -835,7 +1000,7 @@ func TestCompletionEnterWritesSelection(t *testing.T) {
 		}
 	}
 	m.session.ID = "completion_test"
-	store.Write(m.session)
+	writeTestSession(t, store, m.session)
 	m.selectionCursor = 0 // "Write a STRIPE.md summary"
 
 	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -878,7 +1043,7 @@ func TestCompletionEnterDeployWaitsForGuidedFollowupSession(t *testing.T) {
 		}
 	}
 	m.session.ID = "parent_session"
-	store.Write(m.session)
+	writeTestSession(t, store, m.session)
 
 	// Find deploy position in agent-published suggestions
 	suggestions := m.getCompletionSuggestions()
@@ -916,7 +1081,7 @@ func TestSelectCompletionOptionSummarize(t *testing.T) {
 		}
 	}
 	m.session.ID = "test_summarize"
-	store.Write(m.session)
+	writeTestSession(t, store, m.session)
 	m.selectionCursor = 0 // "Write a STRIPE.md summary" is first
 
 	m.selectCompletionOption()

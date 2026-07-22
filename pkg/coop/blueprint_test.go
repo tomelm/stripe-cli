@@ -53,10 +53,8 @@ func TestAllEmbeddedBlueprintsHaveQualityMetadata(t *testing.T) {
 					if n.Description != "" {
 						assertQualityText(t, "node description "+n.Key, n.Description, 20, weakPhrases)
 					}
-					if !n.AutoConfirm {
-						assertQualityText(t, "node review prompt "+n.Key, n.ReviewPrompt, 20, weakPhrases)
-						assertObservableGuidance(t, n.Key, n.ReviewPrompt)
-					}
+					assertQualityText(t, "node review prompt "+n.Key, n.ReviewPrompt, 20, weakPhrases)
+					assertObservableGuidance(t, n.Key, n.ReviewPrompt)
 
 					switch n.Type {
 					case NodeAPIRequest:
@@ -325,16 +323,24 @@ func TestNewSessionFromBlueprintPreservesEvents(t *testing.T) {
 
 	session := NewSessionFromBlueprint(bp, "test_123", nil, nil)
 
-	// Find the asyncHandler node
+	foundUI := false
+	foundHandler := false
 	for _, ch := range session.Steps {
 		for _, n := range ch.Nodes {
-			if n.Type == NodeAsyncHandler {
+			switch n.Key {
+			case "complete-checkout":
+				foundUI = true
+				assert.Equal(t, NodeUIComponent, n.Type)
 				assert.Contains(t, n.Events, "checkout.session.completed")
-				return
+			case "handle-checkout-completed":
+				foundHandler = true
+				assert.Equal(t, NodeAsyncHandler, n.Type)
+				assert.Contains(t, n.Events, "checkout.session.completed")
 			}
 		}
 	}
-	t.Fatal("expected to find asyncHandler node")
+	assert.True(t, foundUI, "expected to find Checkout UI node")
+	assert.True(t, foundHandler, "expected to find future webhook handler node")
 }
 
 func TestEmbeddedBlueprintsUseCanonicalJSON(t *testing.T) {

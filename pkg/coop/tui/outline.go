@@ -174,11 +174,15 @@ func (m Model) collapsedStepSummary(stepIndex int) string {
 	if m.session == nil || stepIndex < 0 || stepIndex >= len(m.session.Steps) {
 		return ""
 	}
-	var done, review, active, pending, skipped int
+	var done, overridden, review, active, pending, skipped int
 	for _, node := range m.session.Steps[stepIndex].Nodes {
 		switch node.State {
 		case coop.NodeDone:
-			done++
+			if completedWithVerificationOverride(&node) {
+				overridden++
+			} else {
+				done++
+			}
 		case coop.NodeReview:
 			review++
 		case coop.NodeActive:
@@ -192,6 +196,9 @@ func (m Model) collapsedStepSummary(stepIndex int) string {
 	var parts []string
 	if done > 0 {
 		parts = append(parts, fmt.Sprintf("✓%d", done))
+	}
+	if overridden > 0 {
+		parts = append(parts, fmt.Sprintf("!%d", overridden))
 	}
 	if review > 0 {
 		parts = append(parts, fmt.Sprintf("◆%d", review))
@@ -238,9 +245,6 @@ func (m Model) stepHasPendingReviewWithNoActiveWork(stepIndex int) bool {
 	}
 	hasReview := false
 	for _, node := range m.session.Steps[stepIndex].Nodes {
-		if node.AutoConfirm {
-			continue
-		}
 		switch node.State {
 		case coop.NodeReview:
 			hasReview = true
@@ -269,11 +273,19 @@ func (m Model) renderNodeLine(node coop.SessionNode, idx int, includedInStepRevi
 
 	var annText string
 	var annStyle func(string) string
+	attempt := presentationAttempt(&node)
 	switch {
-	case node.Implementation != nil && node.Implementation.File != "":
-		ann := node.Implementation.File
-		if node.Implementation.Lines != "" {
-			ann += ":" + node.Implementation.Lines
+	case (node.State == coop.NodeActive || node.State == coop.NodeReview) && attempt != nil && attempt.Feedback != "":
+		label := "Needs correction: "
+		if node.State == coop.NodeReview {
+			label = "Correction addressed: "
+		}
+		annText = label + attempt.Feedback
+		annStyle = func(s string) string { return m.theme.AttentionStyle.Render(s) }
+	case attempt != nil && attempt.Implementation != nil && attempt.Implementation.File != "":
+		ann := attempt.Implementation.File
+		if attempt.Implementation.Lines != "" {
+			ann += ":" + attempt.Implementation.Lines
 		}
 		annText = ann
 		annStyle = func(s string) string { return m.theme.FileAnnotationStyle.Render(s) }
@@ -317,6 +329,15 @@ func (m Model) renderNodeLine(node coop.SessionNode, idx int, includedInStepRevi
 func (m Model) nodeStatusLabel(node coop.SessionNode, includedInStepReview bool) (string, func(string) string) {
 	switch node.State {
 	case coop.NodeDone:
+		if completedWithVerificationOverride(&node) {
+			return "Complete · human override", func(s string) string { return m.theme.AttentionStyle.Render(s) }
+		}
+		if completedWithoutAutomaticVerification(&node) {
+			if completedWithUnavailableVerification(&node) {
+				return "Complete · automatic check unavailable", func(s string) string { return m.theme.AttentionStyle.Render(s) }
+			}
+			return "Complete · agent reported", func(s string) string { return m.theme.MutedStyle.Render(s) }
+		}
 		return "Done", func(s string) string { return m.theme.SuccessStyle.Render(s) }
 	case coop.NodeActive:
 		return "Agent working", func(s string) string { return m.theme.MutedStyle.Render(s) }
@@ -337,6 +358,15 @@ func (m Model) nodeStatusLabel(node coop.SessionNode, includedInStepReview bool)
 func (m Model) nodeIcon(node coop.SessionNode) string {
 	switch node.State {
 	case coop.NodeDone:
+		if completedWithVerificationOverride(&node) {
+			return m.theme.AttentionStyle.Render("!")
+		}
+		if completedWithoutAutomaticVerification(&node) {
+			if !completedWithUnavailableVerification(&node) {
+				return m.theme.MutedStyle.Render("•")
+			}
+			return m.theme.AttentionStyle.Render("!")
+		}
 		return m.theme.SuccessStyle.Render("✓")
 	case coop.NodeActive:
 		return lipgloss.NewStyle().Width(1).Render(m.spinner.View())

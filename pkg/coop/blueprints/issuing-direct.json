@@ -28,7 +28,7 @@
           }
         },
         {
-          "type": "uiComponent",
+          "type": "dashboard",
           "key": "fundInDashboardSandbox",
           "title": "Add funds in Dashboard",
           "description": "After the v2 list step above succeeds, opens the Dashboard Add funds flow for data[0].id (fa_) and your Workbench merchant (acct_).",
@@ -145,7 +145,7 @@
           }
         },
         {
-          "type": "uiComponent",
+          "type": "dashboard",
           "key": "fundFinancialAccountReminder",
           "title": "Fund your Financial Account",
           "description": "Your card is ready. To make purchases, fund your v2 Financial Account from the Dashboard. Open the Add funds flow for the account linked to this card.",

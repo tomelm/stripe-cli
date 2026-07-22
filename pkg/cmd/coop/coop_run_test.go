@@ -12,7 +12,10 @@ import (
 
 func TestNewCoopSessionAppliesSharedMetadata(t *testing.T) {
 	previousOptions := options
-	options = Options{SandboxClaimURL: func() string { return "https://dashboard.stripe.com/sandbox/claim_test" }}
+	options = Options{
+		SandboxClaimURL: func() string { return "https://dashboard.stripe.com/sandbox/claim_test" },
+		AccountID:       func() (string, error) { return "acct_stale_without_reader", nil },
+	}
 	t.Cleanup(func() { options = previousOptions })
 
 	session, err := newCoopSession(
@@ -33,6 +36,7 @@ func TestNewCoopSessionAppliesSharedMetadata(t *testing.T) {
 	assert.Equal(t, "parent_123", session.ParentSessionID)
 	assert.Equal(t, "deploy", session.ParentStepID)
 	assert.True(t, session.UsedSandbox)
+	assert.Empty(t, session.StripeAccountID, "session creation must wait for a usable test reader before pinning")
 	assert.False(t, session.CreatedAt.IsZero())
 }
 
@@ -62,6 +66,15 @@ func TestNewCoopSessionRejectsMalformedKeyValues(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.want)
 		})
 	}
+}
+
+func TestSessionLifecycleInstructionsUseDirectBoundedAwait(t *testing.T) {
+	prompt := sessionLifecycleInstructions("Build the integration.", &coop.Session{ID: "coop_prompt"})
+
+	assert.Contains(t, prompt, "Run the exact await-review command directly as the sole foreground waiter")
+	assert.Contains(t, prompt, "If it returns state=timeout, immediately run its exact next command")
+	assert.NotContains(t, prompt, "shell timeout")
+	assert.NotContains(t, prompt, "5-minute")
 }
 
 func TestCoopRunReturnsStructuredErrorForMalformedSetting(t *testing.T) {

@@ -7,11 +7,16 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/stripe/stripe-cli/pkg/config"
+	"github.com/stripe/stripe-cli/pkg/stripe"
 )
 
 type Options struct {
 	ConfigFolder             func() string
 	SandboxClaimURL          func() string
+	TestModeAPIKey           func() (string, error)
+	AccountID                func() (string, error)
+	DeviceName               func() (string, error)
+	StripeClient             stripe.RequestPerformer
 	AIAgentHelpAnnotationKey string
 }
 
@@ -42,13 +47,16 @@ integrations in real time. The agent writes code and reports progress via CLI
 commands; the developer watches live in a terminal UI.
 
 Start a session with a blueprint, then let the agent work through it step by step.
-The developer confirms each step before the agent moves on.`,
+Co-op directly verifies supported Stripe resources and state. The developer
+reviews app UI and Dashboard-owned work while the agent receives automatic
+findings and exact continuation commands.`,
 		Annotations: map[string]string{
 			annotationKey: `  Workflow: start a session, then use typed agent commands to progress through it.
   1. stripe coop run <blueprint-id> — begin a session
   2. stripe coop agent start-work --session=<id> --step=<n> --note="..." — mark work active
-  3. stripe coop agent report-check --session=<id> --step=<n> --check="..." --passed — add verification
-  4. stripe coop agent report-work --session=<id> --step=<n> --file=... --note="..." — report work complete
+  3. Save the returned attempt number; all later mutations carry --attempt=<number>
+  4. Run the exact returned report-work command, supplying requested Stripe resource IDs and --app-url for UI work
+  5. Follow the JSON decision and exact next command; await-review delivers automatic findings or the human decision
   All commands output JSON with a "next" field suggesting the next command.
   Run "stripe coop recommend --query=..." to discover available blueprints.`,
 		},

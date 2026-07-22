@@ -100,7 +100,6 @@ func newCoopAgentSessionResponse(title string, session *coop.Session, instructio
 				Description:   n.Description,
 				ReviewPrompt:  n.ReviewPrompt,
 				ReviewCommand: n.ReviewCommand,
-				AutoConfirm:   n.AutoConfirm,
 			})
 		}
 	}
@@ -170,7 +169,6 @@ type nodeBrief struct {
 	Description   string `json:"description,omitempty"`
 	ReviewPrompt  string `json:"review_prompt,omitempty"`
 	ReviewCommand string `json:"review_command,omitempty"`
-	AutoConfirm   bool   `json:"auto_confirm,omitempty"`
 }
 
 func agentInstructions(bp *coop.Blueprint, session *coop.Session) string {
@@ -184,7 +182,7 @@ func guidedActionAgentInstructions(action *coop.GuidedAction, session *coop.Sess
 }
 
 func sessionLifecycleInstructions(preamble string, session *coop.Session) string {
-	return fmt.Sprintf(`%s
+	return fmt.Sprintf(`%[1]s
 
 BEFORE YOU START — ensure you have API access:
 1. Run "stripe whoami" to check if you're authenticated.
@@ -204,30 +202,28 @@ If a node includes review_prompt, that is the baseline acceptance check shown to
 
 If a node asks you to understand the project, scan files, identify the tech stack, and summarize what you found. This helps you adapt the remaining nodes to the developer's actual setup. Don't ask the developer questions you can answer by reading the code.
 
-Agent lifecycle commands (use this session id: %s):
-1. stripe coop agent start-work --session=%s --step=<n> --note="<what you're about to do>"
-2. Write the code and run it to verify it works
-3. stripe coop agent report-check --session=%s --step=<n> --check="<what you verified>" --passed
-4. stripe coop agent report-work --session=%s --step=<n> --file=<main file> --lines=<range> --snippet="<key code>" --note="<summary>"
-5. Follow the JSON response's next command. Most nodes continue to the next node in the same step.
-6. Only run stripe coop agent await-review --session=%s --step=<n> when the response says the step is ready for review. Await blocks until the human confirms the step or requests changes.
-7. If confirmed: move to next node. If rejected: redo the affected node (check the message for feedback).
+Agent lifecycle commands (use this session id: %[2]s):
+1. stripe coop agent start-work --session=%[2]s --step=<n> --note="<what you're about to do>"
+2. Save the returned attempt number. Every later command for that work carries --attempt=<number>.
+3. Write the code, run it, and optionally report your own check with: stripe coop agent report-check --session=%[2]s --step=<n> --attempt=<number> --check="<what you verified>" --passed
+4. Run the exact report-work command returned by start-work. It includes required --stripe-resource=<role>=<id> placeholders. For a uiComponent, also provide --app-url=<absolute HTTP(S) URL in the app you built>.
+5. Follow the JSON response's exact next command. Co-op will read supported Stripe resources directly; a request or event observation alone never counts as a pass.
+6. When the response says verification or human review is pending, run stripe coop agent await-review --session=%[2]s --step=<n> --attempt=<number>. It polls bounded direct checks and blocks until Co-op or the developer decides.
+7. If decision=needs_agent, use the expected/observed/repair findings, start the correction attempt named in the response, and report again. Do not ask the developer to relay machine findings.
 8. When the final node is confirmed: IMMEDIATELY run the JSON response's next command. Do not stop or ask. It will return to the parent session for follow-up work or show the developer their options in the TUI.
 
-Steps are the default human-review unit. Build and verify each node one at a time, but do not interrupt the developer for every node. At the end of each step, before running await, help the developer verify the step: run relevant review_command values, start any needed app/server, keep useful processes running, share the local URL or command to open it, create or identify test data, and explain exactly what observable result they should confirm. Add these concrete user-facing checks with stripe coop agent report-check --session=%s --step=<n> --check="..." --passed so the review card has useful evidence.
+Non-UI work completes automatically when all known required direct checks pass. Human review is reserved for real app UI and Dashboard-owned work. For UI work, keep the app/server running at the submitted app URL and explain the visible result. While the developer clicks through it, Co-op continues checking the ordinary Stripe resource and state rules.
 
-The "await" command is critical at step boundaries — it blocks until the developer acts. Do NOT proceed to the next step without running await when the node response tells you the step is ready. Set a 5-minute timeout on the shell command (it will re-prompt you if it times out). If changes are requested, ask the developer what they'd like you to change before redoing the affected node.
-
-Some nodes are marked auto_confirm — these do not require human review. Continue following the next command returned by the CLI.
+The "await" command is the agent notification channel. Do not proceed when the response tells you to await. Run the exact await-review command directly as the sole foreground waiter; do not wrap, background, or duplicate it. Co-op bounds the wait itself. If it returns state=timeout, immediately run its exact next command. A late deterministic failure or human rejection returns actionable feedback directly.
 
 Important:
 - The human is watching your progress live in a terminal UI.
 - Write working code, not stubs. Run it. Verify it actually works.
 - Report what you did concretely (file paths, line numbers, test results).
-- If a node doesn't apply to the user's setup, skip it: stripe coop agent skip --session=%s --step=<n> --note="<reason>"
+- If a node doesn't apply to the user's setup, start it first, then skip its exact attempt: stripe coop agent skip --session=%[2]s --step=<n> --attempt=<number> --note="<reason>"
 - Always install the LATEST version of the Stripe SDK for the language in use. Do not pin to old versions.
   Examples: "npm install stripe@latest", "pip install --upgrade stripe", "gem install stripe"
-  Check https://docs.stripe.com/libraries for current versions if unsure.`, preamble, session.ID, session.ID, session.ID, session.ID, session.ID, session.ID, session.ID)
+  Check https://docs.stripe.com/libraries for current versions if unsure.`, preamble, session.ID)
 }
 
 func outputJSON(v interface{}) error {

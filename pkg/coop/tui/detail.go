@@ -41,6 +41,8 @@ func (m Model) renderDetail() string {
 	case "Checks":
 		m.writeReviewCommandDetail(&md, node)
 		m.writeAsyncHandlerCheckDetail(&md, node)
+		m.writeAutomaticResults(&md, node, "")
+		m.writeVerificationOverrideDetail(&md, node, "")
 		m.writeVerificationDetail(&md, node)
 	case "Reference":
 		m.writeSDKReferenceDetail(&md, node, currentSnippet)
@@ -164,6 +166,26 @@ func (m Model) detailLanguage() string {
 }
 
 func (m Model) writeSummaryDetail(md *strings.Builder, node *coop.SessionNode) {
+	if attempt := presentationAttempt(node); attempt != nil && (node.State == coop.NodeActive || node.State == coop.NodeReview) && attempt.Feedback != "" {
+		label := "Correction requested"
+		if node.State == coop.NodeReview {
+			label = "Correction addressed"
+		}
+		md.WriteString("**" + label + ":** " + safeEvidenceText(attempt.Feedback) + "\n\n")
+	}
+	if completedWithVerificationOverride(node) {
+		md.WriteString("**Verification:** Completed with a human override while required automatic verification was unavailable.\n\n")
+		if reason := strings.TrimSpace(presentationAttempt(node).Override.Reason); reason != "" {
+			md.WriteString("**Override reason:** " + safeEvidenceText(reason) + "\n\n")
+		}
+	}
+	if completedWithoutAutomaticVerification(node) {
+		if completedWithUnavailableVerification(node) {
+			md.WriteString("**Verification:** Completed while a required automatic check was unavailable.\n\n")
+		} else {
+			md.WriteString("**Verification:** Agent reported completion; no direct automatic rule checked this work.\n\n")
+		}
+	}
 	if node.Description != "" {
 		md.WriteString(node.Description + "\n\n")
 	}
@@ -225,10 +247,11 @@ func (m Model) writeStepSummaryDetail(md *strings.Builder, ch *coop.SessionStep,
 func (m Model) writeStepFilesDetail(md *strings.Builder, ch *coop.SessionStep) {
 	wrote := false
 	for _, node := range ch.Nodes {
-		if node.Implementation == nil || node.Implementation.File == "" {
+		attempt := presentationAttempt(&node)
+		if attempt == nil || attempt.Implementation == nil || attempt.Implementation.File == "" {
 			continue
 		}
-		md.WriteString("- `" + implementationFileLabel(node.Implementation) + "` — " + node.Title + "\n")
+		md.WriteString("- `" + implementationFileLabel(attempt.Implementation) + "` — " + node.Title + "\n")
 		wrote = true
 	}
 	if wrote {
@@ -245,12 +268,20 @@ func (m Model) writeStepChecksDetail(md *strings.Builder, ch *coop.SessionStep) 
 			md.WriteString("- " + node.Title + ": " + node.ReviewPrompt + "\n")
 			wrote = true
 		}
-		for _, verification := range node.Verifications {
-			prefix := "✗"
-			if verification.Passed {
-				prefix = "✓"
+		if attempt := presentationAttempt(&node); attempt != nil {
+			for _, verification := range attempt.AgentChecks {
+				prefix := "✗"
+				if verification.Passed {
+					prefix = "✓"
+				}
+				md.WriteString("- " + prefix + " " + node.Title + ": " + verification.Check + "\n")
+				wrote = true
 			}
-			md.WriteString("- " + prefix + " " + node.Title + ": " + verification.Check + "\n")
+		}
+		before := md.Len()
+		m.writeAutomaticResults(md, &node, node.Title+": ")
+		m.writeVerificationOverrideDetail(md, &node, node.Title+": ")
+		if md.Len() > before {
 			wrote = true
 		}
 		if command := reviewCommandForNode(&node); command != "" {
@@ -287,6 +318,15 @@ func (m Model) writeStepReferenceDetail(md *strings.Builder, ch *coop.SessionSte
 func stepNodeStatusLabel(node coop.SessionNode) string {
 	switch node.State {
 	case coop.NodeDone:
+		if completedWithVerificationOverride(&node) {
+			return "!"
+		}
+		if completedWithoutAutomaticVerification(&node) {
+			if !completedWithUnavailableVerification(&node) {
+				return "•"
+			}
+			return "!"
+		}
 		return "✓"
 	case coop.NodeActive:
 		return "●"
@@ -302,8 +342,9 @@ func stepNodeStatusLabel(node coop.SessionNode) string {
 func stepChangedFiles(ch *coop.SessionStep) string {
 	var files []string
 	for _, node := range ch.Nodes {
-		if node.Implementation != nil && node.Implementation.File != "" {
-			files = append(files, implementationFileLabel(node.Implementation))
+		attempt := presentationAttempt(&node)
+		if attempt != nil && attempt.Implementation != nil && attempt.Implementation.File != "" {
+			files = append(files, implementationFileLabel(attempt.Implementation))
 		}
 	}
 	return strings.Join(files, ", ")
@@ -313,7 +354,11 @@ func stepConfirmationNodes(ch *coop.SessionStep) string {
 	var agentChecks []string
 	seenAgentCheck := map[string]bool{}
 	for _, node := range ch.Nodes {
-		for _, verification := range node.Verifications {
+		attempt := presentationAttempt(&node)
+		if attempt == nil {
+			continue
+		}
+		for _, verification := range attempt.AgentChecks {
 			check := strings.TrimSpace(verification.Check)
 			if !verification.Passed || check == "" || seenAgentCheck[check] {
 				continue
@@ -382,13 +427,14 @@ func (m Model) writeSDKReferenceDetail(md *strings.Builder, node *coop.SessionNo
 }
 
 func (m Model) writeImplementationDetail(md *strings.Builder, node *coop.SessionNode, currentSnippet bool) {
-	if node.Implementation == nil {
+	attempt := presentationAttempt(node)
+	if attempt == nil || attempt.Implementation == nil {
 		return
 	}
 	if currentSnippet {
 		md.WriteString("---\n\n")
 	}
-	imp := node.Implementation
+	imp := attempt.Implementation
 	md.WriteString("**Agent wrote:** `" + implementationFileLabel(imp) + "`\n\n")
 	if imp.Snippet != "" {
 		md.WriteString("```" + m.detailLanguage() + "\n")
@@ -411,10 +457,11 @@ func implementationFileLabel(imp *coop.Implementation) string {
 }
 
 func (m Model) writeVerificationDetail(md *strings.Builder, node *coop.SessionNode) {
-	if len(node.Verifications) == 0 {
+	attempt := presentationAttempt(node)
+	if attempt == nil || len(attempt.AgentChecks) == 0 {
 		return
 	}
-	for _, v := range node.Verifications {
+	for _, v := range attempt.AgentChecks {
 		if v.Passed {
 			md.WriteString("- ✓ " + v.Check + "\n")
 		} else {
@@ -422,6 +469,75 @@ func (m Model) writeVerificationDetail(md *strings.Builder, node *coop.SessionNo
 		}
 	}
 	md.WriteString("\n")
+}
+
+func (m Model) writeAutomaticResults(md *strings.Builder, node *coop.SessionNode, prefix string) {
+	if node == nil {
+		return
+	}
+	attempt := presentationAttempt(node)
+	if attempt == nil {
+		return
+	}
+	if len(attempt.Results) == 0 && attempt.Feedback != "" {
+		for index := len(node.Attempts) - 2; index >= 0; index-- {
+			if len(node.Attempts[index].Results) == 0 {
+				continue
+			}
+			attempt = &node.Attempts[index]
+			prefix += "Previous attempt · "
+			break
+		}
+	}
+	for _, result := range attempt.Results {
+		label := "Co-op checked"
+		if result.Kind == coop.CheckRequest || result.Kind == coop.CheckEvent {
+			label = "Stripe observed"
+		} else if result.Status == coop.CheckUnavailable {
+			label = "Automatic check unavailable"
+		}
+		symbol := "↻"
+		switch result.Status {
+		case coop.CheckPassed, coop.CheckObserved:
+			symbol = "✓"
+		case coop.CheckFailed:
+			symbol = "✗"
+		case coop.CheckUnavailable:
+			symbol = "!"
+		}
+		line := "- " + symbol + " " + prefix + label + ": " + safeEvidenceText(result.Detail)
+		if result.Detail == "" {
+			line = "- " + symbol + " " + prefix + label + ": " + safeEvidenceText(result.ID)
+		}
+		if result.Expected != "" || result.Observed != "" {
+			line += " (expected " + safeEvidenceText(result.Expected) + "; observed " + safeEvidenceText(result.Observed) + ")"
+		}
+		if result.Repair != "" && (result.Status == coop.CheckFailed || result.Status == coop.CheckUnavailable) {
+			line += " — " + safeEvidenceText(result.Repair)
+		}
+		md.WriteString(line + "\n")
+	}
+	if len(attempt.Results) > 0 {
+		md.WriteString("\n")
+	}
+}
+
+func (m Model) writeVerificationOverrideDetail(md *strings.Builder, node *coop.SessionNode, prefix string) {
+	if !completedWithVerificationOverride(node) {
+		return
+	}
+	override := presentationAttempt(node).Override
+	line := "- ! " + prefix + "Human override: continued while required automatic verification was unavailable"
+	if reason := strings.TrimSpace(override.Reason); reason != "" {
+		line += " — " + safeEvidenceText(reason)
+	}
+	md.WriteString(line + "\n\n")
+}
+
+func safeEvidenceText(value string) string {
+	value = strings.ReplaceAll(value, "`", "'")
+	value = strings.ReplaceAll(value, "\r", " ")
+	return strings.ReplaceAll(value, "\n", " ")
 }
 
 func (m Model) renderDetailSuffix(node *coop.SessionNode, width int) string {

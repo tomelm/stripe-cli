@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/bubbles/v2/viewport"
 	"charm.land/lipgloss/v2"
@@ -54,8 +55,7 @@ func testModel() Model {
 								ReviewPrompt: "Confirm the saved price ID is reused by Checkout.",
 								Request:      &coop.APIRequest{Path: "/v1/products", Method: "post", Params: map[string]string{"name": "Gold plan"}},
 							},
-							State:          coop.NodeDone,
-							Implementation: &coop.Implementation{File: "server.js", Lines: "5-20", Note: "Created product"}},
+							State: coop.NodeDone},
 						{
 							NodeDefinition: coop.NodeDefinition{
 								Key:     "n2",
@@ -87,7 +87,60 @@ func testModel() Model {
 			},
 		},
 	}
+	testPresentationAttempt(&m.session.Steps[0].Nodes[0]).Implementation = &coop.Implementation{
+		File: "server.js", Lines: "5-20", Note: "Created product",
+	}
 	return m
+}
+
+func testPresentationAttempt(node *coop.SessionNode) *coop.NodeAttempt {
+	if node.State == coop.NodeActive || node.State == coop.NodeReview {
+		if attempt := node.CurrentAttempt(); attempt != nil {
+			return attempt
+		}
+		number := 1
+		var implementation *coop.Implementation
+		var agentChecks []coop.Verification
+		if len(node.Attempts) > 0 {
+			previous := &node.Attempts[len(node.Attempts)-1]
+			number = previous.Number + 1
+			implementation = previous.Implementation
+			agentChecks = append([]coop.Verification(nil), previous.AgentChecks...)
+		}
+		node.Attempts = append(node.Attempts, coop.NodeAttempt{
+			Number: number, StartedAt: time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC),
+			Implementation: implementation, AgentChecks: agentChecks,
+		})
+		return node.CurrentAttempt()
+	}
+	if attempt := presentationAttempt(node); attempt != nil {
+		return attempt
+	}
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	reason := coop.AttemptConfirmed
+	if node.State == coop.NodeSkipped {
+		reason = coop.AttemptSkipped
+	}
+	node.Attempts = append(node.Attempts, coop.NodeAttempt{
+		Number: 1, StartedAt: now, EndedAt: &now, EndReason: reason,
+	})
+	return presentationAttempt(node)
+}
+
+func writeTestSession(t *testing.T, store *coop.Store, session *coop.Session) {
+	t.Helper()
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	for stepIndex := range session.Steps {
+		for nodeIndex := range session.Steps[stepIndex].Nodes {
+			node := &session.Steps[stepIndex].Nodes[nodeIndex]
+			if (node.State != coop.NodeActive && node.State != coop.NodeReview) || node.CurrentAttempt() != nil {
+				continue
+			}
+			_, err := node.StartAttempt(now, node.RejectionNote)
+			require.NoError(t, err)
+		}
+	}
+	require.NoError(t, store.Write(session))
 }
 
 func TestRenderHeader(t *testing.T) {
@@ -107,6 +160,18 @@ func TestRenderHeaderWithClaimURL(t *testing.T) {
 	header := m.renderHeader()
 
 	assertContainsPlain(t, header, "claim_abc")
+}
+
+func TestRenderHeaderDiscoversLateSandboxClaimURL(t *testing.T) {
+	m := testModel()
+	m.session.UsedSandbox = true
+	claimURL := ""
+	WithSandboxClaimURLProvider(func() string { return claimURL })(&m)
+	assertNotContainsPlain(t, m.renderHeader(), "claim_late")
+
+	claimURL = "https://dashboard.stripe.com/sandbox/claim_late"
+
+	assertContainsPlain(t, m.renderHeader(), "claim_late")
 }
 
 func TestRenderStepList(t *testing.T) {
@@ -311,7 +376,7 @@ func TestRenderDetailFitsPaneWithIndent(t *testing.T) {
 	m.detailTab = 1
 	m.session.Steps[0].Nodes[0].State = coop.NodeReview
 	m.session.Steps[0].Nodes[1].State = coop.NodeDone
-	m.session.Steps[0].Nodes[0].Implementation.Snippet = strings.Repeat("const createdCheckoutSessionWithLongIdentifier = await stripe.checkout.sessions.create({ mode: 'payment' })\n", 5)
+	testPresentationAttempt(&m.session.Steps[0].Nodes[0]).Implementation.Snippet = strings.Repeat("const createdCheckoutSessionWithLongIdentifier = await stripe.checkout.sessions.create({ mode: 'payment' })\n", 5)
 
 	detail := m.renderDetail()
 
@@ -374,7 +439,7 @@ func TestRenderReviewCardEvidence(t *testing.T) {
 	m.session.Steps[0].Nodes[0].State = coop.NodeReview
 	m.session.Steps[0].Nodes[1].State = coop.NodeDone
 	m.session.Steps[0].Nodes[0].ReviewPrompt = "Confirm Checkout uses the saved price ID."
-	m.session.Steps[0].Nodes[0].Verifications = []coop.Verification{
+	testPresentationAttempt(&m.session.Steps[0].Nodes[0]).AgentChecks = []coop.Verification{
 		{Check: "Visit http://localhost:3000/checkout, click Pay, and confirm Checkout opens with the saved price.", Passed: true},
 		{Check: "Confirm the failure banner appears for declined cards.", Passed: false},
 	}
@@ -386,7 +451,7 @@ func TestRenderReviewCardEvidence(t *testing.T) {
 	assertNotContainsPlain(t, card, "Review: Create product")
 	assertContainsPlain(t, card, "Agent changed:")
 	assertContainsPlain(t, card, "server.js:5-20")
-	assertContainsPlain(t, card, "Agent verified:")
+	assertContainsPlain(t, card, "Agent reported:")
 	assertContainsPlain(t, card, "1/2 check(s) passed")
 	assertContainsPlain(t, card, "Confirmation steps")
 	assertContainsPlain(t, card, "Visit http://localhost:3000/checkout")
@@ -394,6 +459,66 @@ func TestRenderReviewCardEvidence(t *testing.T) {
 	assertNotContainsPlain(t, card, "declined cards")
 	plain := ansi.Strip(card)
 	assert.Less(t, strings.Index(plain, "Confirmation steps"), strings.Index(plain, "Agent changed:"))
+}
+
+func TestCorrectedReviewShowsWhatTheAgentAddressed(t *testing.T) {
+	tests := []struct {
+		name      string
+		endReason coop.AttemptEndReason
+		feedback  string
+	}{
+		{name: "human feedback", endReason: coop.AttemptHumanChanges, feedback: "Make the payment error state clearer."},
+		{name: "automatic feedback", endReason: coop.AttemptVerificationChanges, feedback: "Checkout mode was subscription; expected payment."},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := testModel()
+			node := &m.session.Steps[0].Nodes[0]
+			node.State = coop.NodeReview
+			m.session.Steps[0].Nodes[1].State = coop.NodeDone
+			now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+			node.Attempts = []coop.NodeAttempt{
+				{Number: 1, StartedAt: now, EndedAt: &now, EndReason: tt.endReason},
+				{Number: 2, StartedAt: now.Add(time.Minute), Feedback: tt.feedback, Implementation: &coop.Implementation{File: "checkout.js"}},
+			}
+			m.selectionCursor = 0
+
+			assertContainsPlain(t, m.renderReviewCard(), "Correction addressed: "+tt.feedback)
+			assertContainsPlain(t, m.renderNodeLine(*node, 0, true, false), "Correction addressed: "+tt.feedback)
+
+			m.expanded = true
+			m.detailTab = 0
+			assertContainsPlain(t, m.renderDetail(), "Correction addressed: "+tt.feedback)
+		})
+	}
+}
+
+func TestRenderReviewCardGroupsAutomaticAndSupportingEvidence(t *testing.T) {
+	m := testModel()
+	node := &m.session.Steps[0].Nodes[0]
+	node.Type = coop.NodeUIComponent
+	node.State = coop.NodeReview
+	m.session.Steps[0].Nodes[1].State = coop.NodeDone
+	m.selectionCursor = 0
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	node.Attempts = []coop.NodeAttempt{{
+		Number: 1, StartedAt: now,
+		AppSurface: &coop.AppSurface{URL: "http://localhost:4242/checkout"},
+		Results: []coop.CheckResult{
+			{ID: "resource.exists", Kind: coop.CheckResource, Importance: coop.CheckRequired, Status: coop.CheckPassed, UpdatedAt: now},
+			{ID: "request.observed", Kind: coop.CheckRequest, Importance: coop.CheckAdvisory, Status: coop.CheckObserved, UpdatedAt: now},
+			{ID: "state.unavailable", Kind: coop.CheckState, Importance: coop.CheckRequired, Status: coop.CheckUnavailable, UpdatedAt: now},
+		},
+	}}
+
+	card := m.renderReviewCard()
+
+	assertContainsPlain(t, card, "Open app:")
+	assertContainsPlain(t, card, "http://localhost:4242/checkout")
+	assertContainsPlain(t, card, "Co-op checked:")
+	assertContainsPlain(t, card, "Stripe observed:")
+	assertContainsPlain(t, card, "Automatic check unavailable:")
 }
 
 func TestRenderReviewCardFallsBackToBlueprintConfirmation(t *testing.T) {
@@ -474,6 +599,58 @@ func TestRenderCompletionView(t *testing.T) {
 	assertContainsPlain(t, view, "STRIPE.md")
 	assertContainsPlain(t, view, "Add another Stripe feature")
 	assertContainsPlain(t, view, "Finish")
+}
+
+func TestCompletionAndOutlineDiscloseUnverifiedWork(t *testing.T) {
+	m := withCompletionSuggestions(testModel())
+	for stepIndex := range m.session.Steps {
+		for nodeIndex := range m.session.Steps[stepIndex].Nodes {
+			node := &m.session.Steps[stepIndex].Nodes[nodeIndex]
+			node.State = coop.NodeDone
+			node.Attempts = []coop.NodeAttempt{{Number: 1, EndReason: coop.AttemptConfirmed}}
+		}
+	}
+	node := &m.session.Steps[0].Nodes[0]
+	node.Attempts[0].EndReason = coop.AttemptCompletedUnverified
+
+	assertContainsPlain(t, m.renderCompletionView(), "1 completed from agent reports without direct automatic checks")
+	assertContainsPlain(t, m.renderNodeLine(*node, 0, false, false), "Complete · agent reported")
+}
+
+func TestOutlineAndDetailDiscloseHumanVerificationOverride(t *testing.T) {
+	m := testModel()
+	node := &m.session.Steps[0].Nodes[0]
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	node.State = coop.NodeDone
+	node.Attempts = []coop.NodeAttempt{{
+		Number:    1,
+		StartedAt: now.Add(-time.Minute),
+		EndedAt:   &now,
+		EndReason: coop.AttemptConfirmed,
+		Override: &coop.VerificationOverride{
+			At:     now,
+			Reason: "Developer confirmed the visible UI despite unavailable automatic verification.",
+		},
+	}}
+
+	line := m.renderNodeLine(*node, 0, false, false)
+	assertContainsPlain(t, line, "!")
+	assertContainsPlain(t, line, "Complete · human override")
+	assert.Equal(t, "!", stepNodeStatusLabel(*node))
+
+	m.collapseStep(0)
+	assertContainsPlain(t, m.collapsedStepSummary(0), "!1")
+	m.expandStep(0)
+	m.selectNode(0)
+	m.expanded = true
+	m.detailTab = 0
+	assertContainsPlain(t, m.renderDetail(), "Completed with a human override")
+	assertContainsPlain(t, m.renderDetail(), "Developer confirmed the visible UI")
+
+	m.detailTab = 2
+	assertContainsPlain(t, m.renderDetail(), "Human override: continued while required automatic")
+	assertContainsPlain(t, m.renderDetail(), "unavailable — Developer confirmed")
+	assertContainsPlain(t, m.renderDetail(), "Developer confirmed the visible UI")
 }
 
 func TestCompletionSummaryBoxUsesSinglePaddingSpace(t *testing.T) {
@@ -718,7 +895,7 @@ func TestReviewCardFitsWithinShortViewport(t *testing.T) {
 	m.session.Steps[0].Nodes[0].State = coop.NodeReview
 	m.session.Steps[0].Nodes[1].State = coop.NodeDone
 	m.session.Steps[0].Nodes[0].ReviewPrompt = "Open the local application, complete the Checkout flow, confirm the redirect lands on the success page, confirm the saved price ID is reused, and confirm no secret keys or generated IDs are committed."
-	m.session.Steps[0].Nodes[0].Verifications = []coop.Verification{
+	testPresentationAttempt(&m.session.Steps[0].Nodes[0]).AgentChecks = []coop.Verification{
 		{Check: "Created product and price", Passed: true},
 		{Check: "Saved price ID for Checkout", Passed: true},
 		{Check: "Ran local Checkout flow", Passed: true},
@@ -744,7 +921,7 @@ func TestReviewCardShowsDetailsHintWhenClipped(t *testing.T) {
 	m.session.Steps[0].Nodes[0].State = coop.NodeReview
 	m.session.Steps[0].Nodes[1].State = coop.NodeDone
 	m.session.Steps[0].Nodes[0].ReviewPrompt = "Confirm the Checkout flow, success page, saved price ID, webhook event handling, and environment variable setup all match the intended integration."
-	m.session.Steps[0].Nodes[0].Verifications = []coop.Verification{
+	testPresentationAttempt(&m.session.Steps[0].Nodes[0]).AgentChecks = []coop.Verification{
 		{Check: "Created product", Passed: true},
 		{Check: "Created price", Passed: true},
 		{Check: "Created Checkout Session", Passed: true},
@@ -766,16 +943,16 @@ func TestReviewCardFitsCoopStartSplitWidth(t *testing.T) {
 	m.viewport = viewport.New(viewport.WithWidth(69), viewport.WithHeight(10))
 	m.session.Steps[0].Nodes[0].State = coop.NodeReview
 	m.session.Steps[0].Nodes[0].ReviewPrompt = "Confirm the product, price, Checkout Session, redirect URL, success page, saved price ID, webhook event handling, and environment variable setup all match the intended integration."
-	m.session.Steps[0].Nodes[0].Implementation = &coop.Implementation{File: "server/routes/payments/checkout/session/handler/with/a/long/path.js", Lines: "42-118"}
-	m.session.Steps[0].Nodes[0].Verifications = []coop.Verification{
+	testPresentationAttempt(&m.session.Steps[0].Nodes[0]).Implementation = &coop.Implementation{File: "server/routes/payments/checkout/session/handler/with/a/long/path.js", Lines: "42-118"}
+	testPresentationAttempt(&m.session.Steps[0].Nodes[0]).AgentChecks = []coop.Verification{
 		{Check: "Created product", Passed: true},
 		{Check: "Created price", Passed: true},
 		{Check: "Created Checkout Session", Passed: true},
 	}
 	m.session.Steps[0].Nodes[1].State = coop.NodeReview
 	m.session.Steps[0].Nodes[1].ReviewPrompt = "Open the app locally, click the Checkout button, complete payment, and confirm the redirect lands on the expected success page without exposing secret keys."
-	m.session.Steps[0].Nodes[1].Implementation = &coop.Implementation{File: "client/src/components/payments/checkout-button-with-long-name.tsx", Lines: "9-88"}
-	m.session.Steps[0].Nodes[1].Verifications = []coop.Verification{
+	testPresentationAttempt(&m.session.Steps[0].Nodes[1]).Implementation = &coop.Implementation{File: "client/src/components/payments/checkout-button-with-long-name.tsx", Lines: "9-88"}
+	testPresentationAttempt(&m.session.Steps[0].Nodes[1]).AgentChecks = []coop.Verification{
 		{Check: "Rendered Checkout button", Passed: true},
 		{Check: "Confirmed redirect", Passed: true},
 	}

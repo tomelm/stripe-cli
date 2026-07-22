@@ -1,11 +1,220 @@
 package coop
 
 import (
+	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestNodeAttemptLifecycleRetainsHistory(t *testing.T) {
+	node := testSessionNode("node", "Node", NodeActive)
+	started := time.Date(2026, time.July, 21, 12, 0, 0, 123, time.FixedZone("offset", -7*60*60))
+
+	first, err := node.StartAttempt(started, " initial work ")
+	require.NoError(t, err)
+	assert.Equal(t, 1, first.Number)
+	assert.Equal(t, "initial work", first.Feedback)
+	assert.Equal(t, time.UTC, first.StartedAt.Location())
+	assert.Same(t, first, node.CurrentAttempt())
+
+	_, err = node.StartAttempt(started.Add(time.Minute), "duplicate")
+	require.ErrorIs(t, err, ErrAttemptAlreadyOpen)
+
+	ended := started.Add(5 * time.Minute)
+	require.NoError(t, node.CloseAttempt(first.Number, ended, AttemptHumanChanges))
+	assert.Nil(t, node.CurrentAttempt())
+	assert.Equal(t, AttemptHumanChanges, node.Attempts[0].EndReason)
+
+	second, err := node.StartAttempt(ended.Add(time.Second), "fixing feedback")
+	require.NoError(t, err)
+	assert.Equal(t, 2, second.Number)
+	assert.Len(t, node.Attempts, 2)
+	assert.Equal(t, "initial work", node.Attempts[0].Feedback)
+	assert.Equal(t, "fixing feedback", node.Attempts[1].Feedback)
+}
+
+func TestEndedAttemptRejectsMutationHelpers(t *testing.T) {
+	node := testSessionNode("node", "Node", NodeActive)
+	now := time.Now().UTC()
+	attempt, err := node.StartAttempt(now, "")
+	require.NoError(t, err)
+	require.NoError(t, node.CloseAttempt(attempt.Number, now.Add(time.Second), AttemptConfirmed))
+
+	result := CheckResult{ID: "exists", Kind: CheckResource, Status: CheckPassed, UpdatedAt: now.Add(2 * time.Second)}
+	require.ErrorIs(t, node.UpsertResult(attempt.Number, result), ErrAttemptEnded)
+	require.ErrorIs(t, node.UpsertResource(attempt.Number, ResourceBinding{
+		Role: "customer", Type: "customer", ID: "cus_123", Source: BindingAgent,
+	}), ErrAttemptEnded)
+	require.ErrorIs(t, node.SetAppSurface(attempt.Number, AppSurface{URL: "http://localhost:3000"}), ErrAttemptEnded)
+	require.ErrorIs(t, node.CloseAttempt(attempt.Number, now.Add(3*time.Second), AttemptConfirmed), ErrAttemptEnded)
+}
+
+func TestUpsertResultIsSourceScopedAndRejectsStaleOrOversizedWrites(t *testing.T) {
+	node := testSessionNode("node", "Node", NodeActive)
+	now := time.Now().UTC()
+	attempt, err := node.StartAttempt(now, "")
+	require.NoError(t, err)
+
+	resource := CheckResult{ID: "request", Kind: CheckResource, Importance: CheckRequired, Status: CheckFailed, Detail: "wrong mode", UpdatedAt: now}
+	request := CheckResult{ID: "request", Kind: CheckRequest, Importance: CheckAdvisory, Status: CheckPassed, UpdatedAt: now}
+	require.NoError(t, node.UpsertResult(attempt.Number, resource))
+	require.NoError(t, node.UpsertResult(attempt.Number, request))
+	require.Len(t, attempt.Results, 2)
+
+	newer := resource
+	newer.Status = CheckPassed
+	newer.UpdatedAt = now.Add(time.Second)
+	require.NoError(t, node.UpsertResult(attempt.Number, newer))
+	assert.Equal(t, CheckPassed, attempt.Results[0].Status)
+	require.ErrorIs(t, node.UpsertResult(attempt.Number, resource), ErrStaleCheckResult)
+
+	oversized := newer
+	oversized.ID = "oversized"
+	oversized.Detail = strings.Repeat("x", MaxCheckResultDetailBytes+1)
+	require.Error(t, node.UpsertResult(attempt.Number, oversized))
+	assert.Len(t, attempt.Results, 2, "invalid writes must not partially update the attempt")
+}
+
+func TestUpsertResultIgnoresAnUnchangedPollTimestamp(t *testing.T) {
+	now := time.Now().UTC()
+	node := testSessionNode("node", "Node", NodeActive)
+	attempt, err := node.StartAttempt(now, "")
+	require.NoError(t, err)
+	result := CheckResult{
+		ID: "state.checkout", Kind: CheckState, Importance: CheckRequired,
+		Status: CheckPending, Detail: "still processing", UpdatedAt: now,
+	}
+	require.NoError(t, node.UpsertResult(attempt.Number, result))
+	result.UpdatedAt = now.Add(time.Minute)
+	require.NoError(t, node.UpsertResult(attempt.Number, result))
+
+	require.Len(t, attempt.Results, 1)
+	assert.Equal(t, now, attempt.Results[0].UpdatedAt)
+}
+
+func TestReconcileAutomaticResultsClearsRecoveredUnavailableAndRetainsEvidence(t *testing.T) {
+	now := time.Now().UTC()
+	node := testSessionNode("node", "Node", NodeActive)
+	attempt, err := node.StartAttempt(now, "")
+	require.NoError(t, err)
+	require.NoError(t, node.UpsertResult(attempt.Number, CheckResult{
+		ID: "automatic.account-scope", Kind: CheckCoverage, Importance: CheckRequired,
+		Status: CheckUnavailable, UpdatedAt: now,
+	}))
+	require.NoError(t, node.UpsertResult(attempt.Number, CheckResult{
+		ID: "event.checkout", Kind: CheckEvent, Importance: CheckAdvisory,
+		Status: CheckObserved, UpdatedAt: now,
+	}))
+	require.NoError(t, node.ReconcileAutomaticResults(attempt.Number, now.Add(time.Second), []CheckResult{{
+		ID: "resource.checkout.exists", Kind: CheckResource, Importance: CheckRequired,
+		Status: CheckPassed,
+	}}))
+
+	require.Len(t, attempt.Results, 2)
+	assert.Equal(t, []CheckKind{CheckEvent, CheckResource}, []CheckKind{attempt.Results[0].Kind, attempt.Results[1].Kind})
+}
+
+func TestReconcileAutomaticResultsEmptySnapshotClearsAutomaticFindings(t *testing.T) {
+	now := time.Now().UTC()
+	node := testSessionNode("node", "Node", NodeActive)
+	attempt, err := node.StartAttempt(now, "")
+	require.NoError(t, err)
+	require.NoError(t, node.ReconcileAutomaticResults(attempt.Number, now.Add(time.Second), []CheckResult{{
+		ID: "automatic.account-scope", Kind: CheckCoverage, Importance: CheckRequired, Status: CheckUnavailable,
+	}}))
+	require.NoError(t, node.UpsertResult(attempt.Number, CheckResult{
+		ID: "event.checkout", Kind: CheckEvent, Importance: CheckAdvisory,
+		Status: CheckObserved, UpdatedAt: now.Add(1500 * time.Millisecond),
+	}))
+
+	require.NoError(t, node.ReconcileAutomaticResults(attempt.Number, now.Add(2*time.Second), nil))
+	require.Len(t, attempt.Results, 1)
+	assert.Equal(t, CheckEvent, attempt.Results[0].Kind)
+	require.NotNil(t, attempt.AutomaticResultsAt)
+	assert.Equal(t, now.Add(2*time.Second), *attempt.AutomaticResultsAt)
+}
+
+func TestReconcileAutomaticResultsRejectsWholeOlderOrEqualSnapshot(t *testing.T) {
+	now := time.Now().UTC()
+	node := testSessionNode("node", "Node", NodeActive)
+	attempt, err := node.StartAttempt(now, "")
+	require.NoError(t, err)
+	newerAt := now.Add(2 * time.Second)
+	require.NoError(t, node.ReconcileAutomaticResults(attempt.Number, newerAt, []CheckResult{{
+		ID: "resource.checkout.exists", Kind: CheckResource, Importance: CheckRequired, Status: CheckPassed,
+	}}))
+
+	stale := []CheckResult{{
+		ID: "automatic.account-scope", Kind: CheckCoverage, Importance: CheckRequired, Status: CheckUnavailable,
+	}}
+	require.ErrorIs(t, node.ReconcileAutomaticResults(attempt.Number, now.Add(time.Second), stale), ErrStaleResultSnapshot)
+	require.ErrorIs(t, node.ReconcileAutomaticResults(attempt.Number, newerAt, stale), ErrStaleResultSnapshot)
+	require.Len(t, attempt.Results, 1)
+	assert.Equal(t, "resource.checkout.exists", attempt.Results[0].ID)
+	assert.Equal(t, CheckPassed, attempt.Results[0].Status)
+	assert.Equal(t, newerAt, *attempt.AutomaticResultsAt)
+}
+
+func TestAttemptResourceAndAppSurfaceUpserts(t *testing.T) {
+	node := testSessionNode("node", "Node", NodeActive)
+	now := time.Now().UTC()
+	attempt, err := node.StartAttempt(now, "")
+	require.NoError(t, err)
+
+	require.NoError(t, node.UpsertResource(attempt.Number, ResourceBinding{
+		Role: "customer", Type: "customer", ID: "cus_candidate", Source: BindingObservedCandidate,
+	}))
+	require.NoError(t, node.UpsertResource(attempt.Number, ResourceBinding{
+		Role: "customer", Type: "customer", ID: "cus_new_candidate", Source: BindingObservedCandidate,
+	}))
+	assert.Equal(t, "cus_new_candidate", attempt.Resources[0].ID)
+	require.NoError(t, node.UpsertResource(attempt.Number, ResourceBinding{
+		Role: "customer", Type: "customer", ID: "cus_observed", Source: BindingObserved,
+	}))
+	assert.Equal(t, BindingObserved, attempt.Resources[0].Source)
+	require.NoError(t, node.UpsertResource(attempt.Number, ResourceBinding{
+		Role: "customer", Type: "customer", ID: "cus_ignored_candidate", Source: BindingObservedCandidate,
+	}))
+	assert.Equal(t, "cus_observed", attempt.Resources[0].ID)
+	require.NoError(t, node.UpsertResource(attempt.Number, ResourceBinding{
+		Role: "customer", Type: "customer", ID: "cus_agent", Source: BindingAgent,
+	}))
+	require.NoError(t, node.UpsertResource(attempt.Number, ResourceBinding{
+		Role: "customer", Type: "customer", ID: "cus_unrelated", Source: BindingObserved,
+	}))
+	require.Len(t, attempt.Resources, 1)
+	assert.Equal(t, "cus_agent", attempt.Resources[0].ID)
+	assert.Equal(t, BindingAgent, attempt.Resources[0].Source)
+
+	for _, secret := range []string{
+		"rkcs_test_secret", "pi_123_secret_abc", "seti_123_SeCrEt_abc", "cs_123_secret_abc",
+		"ek_test_abc", "ephkey_abc", "pk_test_abc", "sess_abc", "sk_test_abc", "whsec_abc",
+	} {
+		require.Error(t, node.UpsertResource(attempt.Number, ResourceBinding{
+			Role: "payment_intent", Type: "payment_intent", ID: secret, Source: BindingAgent,
+		}), secret)
+	}
+	require.NoError(t, node.UpsertResource(attempt.Number, ResourceBinding{
+		Role: " customer ", Type: " customer ", ID: " cus_secretary123 ", Source: BindingAgent,
+	}))
+	assert.Len(t, attempt.Resources, 1, "credentials must never enter append-only attempt history")
+	assert.Equal(t, ResourceBinding{Role: "customer", Type: "customer", ID: "cus_secretary123", Source: BindingAgent}, attempt.Resources[0])
+
+	opened := now.In(time.FixedZone("offset", 2*60*60))
+	require.NoError(t, node.SetAppSurface(attempt.Number, AppSurface{
+		URL: "  http://localhost:3000/checkout  ", OpenedAt: &opened,
+	}))
+	require.NotNil(t, attempt.AppSurface)
+	assert.Equal(t, "http://localhost:3000/checkout", attempt.AppSurface.URL)
+	assert.Equal(t, time.UTC, attempt.AppSurface.OpenedAt.Location())
+
+	_, err = node.AttemptByNumber(99)
+	assert.True(t, errors.Is(err, ErrAttemptNotFound))
+}
 
 func testSessionNode(key, title string, state NodeState) SessionNode {
 	return SessionNode{
@@ -175,7 +384,7 @@ func TestTransitionNodeInvalidPendingToReview(t *testing.T) {
 func TestTransitionNodeActiveToDone(t *testing.T) {
 	s := newTestSession()
 	s.TransitionNode(1, NodeActive)
-	// Can go directly from active to done (--auto-confirm)
+	// Automatic verification can move active work directly to done.
 	err := s.TransitionNode(1, NodeDone)
 	assert.NoError(t, err)
 	node, _ := s.NodeByNumber(1)
@@ -296,27 +505,9 @@ func TestStepReadyForReview(t *testing.T) {
 	assert.False(t, s.StepReadyForReview(0))
 }
 
-func TestStepReadyForReviewIgnoresAutoConfirmNodes(t *testing.T) {
-	s := &Session{
-		Steps: []SessionStep{
-			{Nodes: []SessionNode{
-				testSessionNode("a", "", NodeReview),
-				{
-					NodeDefinition: NodeDefinition{Key: "auto", AutoConfirm: true},
-					State:          NodePending,
-				},
-			}},
-			{Nodes: []SessionNode{
-				{
-					NodeDefinition: NodeDefinition{Key: "only-auto", AutoConfirm: true},
-					State:          NodePending,
-				},
-			}},
-		},
-	}
-
-	assert.True(t, s.StepReadyForReview(0))
-	assert.False(t, s.StepReadyForReview(1))
+func TestStepReadyForReviewRequiresANode(t *testing.T) {
+	s := &Session{Steps: []SessionStep{{}}}
+	assert.False(t, s.StepReadyForReview(0))
 }
 
 func TestStepReviewStateHelpers(t *testing.T) {

@@ -35,11 +35,21 @@ func (m Model) renderCompletionBodyWithLines() completionBody {
 	summary := m.session.NodeSummary()
 	done := summary[coop.NodeDone]
 	total := m.session.TotalNodes()
+	agentReported, unavailable, overrides := completionVerificationCounts(m.session)
 
 	box := m.theme.SuccessStyle.Render(fmt.Sprintf("✓ Integration complete: %s", m.session.Blueprint)) +
-		"\n" + m.theme.MutedStyle.Render(fmt.Sprintf("All %d nodes done.", done))
+		"\n" + m.theme.MutedStyle.Render(fmt.Sprintf("%d nodes complete.", done))
 	if total != done {
 		box += m.theme.MutedStyle.Render(fmt.Sprintf(" (%d skipped)", total-done))
+	}
+	if agentReported > 0 {
+		box += "\n" + m.theme.MutedStyle.Render(fmt.Sprintf("%d completed from agent reports without direct automatic checks.", agentReported))
+	}
+	if unavailable > 0 {
+		box += "\n" + m.theme.AttentionStyle.Render(fmt.Sprintf("%d completed while automatic verification was unavailable.", unavailable))
+	}
+	if overrides > 0 {
+		box += "\n" + m.theme.AttentionStyle.Render(fmt.Sprintf("%d automatic-check override(s) recorded.", overrides))
 	}
 	content := m.theme.DetailBoxStyle.Width(min(w, 70)).Render(box)
 
@@ -97,6 +107,29 @@ func (m Model) renderCompletionBodyWithLines() completionBody {
 	}
 
 	return completionBody{body: content, suggestionLines: suggestionLines}
+}
+
+func completionVerificationCounts(session *coop.Session) (agentReported, unavailable, overrides int) {
+	if session == nil {
+		return 0, 0, 0
+	}
+	for stepIndex := range session.Steps {
+		for nodeIndex := range session.Steps[stepIndex].Nodes {
+			node := &session.Steps[stepIndex].Nodes[nodeIndex]
+			attempt := presentationAttempt(node)
+			if completedWithoutAutomaticVerification(node) {
+				if completedWithUnavailableVerification(node) {
+					unavailable++
+				} else {
+					agentReported++
+				}
+			}
+			if attempt != nil && attempt.Override != nil {
+				overrides++
+			}
+		}
+	}
+	return agentReported, unavailable, overrides
 }
 
 func (m Model) renderCompletionReceipt(width int) string {

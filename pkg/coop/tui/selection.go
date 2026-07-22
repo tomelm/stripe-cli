@@ -96,6 +96,7 @@ func (m *Model) selectNavigationItem(item navigationItem) {
 }
 
 func (m *Model) selectNode(nodeIndex int) {
+	m.clearVerificationOverride()
 	m.selected = navigationItem{kind: navigationNode}
 	m.selectionCursor = nodeIndex
 	if stepIndex, ok := m.stepIndexForNode(nodeIndex); ok {
@@ -104,6 +105,7 @@ func (m *Model) selectNode(nodeIndex int) {
 }
 
 func (m *Model) selectStep(stepIndex int) {
+	m.clearVerificationOverride()
 	m.selected = navigationItem{kind: navigationStep, stepIndex: stepIndex}
 	if nodeIndex := firstNodeIndexInStep(m.session, stepIndex); nodeIndex >= 0 {
 		m.selectionCursor = nodeIndex

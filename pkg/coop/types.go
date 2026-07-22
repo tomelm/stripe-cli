@@ -8,10 +8,6 @@ import "time"
 type NodeState string
 
 const (
-	CurrentSessionSchemaVersion = 2
-)
-
-const (
 	NodePending NodeState = "pending"
 	NodeActive  NodeState = "active"
 	NodeReview  NodeState = "review"
@@ -55,6 +51,128 @@ type Verification struct {
 	Passed bool   `json:"passed"`
 }
 
+// AttemptEndReason records why an immutable node attempt ended.
+type AttemptEndReason string
+
+const (
+	AttemptConfirmed           AttemptEndReason = "confirmed"
+	AttemptHumanChanges        AttemptEndReason = "human_changes"
+	AttemptVerificationChanges AttemptEndReason = "verification_changes"
+	AttemptCompletedUnverified AttemptEndReason = "completed_unverified"
+	AttemptSkipped             AttemptEndReason = "skipped"
+)
+
+// BindingSource records how Co-op learned a Stripe resource identity.
+type BindingSource string
+
+const (
+	BindingObservedCandidate BindingSource = "observed_candidate"
+	BindingObserved          BindingSource = "observed"
+	BindingAgent             BindingSource = "agent"
+)
+
+// ResourceBinding identifies one Stripe resource used by an attempt. Type is
+// the catalog's stable lower-snake name such as "checkout_session"; credentials and
+// resource payloads are never stored here.
+type ResourceBinding struct {
+	Role   string        `json:"role"`
+	Type   string        `json:"type"`
+	ID     string        `json:"id"`
+	Source BindingSource `json:"source"`
+}
+
+// CheckKind identifies the concrete evidence subsystem that produced a
+// result. It is provenance, not workflow policy.
+type CheckKind string
+
+const (
+	CheckResource CheckKind = "resource"
+	CheckState    CheckKind = "state"
+	CheckRequest  CheckKind = "request"
+	CheckEvent    CheckKind = "event"
+	CheckApp      CheckKind = "app"
+	CheckCoverage CheckKind = "coverage"
+)
+
+// CheckImportance is workflow policy metadata. Product-specific rule content
+// lives in the catalog; workflow only distinguishes facts that can block from
+// supporting evidence.
+type CheckImportance string
+
+const (
+	CheckRequired CheckImportance = "required"
+	CheckAdvisory CheckImportance = "advisory"
+)
+
+// CheckStatus is the factual outcome of one independent check. A missing
+// result represents work that is still pending.
+type CheckStatus string
+
+const (
+	CheckPassed      CheckStatus = "passed"
+	CheckFailed      CheckStatus = "failed"
+	CheckPending     CheckStatus = "pending"
+	CheckObserved    CheckStatus = "observed"
+	CheckUnavailable CheckStatus = "unavailable"
+)
+
+// CheckResult is one bounded, evidence-safe result. Workflow policy is
+// derived separately from Kind and Status.
+type CheckResult struct {
+	ID         string          `json:"id"`
+	Kind       CheckKind       `json:"kind"`
+	Importance CheckImportance `json:"importance"`
+	Status     CheckStatus     `json:"status"`
+	Detail     string          `json:"detail,omitempty"`
+	Expected   string          `json:"expected,omitempty"`
+	Observed   string          `json:"observed,omitempty"`
+	Repair     string          `json:"repair,omitempty"`
+	UpdatedAt  time.Time       `json:"updated_at"`
+}
+
+// ResourceRequirement tells the agent which concrete Stripe identity a
+// compiled check needs. The ID itself is supplied later as a ResourceBinding.
+type ResourceRequirement struct {
+	Role     string `json:"role"`
+	Type     string `json:"type"`
+	Required bool   `json:"required"`
+}
+
+// AppSurface is the user-controlled entry point for reviewing built UI. OpenedAt
+// is set by the TUI before it opens URL and defines the observation window;
+// Co-op does not probe the URL for reachability.
+type AppSurface struct {
+	URL      string     `json:"url"`
+	OpenedAt *time.Time `json:"opened_at,omitempty"`
+}
+
+// VerificationOverride records the developer's explicit decision to continue
+// when a required automatic check is unavailable. It is never used for a
+// deterministic failure or a still-pending check.
+type VerificationOverride struct {
+	At     time.Time `json:"at"`
+	Reason string    `json:"reason,omitempty"`
+}
+
+// NodeAttempt is the append-only record of one implementation/review cycle.
+// An attempt remains open through review and becomes immutable once EndedAt
+// is set. SessionNode helpers are the supported mutation boundary.
+type NodeAttempt struct {
+	Number             int                   `json:"number"`
+	StartedAt          time.Time             `json:"started_at"`
+	ReportedAt         *time.Time            `json:"reported_at,omitempty"`
+	EndedAt            *time.Time            `json:"ended_at,omitempty"`
+	EndReason          AttemptEndReason      `json:"end_reason,omitempty"`
+	Feedback           string                `json:"feedback,omitempty"`
+	Implementation     *Implementation       `json:"implementation,omitempty"`
+	AgentChecks        []Verification        `json:"agent_checks,omitempty"`
+	Resources          []ResourceBinding     `json:"resources,omitempty"`
+	Results            []CheckResult         `json:"results,omitempty"`
+	AutomaticResultsAt *time.Time            `json:"automatic_results_at,omitempty"`
+	AppSurface         *AppSurface           `json:"app_surface,omitempty"`
+	Override           *VerificationOverride `json:"verification_override,omitempty"`
+}
+
 // APIRequest describes the expected API call for a node.
 type APIRequest struct {
 	Path         string            `json:"path"`
@@ -78,7 +196,6 @@ type NodeDefinition struct {
 	Description   string              `json:"description,omitempty"`
 	ReviewPrompt  string              `json:"review_prompt,omitempty"`
 	ReviewCommand string              `json:"review_command,omitempty"`
-	AutoConfirm   bool                `json:"auto_confirm,omitempty"`
 	Request       *APIRequest         `json:"request,omitempty"`
 	TestRequests  []TestHelperRequest `json:"requests,omitempty"`
 	Events        []string            `json:"events,omitempty"`
@@ -93,13 +210,12 @@ type StepDefinition struct {
 // SessionNode is a single action within a session step.
 type SessionNode struct {
 	NodeDefinition
-	State          NodeState       `json:"state"`
-	Activity       string          `json:"activity,omitempty"`
-	Implementation *Implementation `json:"implementation,omitempty"`
-	Verifications  []Verification  `json:"verifications,omitempty"`
-	RejectionNote  string          `json:"rejection_note,omitempty"`
-	StartedAt      *time.Time      `json:"started_at,omitempty"`
-	CompletedAt    *time.Time      `json:"completed_at,omitempty"`
+	State         NodeState     `json:"state"`
+	Attempts      []NodeAttempt `json:"attempts,omitempty"`
+	Activity      string        `json:"activity,omitempty"`
+	RejectionNote string        `json:"rejection_note,omitempty"`
+	StartedAt     *time.Time    `json:"started_at,omitempty"`
+	CompletedAt   *time.Time    `json:"completed_at,omitempty"`
 }
 
 // SessionStep groups nodes under a titled step.
@@ -110,9 +226,9 @@ type SessionStep struct {
 
 // Session is the shared state file between agent and TUI.
 type Session struct {
-	SchemaVersion   int               `json:"schema_version"`
 	ID              string            `json:"id"`
 	Blueprint       string            `json:"blueprint"`
+	StripeAccountID string            `json:"stripe_account_id,omitempty"`
 	Status          SessionStatus     `json:"status"`
 	Settings        map[string]string `json:"settings,omitempty"`
 	Params          map[string]string `json:"params,omitempty"`
@@ -143,15 +259,19 @@ type NextStepSuggestion struct {
 
 // CommandResponse is the JSON output format for agent-facing commands.
 type CommandResponse struct {
-	OK          bool        `json:"ok"`
-	SessionID   string      `json:"session_id,omitempty"`
-	Node        int         `json:"node,omitempty"`
-	State       string      `json:"state,omitempty"`
-	Message     string      `json:"message,omitempty"`
-	Next        string      `json:"next,omitempty"`
-	AgentPrompt string      `json:"agent_prompt,omitempty"`
-	APIRequest  *APIRequest `json:"api_request,omitempty"`
-	SDKExample  string      `json:"sdk_example,omitempty"`
-	Error       string      `json:"error,omitempty"`
-	Hint        string      `json:"hint,omitempty"`
+	OK            bool                  `json:"ok"`
+	SessionID     string                `json:"session_id,omitempty"`
+	Node          int                   `json:"node,omitempty"`
+	Attempt       int                   `json:"attempt,omitempty"`
+	State         string                `json:"state,omitempty"`
+	Decision      string                `json:"decision,omitempty"`
+	Message       string                `json:"message,omitempty"`
+	Next          string                `json:"next,omitempty"`
+	AgentPrompt   string                `json:"agent_prompt,omitempty"`
+	APIRequest    *APIRequest           `json:"api_request,omitempty"`
+	SDKExample    string                `json:"sdk_example,omitempty"`
+	ResourceRoles []ResourceRequirement `json:"stripe_resource_roles,omitempty"`
+	Verification  []CheckResult         `json:"verification_results,omitempty"`
+	Error         string                `json:"error,omitempty"`
+	Hint          string                `json:"hint,omitempty"`
 }

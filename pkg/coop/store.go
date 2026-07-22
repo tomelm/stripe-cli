@@ -1,6 +1,7 @@
 package coop
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,11 +21,12 @@ type Store struct {
 }
 
 var (
-	ErrInvalidSessionID = errors.New("invalid session id")
-	ErrSessionNotFound  = errors.New("session not found")
-	ErrVersionConflict  = errors.New("version conflict")
-	ErrLockTimeout      = errors.New("timed out waiting for session lock")
-	ErrCorruptSession   = errors.New("corrupt session")
+	ErrInvalidSessionID  = errors.New("invalid session id")
+	ErrSessionNotFound   = errors.New("session not found")
+	ErrVersionConflict   = errors.New("version conflict")
+	ErrLockTimeout       = errors.New("timed out waiting for session lock")
+	ErrCorruptSession    = errors.New("corrupt session")
+	ErrObserverLeaseHeld = errors.New("session observer lease is already held")
 )
 
 var (
@@ -90,7 +92,6 @@ func (s *Store) writePath(path string, session *Session) error {
 		}
 	}
 
-	ensureSessionSchemaVersion(session)
 	session.UpdatedAt = time.Now().UTC()
 	session.Version++
 
@@ -248,15 +249,7 @@ func (s *Store) Read(id string) (*Session, error) {
 	if err := json.Unmarshal(data, &session); err != nil {
 		return nil, fmt.Errorf("%w: parsing session %q: %v", ErrCorruptSession, id, err)
 	}
-	ensureSessionSchemaVersion(&session)
-
 	return &session, nil
-}
-
-func ensureSessionSchemaVersion(session *Session) {
-	if session.SchemaVersion == 0 {
-		session.SchemaVersion = CurrentSessionSchemaVersion
-	}
 }
 
 func readSessionFile(path string) ([]byte, error) {
@@ -302,7 +295,13 @@ func (s *Store) Update(id string, fn func(*Session) error) (*Session, error) {
 	if err := fn(&session); err != nil {
 		return nil, err
 	}
-	ensureSessionSchemaVersion(&session)
+	updatedData, err := json.MarshalIndent(&session, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshaling session: %w", err)
+	}
+	if bytes.Equal(data, updatedData) {
+		return &session, nil
+	}
 	session.UpdatedAt = time.Now().UTC()
 	session.Version++
 
@@ -310,6 +309,40 @@ func (s *Store) Update(id string, fn func(*Session) error) (*Session, error) {
 		return nil, err
 	}
 	return &session, nil
+}
+
+// PinStripeAccount records the first usable Stripe account identity for an
+// active session. Once present, the pin is immutable: later calls are
+// idempotent even when they carry a different account. Callers can compare the
+// returned session with their current identity and fail closed on a mismatch.
+func (s *Store) PinStripeAccount(id, accountID string) (*Session, error) {
+	accountID = strings.TrimSpace(accountID)
+	if !validSessionStripeAccountID(accountID) {
+		return nil, errors.New("a valid Stripe account ID is required")
+	}
+	return s.Update(id, func(session *Session) error {
+		if session.StripeAccountID != "" {
+			return nil
+		}
+		if session.Status != SessionActive {
+			return fmt.Errorf("session %q is not active", id)
+		}
+		session.StripeAccountID = accountID
+		return nil
+	})
+}
+
+func validSessionStripeAccountID(accountID string) bool {
+	if !strings.HasPrefix(accountID, "acct_") || len(accountID) < 6 || len(accountID) > 128 {
+		return false
+	}
+	for _, character := range accountID {
+		if (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') &&
+			(character < '0' || character > '9') && character != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) writeUnlocked(path string, session *Session) error {
@@ -470,6 +503,45 @@ func (s *Store) Delete(id string) error {
 		return err
 	}
 	return os.Remove(path)
+}
+
+// AcquireObserverLease gives one TUI process ownership of a session's passive
+// streams. A lease abandoned by a dead process is reclaimed on the next join.
+func (s *Store) AcquireObserverLease(id string) (func(), error) {
+	path, err := s.sessionPath(id)
+	if err != nil {
+		return nil, err
+	}
+	leasePath := path + ".observer"
+	for {
+		file, err := os.OpenFile(leasePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err == nil {
+			contents := fmt.Sprintf("%d\n%d\n", os.Getpid(), time.Now().UnixNano())
+			if _, writeErr := file.WriteString(contents); writeErr != nil {
+				_ = file.Close()
+				_ = os.Remove(leasePath)
+				return nil, fmt.Errorf("writing observer lease: %w", writeErr)
+			}
+			if closeErr := file.Close(); closeErr != nil {
+				_ = os.Remove(leasePath)
+				return nil, fmt.Errorf("closing observer lease: %w", closeErr)
+			}
+			return func() {
+				if current, readErr := os.ReadFile(leasePath); readErr == nil && string(current) == contents {
+					_ = os.Remove(leasePath)
+				}
+			}, nil
+		}
+		if !os.IsExist(err) {
+			return nil, fmt.Errorf("creating observer lease: %w", err)
+		}
+		if !s.lockAbandoned(leasePath) {
+			return nil, fmt.Errorf("%w: %s", ErrObserverLeaseHeld, id)
+		}
+		if err := os.Remove(leasePath); err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("reclaiming observer lease: %w", err)
+		}
+	}
 }
 
 func (s *Store) heartbeatPath(id string) (string, error) {

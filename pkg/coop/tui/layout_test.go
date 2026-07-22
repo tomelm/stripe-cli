@@ -24,12 +24,13 @@ type layoutSize struct {
 }
 
 type layoutScenario struct {
-	name             string
-	model            func() Model
-	footerToken      string
-	expectCursor     bool
-	expectReviewCard bool
-	expectCompletion bool
+	name              string
+	model             func() Model
+	footerToken       string
+	expectCursor      bool
+	expectReviewCard  bool
+	expectRejectInput bool
+	expectCompletion  bool
 }
 
 var layoutMatrixSizes = []layoutSize{
@@ -68,11 +69,11 @@ func TestUILayoutMatrix(t *testing.T) {
 			expectReviewCard: true,
 		},
 		{
-			name:             "request_changes_input",
-			model:            requestChangesLayoutModel,
-			footerToken:      "esc cancel",
-			expectCursor:     true,
-			expectReviewCard: true,
+			name:              "request_changes_input",
+			model:             requestChangesLayoutModel,
+			footerToken:       "esc cancel",
+			expectCursor:      true,
+			expectRejectInput: true,
 		},
 		{
 			name:        "manual_navigation",
@@ -109,6 +110,15 @@ func TestUILayoutMatrix(t *testing.T) {
 				if scenario.expectReviewCard {
 					assert.Contains(t, rendered, "Review", "review card should remain visible")
 					assert.LessOrEqual(t, lipgloss.Height(m.renderFooter()), m.footerHeightBudget(), "review footer should stay within its budget")
+				}
+				if scenario.expectRejectInput {
+					assertContainsPlain(t, rendered, "Request changes:")
+					assertContainsPlain(t, rendered, "request.")
+					cursor := m.View().Cursor
+					require.NotNil(t, cursor, "rejection editor should expose a terminal cursor")
+					assert.Less(t, cursor.X, size.width, "rejection cursor should remain onscreen")
+					assert.Less(t, cursor.Y, size.height, "rejection cursor should remain onscreen")
+					assert.LessOrEqual(t, lipgloss.Height(m.renderFooter()), m.footerHeightBudget(), "rejection footer should stay within its budget")
 				}
 				if scenario.expectCompletion {
 					assert.Contains(t, rendered, "Integration complete")
@@ -154,11 +164,11 @@ func TestSessionUpdateResizesAfterAutoSelectingReview(t *testing.T) {
 	m.session.Steps[0].Nodes[1].State = coop.NodeReview
 	m.session.Steps[0].Nodes[1].Title = "Review Checkout Session creation, saved IDs, redirect behavior, and webhook assumptions"
 	m.session.Steps[0].Nodes[1].ReviewPrompt = "Open the local app, start Checkout, inspect the server logs, confirm the saved price ID is reused instead of creating a new Price, confirm the redirect URL is correct, confirm errors are handled without exposing secrets, and confirm the success page reflects the completed payment."
-	m.session.Steps[0].Nodes[1].Implementation = &coop.Implementation{
+	testPresentationAttempt(&m.session.Steps[0].Nodes[1]).Implementation = &coop.Implementation{
 		File:  "server/src/payments/checkout/session/create_checkout_session_handler_with_long_name.ts",
 		Lines: "42-118",
 	}
-	m.session.Steps[0].Nodes[1].Verifications = []coop.Verification{
+	testPresentationAttempt(&m.session.Steps[0].Nodes[1]).AgentChecks = []coop.Verification{
 		{Check: "Created product and price", Passed: true},
 		{Check: "Confirmed Checkout reuses the saved price ID", Passed: true},
 	}
@@ -292,13 +302,13 @@ func reviewStepLongPromptLayoutModel() Model {
 	m.spinner = staticSpinner()
 	m.session.Steps[0].Nodes[0].State = coop.NodeReview
 	m.session.Steps[0].Nodes[1].State = coop.NodeDone
-	m.session.Steps[0].Nodes[0].Implementation = &coop.Implementation{
+	testPresentationAttempt(&m.session.Steps[0].Nodes[0]).Implementation = &coop.Implementation{
 		File:  "server/routes/payments/checkout/session_handler.js",
 		Lines: "42-118",
 		Note:  "Created product and price setup for Checkout.",
 	}
 	m.session.Steps[0].Nodes[0].ReviewPrompt = "Open the local app, complete the Checkout flow, confirm the saved price ID is reused by the Checkout Session, confirm the redirect lands on the success page, and confirm no secret keys are committed."
-	m.session.Steps[0].Nodes[0].Verifications = []coop.Verification{
+	testPresentationAttempt(&m.session.Steps[0].Nodes[0]).AgentChecks = []coop.Verification{
 		{Check: "Created product and price", Passed: true},
 		{Check: "Saved price ID for Checkout", Passed: true},
 		{Check: "Ran local Checkout flow", Passed: true},
@@ -312,12 +322,12 @@ func stepReviewLayoutModel() Model {
 	m.spinner = staticSpinner()
 	m.session.Steps[0].Nodes[0].State = coop.NodeReview
 	m.session.Steps[0].Nodes[0].ReviewPrompt = "Confirm the product and price are created once, persisted for later steps, and reused by the Checkout Session."
-	m.session.Steps[0].Nodes[0].Implementation = &coop.Implementation{File: "server/catalog/stripe_products.js", Lines: "10-84"}
-	m.session.Steps[0].Nodes[0].Verifications = []coop.Verification{{Check: "Created product", Passed: true}, {Check: "Created price", Passed: true}}
+	testPresentationAttempt(&m.session.Steps[0].Nodes[0]).Implementation = &coop.Implementation{File: "server/catalog/stripe_products.js", Lines: "10-84"}
+	testPresentationAttempt(&m.session.Steps[0].Nodes[0]).AgentChecks = []coop.Verification{{Check: "Created product", Passed: true}, {Check: "Created price", Passed: true}}
 	m.session.Steps[0].Nodes[1].State = coop.NodeReview
 	m.session.Steps[0].Nodes[1].ReviewPrompt = "Open the app locally, click the Checkout button, complete payment, and confirm the redirect reaches the expected success page."
-	m.session.Steps[0].Nodes[1].Implementation = &coop.Implementation{File: "client/src/components/CheckoutButton.tsx", Lines: "9-88"}
-	m.session.Steps[0].Nodes[1].Verifications = []coop.Verification{{Check: "Rendered Checkout button", Passed: true}, {Check: "Confirmed redirect", Passed: true}}
+	testPresentationAttempt(&m.session.Steps[0].Nodes[1]).Implementation = &coop.Implementation{File: "client/src/components/CheckoutButton.tsx", Lines: "9-88"}
+	testPresentationAttempt(&m.session.Steps[0].Nodes[1]).AgentChecks = []coop.Verification{{Check: "Rendered Checkout button", Passed: true}, {Check: "Confirmed redirect", Passed: true}}
 	m.selectStep(0)
 	return m
 }
@@ -340,7 +350,7 @@ func expandedDetailsLayoutModel() Model {
 	m := reviewStepLongPromptLayoutModel()
 	m.expanded = true
 	m.detailTab = 1
-	m.session.Steps[0].Nodes[0].Implementation.Snippet = strings.Repeat("const session = await stripe.checkout.sessions.create({ mode: 'payment' })\n", 8)
+	testPresentationAttempt(&m.session.Steps[0].Nodes[0]).Implementation.Snippet = strings.Repeat("const session = await stripe.checkout.sessions.create({ mode: 'payment' })\n", 8)
 	return m
 }
 

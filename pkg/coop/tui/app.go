@@ -9,15 +9,40 @@ import (
 
 type Option func(*Model)
 
+// ObserverController is owned by the TUI lifecycle. Its implementation may
+// adapt Stripe request/event streams, but it cannot render or confirm work.
+type ObserverController interface {
+	Start(sessionID string)
+	Close()
+}
+
 func WithSandboxClaimURL(claimURL string) Option {
 	return func(m *Model) {
 		m.sandboxClaimURL = claimURL
 	}
 }
 
+// WithSandboxClaimURLProvider allows a long-lived TUI to discover a sandbox
+// claim URL that was provisioned after the TUI started.
+func WithSandboxClaimURLProvider(provider func() string) Option {
+	return func(m *Model) {
+		m.sandboxClaimURLProvider = provider
+	}
+}
+
+func WithObserver(observer ObserverController) Option {
+	return func(m *Model) {
+		m.observer = observer
+	}
+}
+
 // Run launches the fullscreen co-op TUI for a known session.
 func Run(store *coop.Store, sessionID string, opts ...Option) error {
 	model := NewModel(store, sessionID, opts...)
+	if model.observer != nil {
+		model.observer.Start(sessionID)
+		defer model.observer.Close()
+	}
 	p := tea.NewProgram(model)
 	_, err := p.Run()
 	return err
@@ -27,6 +52,9 @@ func Run(store *coop.Store, sessionID string, opts ...Option) error {
 // to appear (ignoring the provided existing session IDs) and transitions once found.
 func RunWaiting(store *coop.Store, existingSessionIDs map[string]bool, opts ...Option) error {
 	model := NewWaitingModel(store, existingSessionIDs, opts...)
+	if model.observer != nil {
+		defer model.observer.Close()
+	}
 	p := tea.NewProgram(model)
 	_, err := p.Run()
 	return err
