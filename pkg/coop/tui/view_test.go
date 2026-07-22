@@ -29,6 +29,7 @@ func testModel() Model {
 	m := Model{
 		width:          80,
 		height:         30,
+		sessionID:      "test_123",
 		sdkSnippetNode: -1,
 		rejectionInput: newThemedRejectionInput(theme),
 		keys:           newKeyMap(),

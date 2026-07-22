@@ -212,6 +212,8 @@ Agent lifecycle commands (use this session id: %[2]s):
 7. If decision=needs_agent, use the expected/observed/repair findings, start the correction attempt named in the response, and report again. Do not ask the developer to relay machine findings.
 8. When the final node is confirmed: IMMEDIATELY run the JSON response's next command. Do not stop or ask. It will return to the parent session for follow-up work or show the developer their options in the TUI.
 
+If that final command is next-action, keep it as the sole foreground waiter and remain active until it returns the developer's selection. Do not background it, replace it with status polling, or give your final summary while it is pending. Follow the returned JSON before stopping.
+
 Non-UI work completes automatically when all known required direct checks pass. Human review is reserved for real app UI and Dashboard-owned work. For UI work, keep the app/server running at the submitted app URL and explain the visible result. While the developer clicks through it, Co-op continues checking the ordinary Stripe resource and state rules.
 
 The "await" command is the agent notification channel. Do not proceed when the response tells you to await. Run the exact await-review command directly as the sole foreground waiter; do not wrap, background, or duplicate it. Co-op bounds the wait itself. If it returns state=timeout, immediately run its exact next command. A late deterministic failure or human rejection returns actionable feedback directly.

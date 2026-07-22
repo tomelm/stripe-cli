@@ -73,6 +73,8 @@ func TestSessionLifecycleInstructionsUseDirectBoundedAwait(t *testing.T) {
 
 	assert.Contains(t, prompt, "Run the exact await-review command directly as the sole foreground waiter")
 	assert.Contains(t, prompt, "If it returns state=timeout, immediately run its exact next command")
+	assert.Contains(t, prompt, "If that final command is next-action, keep it as the sole foreground waiter")
+	assert.Contains(t, prompt, "Do not background it")
 	assert.NotContains(t, prompt, "shell timeout")
 	assert.NotContains(t, prompt, "5-minute")
 }

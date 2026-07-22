@@ -142,6 +142,7 @@ func TestCompletionTransitionClearsTransientStatus(t *testing.T) {
 	next.ID = m.session.ID
 	next.Blueprint = m.session.Blueprint
 	next.Settings = m.session.Settings
+	next.Version = m.lastVersion + 1
 
 	updatedModel, _ := m.Update(sessionUpdatedMsg{session: next})
 	updated := updatedModel.(Model)
@@ -172,6 +173,7 @@ func TestSessionUpdateResizesAfterAutoSelectingReview(t *testing.T) {
 		{Check: "Created product and price", Passed: true},
 		{Check: "Confirmed Checkout reuses the saved price ID", Passed: true},
 	}
+	m.session.Version = m.lastVersion + 1
 
 	updatedModel, _ := m.Update(sessionUpdatedMsg{session: m.session})
 	updated := updatedModel.(Model)

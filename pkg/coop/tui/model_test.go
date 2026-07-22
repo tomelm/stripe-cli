@@ -163,6 +163,7 @@ func TestUpdateKeyOpenAppRecordsWindowBeforeOpening(t *testing.T) {
 	m := readyModel()
 	m.store = store
 	m.session.ID = "open_app_test"
+	m.sessionID = m.session.ID
 	node := &m.session.Steps[0].Nodes[0]
 	node.Type = coop.NodeUIComponent
 	node.State = coop.NodeReview
@@ -225,6 +226,7 @@ func TestUpdateKeyConfirmUnavailableRequiresTwoExplicitPresses(t *testing.T) {
 	m := readyModel()
 	m.store = store
 	m.session.ID = "override_test"
+	m.sessionID = m.session.ID
 	node := &m.session.Steps[0].Nodes[0]
 	node.Type = coop.NodeUIComponent
 	node.State = coop.NodeReview
@@ -247,7 +249,9 @@ func TestUpdateKeyConfirmUnavailableRequiresTwoExplicitPresses(t *testing.T) {
 	assert.Contains(t, updated.statusMessage, "Press c again")
 	assert.Equal(t, coop.NodeReview, updated.session.Steps[0].Nodes[0].State)
 
-	result, _ = updated.Update(sessionUpdatedMsg{session: updated.session})
+	refreshed := *updated.session
+	refreshed.Version++
+	result, _ = updated.Update(sessionUpdatedMsg{session: &refreshed})
 	updated = result.(Model)
 	assert.Empty(t, updated.overrideTarget, "a session refresh invalidates the override confirmation")
 
@@ -766,6 +770,61 @@ func TestUpdateSessionUpdated(t *testing.T) {
 	assert.Equal(t, "test_123", updated.session.ID)
 }
 
+func TestUpdateSessionUpdatedIgnoresStaleSameSession(t *testing.T) {
+	m := readyModel()
+	m.session.ID = "test_123"
+	m.session.Version = 3
+	m.lastVersion = 3
+	m.session.Steps[0].Nodes[0].State = coop.NodeDone
+
+	stale := *m.session
+	stale.Version = 2
+	stale.Steps = append([]coop.SessionStep(nil), m.session.Steps...)
+	stale.Steps[0].Nodes = append([]coop.SessionNode(nil), m.session.Steps[0].Nodes...)
+	stale.Steps[0].Nodes[0].State = coop.NodeActive
+
+	result, cmd := m.Update(sessionUpdatedMsg{session: &stale})
+	updated := result.(Model)
+
+	assert.Equal(t, 3, updated.lastVersion)
+	assert.Equal(t, coop.NodeDone, updated.session.Steps[0].Nodes[0].State)
+	assert.Nil(t, cmd)
+}
+
+func TestUpdateSessionUpdatedIgnoresDifferentSession(t *testing.T) {
+	m := readyModel()
+	m.lastVersion = 3
+	other := &coop.Session{ID: "other_session", Version: 4, Status: coop.SessionCompleted}
+
+	result, cmd := m.Update(sessionUpdatedMsg{session: other})
+	updated := result.(Model)
+
+	assert.Equal(t, "test_123", updated.session.ID)
+	assert.Equal(t, 3, updated.lastVersion)
+	assert.Nil(t, cmd)
+}
+
+func TestUpdateSessionUpdatedDoesNotStartAnotherTickChain(t *testing.T) {
+	m := readyModel()
+	m.lastVersion = 1
+	updatedSession := *m.session
+	updatedSession.Version = 2
+
+	_, cmd := m.Update(sessionUpdatedMsg{session: &updatedSession})
+
+	assert.Nil(t, cmd)
+}
+
+func TestUpdateErrorDoesNotStartAnotherTickChain(t *testing.T) {
+	m := readyModel()
+
+	result, cmd := m.Update(errMsg{err: assert.AnError})
+	updated := result.(Model)
+
+	assert.ErrorIs(t, updated.err, assert.AnError)
+	assert.Nil(t, cmd)
+}
+
 func TestUpdateSessionDiscovered(t *testing.T) {
 	dir := t.TempDir()
 	store, _ := coop.NewStoreAt(dir)
@@ -974,6 +1033,7 @@ func TestCompletionEnterSelectsDone(t *testing.T) {
 		}
 	}
 	m.session.ID = "done_selection"
+	m.sessionID = m.session.ID
 	writeTestSession(t, store, m.session)
 	// "Finish" is the last suggestion
 	suggestions := m.getCompletionSuggestions()
@@ -1000,6 +1060,7 @@ func TestCompletionEnterWritesSelection(t *testing.T) {
 		}
 	}
 	m.session.ID = "completion_test"
+	m.sessionID = m.session.ID
 	writeTestSession(t, store, m.session)
 	m.selectionCursor = 0 // "Write a STRIPE.md summary"
 
@@ -1043,6 +1104,7 @@ func TestCompletionEnterDeployWaitsForGuidedFollowupSession(t *testing.T) {
 		}
 	}
 	m.session.ID = "parent_session"
+	m.sessionID = m.session.ID
 	writeTestSession(t, store, m.session)
 
 	// Find deploy position in agent-published suggestions
@@ -1081,6 +1143,7 @@ func TestSelectCompletionOptionSummarize(t *testing.T) {
 		}
 	}
 	m.session.ID = "test_summarize"
+	m.sessionID = m.session.ID
 	writeTestSession(t, store, m.session)
 	m.selectionCursor = 0 // "Write a STRIPE.md summary" is first
 

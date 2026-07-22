@@ -70,8 +70,7 @@ type Model struct {
 	agentIsIdle        bool
 	observer           ObserverController
 
-	isDark  bool
-	focused bool // true when terminal has focus (default: true, updated via FocusMsg/BlurMsg)
+	isDark bool
 }
 
 func newThemedSpinner(t Theme) spinner.Model {
@@ -125,7 +124,6 @@ func NewModel(store *coop.Store, sessionID string, opts ...Option) Model {
 		help:           newThemedHelp(t),
 		theme:          t,
 		isDark:         true,
-		focused:        true,
 		sdkSnippetNode: -1,
 		sdkLoadingNode: -1,
 	}
@@ -147,7 +145,6 @@ func NewWaitingModel(store *coop.Store, existingSessionIDs map[string]bool, opts
 		help:               newThemedHelp(t),
 		theme:              t,
 		isDark:             true,
-		focused:            true,
 		sdkSnippetNode:     -1,
 		sdkLoadingNode:     -1,
 		waiting:            true,
@@ -188,9 +185,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		m.clearExpiredStatus(time.Now())
-		if !m.focused {
-			return m, tickCmd()
-		}
 		return m, tea.Batch(m.checkForUpdates(), tickCmd())
 
 	case noUpdateMsg:
@@ -220,7 +214,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case errMsg:
 		m.err = msg.err
-		return m, tickCmd()
+		return m, nil
 
 	case statusMsg:
 		m.setStatus(msg.message, msg.ttl)
@@ -253,20 +247,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncViewport()
 		return m, nil
 
-	case tea.FocusMsg:
-		m.focused = true
-		return m, nil
-
-	case tea.BlurMsg:
-		m.focused = false
-		return m, nil
-
 	}
 
 	return m, nil
 }
 
 func (m Model) applySessionUpdate(msg sessionUpdatedMsg) (tea.Model, tea.Cmd) {
+	if msg.session == nil || msg.session.ID != m.sessionID {
+		return m, nil
+	}
+	if m.session != nil && msg.session.ID == m.session.ID && msg.session.Version <= m.lastVersion {
+		return m, nil
+	}
 	wasComplete := m.session != nil && m.session.IsComplete()
 	m.clearVerificationOverride()
 	m.session = msg.session
@@ -291,7 +283,7 @@ func (m Model) applySessionUpdate(msg sessionUpdatedMsg) (tea.Model, tea.Cmd) {
 	}
 	m.resizeViewport()
 	m.syncViewport()
-	return m, tickCmd()
+	return m, nil
 }
 
 func (m Model) View() tea.View {
@@ -323,7 +315,6 @@ func (m Model) View() tea.View {
 		}
 		return nil
 	}
-	v.ReportFocus = true
 	v.KeyboardEnhancements.ReportEventTypes = true
 	v.ProgressBar = m.progressBar()
 	v.Cursor = m.rejectionCursor(content)
