@@ -5,7 +5,8 @@
   "description": "Exports Blueprint definitions from pay-server into CLI-friendly JSON",
   "type": "module",
   "scripts": {
-    "export": "tsx export.ts"
+    "export": "tsx export.ts",
+    "test": "node --test export.test.mjs"
   },
   "dependencies": {
     "glob": "^11.0.0",

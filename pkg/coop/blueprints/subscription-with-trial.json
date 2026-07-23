@@ -7,6 +7,36 @@
     "Billing"
   ],
   "settings": null,
+  "lifecycle_facts": [
+    {
+      "id": "customer_identity",
+      "statement": "Stripe Customer IDs are stable identifiers; email addresses are mutable, may be shared, and are not unique identity keys."
+    },
+    {
+      "id": "server_owned_commerce",
+      "statement": "Checkout Session Price, quantity, trial, and mode inputs determine the resulting billing terms."
+    },
+    {
+      "id": "redirect_not_proof",
+      "statement": "A Checkout success redirect is browser navigation, not proof of payment, subscription state, or authorization."
+    },
+    {
+      "id": "webhook_delivery",
+      "statement": "Stripe webhook deliveries are signed and may be retried, duplicated, or arrive out of order; an HTTP 2xx acknowledges delivery."
+    },
+    {
+      "id": "subscription_projection",
+      "statement": "Stripe subscription status and eligibility can change asynchronously after signup through renewals, failures, updates, and cancellation."
+    },
+    {
+      "id": "access_authorization",
+      "statement": "Stripe subscription state describes billing eligibility but does not itself enforce access to application-owned data."
+    },
+    {
+      "id": "reconciliation",
+      "statement": "Retrieving a Stripe subscription returns its current authoritative state independently of whether a webhook delivery was received."
+    }
+  ],
   "steps": [
     {
       "key": "setup-chapter",
@@ -33,7 +63,16 @@
               },
               "name": "Example Product"
             }
-          }
+          },
+          "required_outcomes": [
+            {
+              "id": "server_owned_price",
+              "fact_refs": [
+                "server_owned_commerce"
+              ],
+              "statement": "Create and reuse a server-configured recurring Price; the client cannot select the Price, amount, currency, interval, or trial policy."
+            }
+          ]
         }
       ]
     },
@@ -64,13 +103,40 @@
               },
               "success_url": "https://dashboard.stripe.com/workbench/blueprints/subscription-with-trial/checkout-chapter?confirmation-redirect=create-checkout-session"
             }
-          }
+          },
+          "required_outcomes": [
+            {
+              "id": "persisted_customer_mapping",
+              "fact_refs": [
+                "customer_identity"
+              ],
+              "statement": "Resolve the authenticated principal to one persisted Stripe Customer, creating it retry-safely when absent; do not identify Customers by email alone."
+            },
+            {
+              "id": "trusted_checkout_session",
+              "fact_refs": [
+                "customer_identity",
+                "server_owned_commerce"
+              ],
+              "statement": "When adapting the tutorial request in app code, create Checkout server-side with the mapped Customer, server-owned billing inputs, and app return URLs; persist principal and Session correlation."
+            },
+            {
+              "id": "verified_checkout_return",
+              "fact_refs": [
+                "redirect_not_proof",
+                "customer_identity",
+                "access_authorization"
+              ],
+              "statement": "On app return, send only the Session ID to the server, retrieve and correlate that exact Session, and derive truthful state without granting access from the redirect."
+            }
+          ]
         },
         {
           "type": "uiComponent",
           "key": "complete-checkout",
           "title": "Complete checkout",
           "description": "Open the Checkout Session URL to complete the subscription signup.",
+          "review_prompt": "Open the app, complete test-mode subscription Checkout, and confirm its return page shows a truthful pending or active state; refreshing the return URL must not grant access before server-confirmed eligibility.",
           "events": [
             "checkout.session.completed"
           ]
@@ -89,15 +155,56 @@
           "description": "This event is sent when the customer completes the checkout.",
           "events": [
             "checkout.session.completed"
+          ],
+          "required_outcomes": [
+            {
+              "id": "durable_webhook_acceptance",
+              "fact_refs": [
+                "webhook_delivery",
+                "customer_identity",
+                "subscription_projection"
+              ],
+              "statement": "Verify the signature against the raw request body, durably deduplicate event IDs, correlate the principal, commit state before 2xx, and make retries safe."
+            }
           ]
         },
         {
           "type": "asyncHandler",
           "key": "handle-subscription-created",
-          "title": "Wait for customer.subscription.created event",
-          "description": "This event is sent when the subscription is created",
+          "title": "Handle subscription lifecycle events",
+          "description": "Keep the application's subscription projection current as Stripe state changes.",
           "events": [
-            "customer.subscription.created"
+            "customer.subscription.created",
+            "customer.subscription.updated",
+            "customer.subscription.deleted"
+          ],
+          "required_outcomes": [
+            {
+              "id": "current_subscription_projection",
+              "fact_refs": [
+                "webhook_delivery",
+                "subscription_projection"
+              ],
+              "statement": "Persist IDs, status, timestamps, and event IDs; retrieve current Subscription state before applying a possibly stale event, and apply duplicate deliveries idempotently."
+            },
+            {
+              "id": "server_authorized_access",
+              "fact_refs": [
+                "access_authorization",
+                "subscription_projection",
+                "customer_identity"
+              ],
+              "statement": "Gate protected application data server-side by the authenticated principal's durable subscription projection; revoke access for terminal or ineligible states."
+            },
+            {
+              "id": "bounded_reconciliation",
+              "fact_refs": [
+                "reconciliation",
+                "subscription_projection",
+                "access_authorization"
+              ],
+              "statement": "Run bounded on-demand or scheduled reconciliation from Stripe when local state is missing or stale so missed webhooks do not leave access permanently wrong."
+            }
           ]
         }
       ]

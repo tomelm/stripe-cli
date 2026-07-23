@@ -20,6 +20,76 @@ func TestLoadBlueprint(t *testing.T) {
 	assert.Equal(t, NodeAPIRequest, bp.Steps[0].Nodes[0].Type)
 }
 
+func TestSubscriptionWithTrialPreservesLifecycleContract(t *testing.T) {
+	bp, err := LoadBlueprint("subscription-with-trial")
+	require.NoError(t, err)
+
+	factIDs := make([]string, 0, len(bp.LifecycleFacts))
+	for _, fact := range bp.LifecycleFacts {
+		factIDs = append(factIDs, fact.ID)
+	}
+	assert.Equal(t, []string{
+		"customer_identity",
+		"server_owned_commerce",
+		"redirect_not_proof",
+		"webhook_delivery",
+		"subscription_projection",
+		"access_authorization",
+		"reconciliation",
+	}, factIDs)
+
+	expectedOutcomes := map[string]map[string][]string{
+		"setup-chapter.create-product": {
+			"server_owned_price": {"server_owned_commerce"},
+		},
+		"checkout-chapter.create-checkout-session": {
+			"persisted_customer_mapping": {"customer_identity"},
+			"trusted_checkout_session":   {"customer_identity", "server_owned_commerce"},
+			"verified_checkout_return":   {"redirect_not_proof", "customer_identity", "access_authorization"},
+		},
+		"webhook-chapter.handle-checkout-completed": {
+			"durable_webhook_acceptance": {"webhook_delivery", "customer_identity", "subscription_projection"},
+		},
+		"webhook-chapter.handle-subscription-created": {
+			"current_subscription_projection": {"webhook_delivery", "subscription_projection"},
+			"server_authorized_access":        {"access_authorization", "subscription_projection", "customer_identity"},
+			"bounded_reconciliation":          {"reconciliation", "subscription_projection", "access_authorization"},
+		},
+	}
+
+	actualOutcomes := make(map[string]map[string][]string)
+	var checkoutUI, lifecycleHandler *NodeDefinition
+	for _, step := range bp.Steps {
+		for nodeIndex := range step.Nodes {
+			node := &step.Nodes[nodeIndex]
+			switch step.Key + "." + node.Key {
+			case "checkout-chapter.complete-checkout":
+				checkoutUI = node
+			case "webhook-chapter.handle-subscription-created":
+				lifecycleHandler = node
+			}
+			if len(node.RequiredOutcomes) == 0 {
+				continue
+			}
+			nodeOutcomes := make(map[string][]string, len(node.RequiredOutcomes))
+			for _, outcome := range node.RequiredOutcomes {
+				nodeOutcomes[outcome.ID] = outcome.FactRefs
+			}
+			actualOutcomes[step.Key+"."+node.Key] = nodeOutcomes
+		}
+	}
+	assert.Equal(t, expectedOutcomes, actualOutcomes)
+	require.NotNil(t, checkoutUI)
+	assert.Empty(t, checkoutUI.RequiredOutcomes)
+	assert.Contains(t, checkoutUI.ReviewPrompt, "refreshing the return URL")
+	require.NotNil(t, lifecycleHandler)
+	assert.Equal(t, []string{
+		"customer.subscription.created",
+		"customer.subscription.updated",
+		"customer.subscription.deleted",
+	}, lifecycleHandler.Events)
+}
+
 func TestAllEmbeddedBlueprintsHaveQualityMetadata(t *testing.T) {
 	ids, err := ListBlueprints()
 	require.NoError(t, err)

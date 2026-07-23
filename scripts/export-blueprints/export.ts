@@ -139,6 +139,77 @@ function firstExplicitMessage(node: Record<string, unknown>, ...keys: string[]):
   return '';
 }
 
+function aliasedField(
+  value: Record<string, unknown>,
+  camelKey: string,
+  snakeKey: string,
+  label: string,
+): unknown {
+  const hasCamel = Object.prototype.hasOwnProperty.call(value, camelKey);
+  const hasSnake = Object.prototype.hasOwnProperty.call(value, snakeKey);
+  if (hasCamel && hasSnake) {
+    throw new Error(`${label} declares both "${camelKey}" and "${snakeKey}"`);
+  }
+  if (hasCamel) {
+    return value[camelKey];
+  }
+  if (hasSnake) {
+    return value[snakeKey];
+  }
+  return undefined;
+}
+
+function transformLifecycleFacts(blueprint: Record<string, unknown>): Array<Record<string, unknown>> | undefined {
+  const source = aliasedField(blueprint, 'lifecycleFacts', 'lifecycle_facts', 'blueprint');
+  if (source === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(source)) {
+    throw new Error('blueprint lifecycle facts must be an array');
+  }
+
+  const facts = source.map((value, index) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error(`lifecycle fact ${index} must be an object`);
+    }
+    const fact = value as Record<string, unknown>;
+    return {
+      id: fact.id,
+      statement: resolveMessage(fact.statement),
+    };
+  });
+  return facts.length > 0 ? facts : undefined;
+}
+
+function transformRequiredOutcomes(node: Record<string, unknown>): Array<Record<string, unknown>> | undefined {
+  const source = aliasedField(node, 'requiredOutcomes', 'required_outcomes', `node ${String(node.key)}`);
+  if (source === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(source)) {
+    throw new Error(`node ${String(node.key)} required outcomes must be an array`);
+  }
+
+  const outcomes = source.map((value, index) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error(`node ${String(node.key)} required outcome ${index} must be an object`);
+    }
+    const outcome = value as Record<string, unknown>;
+    const factRefs = aliasedField(
+      outcome,
+      'factRefs',
+      'fact_refs',
+      `node ${String(node.key)} required outcome ${String(outcome.id)}`,
+    );
+    return {
+      id: outcome.id,
+      fact_refs: factRefs,
+      statement: resolveMessage(outcome.statement),
+    };
+  });
+  return outcomes.length > 0 ? outcomes : undefined;
+}
+
 function descriptionFor(type: string, description: string): string {
   if (type === 'testHelper' && description) {
     return `Run this test helper to ${description.charAt(0).toLowerCase()}${description.slice(1)}`;
@@ -271,6 +342,14 @@ function transformNode(node: Record<string, unknown>, apiRequestRefs: Map<string
     }
   }
 
+  // Application outcomes are an upstream-authored public contract. Preserve
+  // them exactly (apart from CLI casing and MessageDescriptor resolution);
+  // never infer them from descriptions, neighboring nodes, or Stripe rules.
+  const requiredOutcomes = transformRequiredOutcomes(node);
+  if (requiredOutcomes) {
+    result.required_outcomes = requiredOutcomes;
+  }
+
   return result;
 }
 
@@ -344,6 +423,10 @@ function transformBlueprint(id: string, blueprint: Record<string, unknown>): Rec
     result.products = products;
   }
   result.settings = null;
+  const lifecycleFacts = transformLifecycleFacts(blueprint);
+  if (lifecycleFacts) {
+    result.lifecycle_facts = lifecycleFacts;
+  }
   result.steps = steps;
 
   return result;
@@ -385,6 +468,7 @@ const jsonFiles = readdirSync(sourceDir).filter(f => {
   return requestedIds.has(basename(f, '.json'));
 });
 if (jsonFiles.length > 0) {
+  let failedFiles = 0;
   console.log(`Found ${jsonFiles.length} JSON files in source, transforming...`);
   for (const file of jsonFiles) {
     try {
@@ -398,8 +482,14 @@ if (jsonFiles.length > 0) {
         console.log(`  ✓ ${id}`);
       }
     } catch (err) {
+      failedFiles++;
       console.error(`  ✗ ${file}: ${(err as Error).message}`);
     }
+  }
+  if (failedFiles > 0) {
+    console.error('');
+    console.error(`Failed to export ${failedFiles} blueprint file(s).`);
+    process.exitCode = 1;
   }
 } else {
   console.error('No matching JSON source files found.');
@@ -409,5 +499,7 @@ if (jsonFiles.length > 0) {
   process.exit(1);
 }
 
-console.log('');
-console.log('Done.');
+if (process.exitCode !== 1) {
+  console.log('');
+  console.log('Done.');
+}

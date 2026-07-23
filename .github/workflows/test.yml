@@ -5,6 +5,22 @@ name: Test
 permissions:
   contents: read
 jobs:
+  blueprint-exporter:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+    - name: Install Node
+      uses: actions/setup-node@v6
+      with:
+        node-version: 24
+    - name: Install blueprint exporter dependencies
+      working-directory: scripts/export-blueprints
+      run: npm install --no-package-lock
+    - name: Test blueprint exporter
+      working-directory: scripts/export-blueprints
+      run: npm test
+
   test:
     strategy:
       matrix:

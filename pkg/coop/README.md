@@ -176,6 +176,7 @@ Use `stripe coop join --resume` to pick from recent sessions.
 Blueprints are embedded JSON in `pkg/coop/blueprints/`. Each has:
 - `id` — unique identifier (also the filename without .json)
 - `title`, `description` — human-readable
+- `lifecycle_facts` — bounded, public Stripe lifecycle facts authored upstream
 - `steps` — ordered groups of nodes
 
 An upstream step may set `required: false` to grant the agent permission to
@@ -193,6 +194,16 @@ Each node has:
 - `request.hidden_params` — request fields that should not be shown directly in the TUI
 - `requests` — API-backed test helper requests for `testHelper` nodes
 - `events` — webhook events consumed by `asyncHandler` nodes or explicitly expected while exercising a `uiComponent`
+- `required_outcomes` — public application behavior required at this node, with `fact_refs` back to top-level lifecycle facts
+
+Required application outcomes guide both the developer and agent; they are not
+hidden app-specific verifiers. Because Stripe resource reads cannot prove
+application-owned persistence, authorization, idempotency, or reconciliation,
+Co-op records these outcomes as required automatic-check-unavailable results
+until a public trusted observation contract exists. An agent's reported check
+remains a claim rather than independent proof. During UI review, account-wide
+observations may trigger an authoritative Stripe reread, but without a unique
+trusted resource binding they cannot produce an attempt-attributed failure.
 
 Verification applicability is derived from this existing blueprint data: requests select resource and bounded evidence rules, indexed `${node...}` references select cataloged relationship predicates, events select state rules, and `uiComponent` selects the app handoff. Reusable Stripe object predicates, related reads, request gates, ID constraints, and repair guidance live in the strictly validated embedded catalog in `checks/catalog.json`; blueprints do not duplicate them in sidecars. Unsupported operations, events, relationships, extra array elements, and runtime-resolved inputs compile to explicit advisory coverage gaps rather than silently disappearing or being treated as passes.
 
@@ -210,6 +221,16 @@ BLUEPRINT_SOURCE=/path/to/pay-server/frontend/workbench/shared/blueprints/src/bl
 
 If pay-server has already exported `dist/blueprints/*.json`, `BLUEPRINT_SOURCE`
 can point at that directory instead.
+
+The `subscription-with-trial` lifecycle contract is an initial vertical slice
+that must be carried upstream before release and before the next canonical
+sync. A corpus test fails if a sync drops it. Its literal Dashboard return URLs are tutorial fixtures; the
+public required outcomes tell application agents to replace them with
+app-owned, server-verified return routes while retaining the declared Stripe
+method, billing values, mode, and resource relationships. Even with that
+contract, the tutorial remains partial until
+Workbench adds cancellation, payment-failure, recovery, and related lifecycle
+operations; the CLI does not invent those missing steps.
 
 After syncing, test with `go run ./cmd/stripe coop run <blueprint-id>`. Prefix matching works: short prefixes resolve to full IDs if unambiguous.
 
