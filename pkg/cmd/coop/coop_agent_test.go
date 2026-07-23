@@ -1,13 +1,8 @@
 package coopcmd
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
-	"io"
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -16,16 +11,6 @@ import (
 
 	"github.com/stripe/stripe-cli/pkg/coop"
 )
-
-type requestPerformerFunc func(context.Context, string, string, string, func(*http.Request) error) (*http.Response, error)
-
-func (perform requestPerformerFunc) PerformRequest(
-	ctx context.Context,
-	method, path, body string,
-	configure func(*http.Request) error,
-) (*http.Response, error) {
-	return perform(ctx, method, path, body, configure)
-}
 
 func setupAgentCommandTest(t *testing.T) (*coop.Store, *coop.Session) {
 	t.Helper()
@@ -73,76 +58,34 @@ func TestParseStripeResourceInputsRejectsCredentials(t *testing.T) {
 	assert.Equal(t, map[string]string{"customer": "cus_secretary123"}, resources)
 }
 
-func TestNewWorkflowServicePinsFirstUsableTestAccount(t *testing.T) {
+func TestNewAgentWorkflowServiceDoesNotReadCredentialsOrPinAccount(t *testing.T) {
 	previousOptions := options
 	t.Cleanup(func() { options = previousOptions })
 	configDir := t.TempDir()
-	servedAccount := "acct_first"
-	responseStatus := http.StatusOK
-	client := requestPerformerFunc(func(ctx context.Context, method, path, _ string, configure func(*http.Request) error) (*http.Response, error) {
-		assert.Equal(t, http.MethodGet, method)
-		assert.Equal(t, "/v1/account", path)
-		request := httptest.NewRequest(method, "https://api.stripe.test"+path, nil).WithContext(ctx)
-		require.NoError(t, configure(request))
-		return &http.Response{
-			StatusCode: responseStatus,
-			Body:       io.NopCloser(strings.NewReader(`{"id":"` + servedAccount + `"}`)),
-		}, nil
-	})
+	credentialReads := 0
 	options = Options{
-		ConfigFolder:   func() string { return configDir },
-		TestModeAPIKey: func() (string, error) { return "sk_test_secret", nil },
-		AccountID:      func() (string, error) { return "acct_first", nil },
-		StripeClient:   client,
+		ConfigFolder: func() string { return configDir },
+		TestModeAPIKey: func() (string, error) {
+			credentialReads++
+			return "", errors.New("agent commands must not read Stripe credentials")
+		},
+		AccountID: func() (string, error) {
+			credentialReads++
+			return "", errors.New("agent commands must not read Stripe account identity")
+		},
 	}
 	store, err := coop.NewStore(configDir)
 	require.NoError(t, err)
-	first := &coop.Session{ID: "first_valid_identity", Status: coop.SessionActive}
-	require.NoError(t, store.Write(first))
+	session := &coop.Session{ID: "agent_submission_only", Status: coop.SessionActive}
+	require.NoError(t, store.Write(session))
 
-	_, err = newWorkflowService(first.ID)
+	_, err = newAgentWorkflowService(session.ID)
 	require.NoError(t, err)
-	pinned, err := store.Read(first.ID)
+	unchanged, err := store.Read(session.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "acct_first", pinned.StripeAccountID)
-	assert.Equal(t, 2, pinned.Version)
-
-	servedAccount = "acct_second"
-	options.AccountID = func() (string, error) { return "acct_second", nil }
-	_, err = newWorkflowService(first.ID)
-	require.NoError(t, err)
-	unchanged, err := store.Read(first.ID)
-	require.NoError(t, err)
-	assert.Equal(t, "acct_first", unchanged.StripeAccountID)
-	assert.Equal(t, pinned.Version, unchanged.Version)
-
-	invalid := &coop.Session{ID: "invalid_identity", Status: coop.SessionActive}
-	require.NoError(t, store.Write(invalid))
-	options.TestModeAPIKey = func() (string, error) { return "sk_live_secret", nil }
-	_, err = newWorkflowService(invalid.ID)
-	require.NoError(t, err)
-	stillEmpty, err := store.Read(invalid.ID)
-	require.NoError(t, err)
-	assert.Empty(t, stillEmpty.StripeAccountID)
-
-	retry := &coop.Session{ID: "retry_identity", Status: coop.SessionActive}
-	require.NoError(t, store.Write(retry))
-	options.TestModeAPIKey = func() (string, error) { return "sk_test_secret", nil }
-	options.AccountID = func() (string, error) { return "acct_retry", nil }
-	servedAccount = "acct_retry"
-	responseStatus = http.StatusServiceUnavailable
-	_, err = newWorkflowService(retry.ID)
-	require.NoError(t, err)
-	unpinned, err := store.Read(retry.ID)
-	require.NoError(t, err)
-	assert.Empty(t, unpinned.StripeAccountID)
-
-	responseStatus = http.StatusOK
-	_, err = newWorkflowService(retry.ID)
-	require.NoError(t, err)
-	retried, err := store.Read(retry.ID)
-	require.NoError(t, err)
-	assert.Equal(t, "acct_retry", retried.StripeAccountID)
+	assert.Empty(t, unchanged.StripeAccountID)
+	assert.Equal(t, 0, credentialReads)
+	assert.Equal(t, 1, unchanged.Version)
 }
 
 func TestCoopAgentStartWorkCommand(t *testing.T) {

@@ -183,7 +183,9 @@ type NodeAttempt struct {
 	Resources               []ResourceBinding     `json:"resources,omitempty"`
 	Results                 []CheckResult         `json:"results,omitempty"`
 	AutomaticCheckStartedAt *time.Time            `json:"automatic_check_started_at,omitempty"`
+	AutomaticCheckWatermark *time.Time            `json:"automatic_check_watermark,omitempty"`
 	AutomaticResultsAt      *time.Time            `json:"automatic_results_at,omitempty"`
+	AutomaticRefreshPending bool                  `json:"automatic_refresh_pending,omitempty"`
 	AppSurface              *AppSurface           `json:"app_surface,omitempty"`
 	Override                *VerificationOverride `json:"verification_override,omitempty"`
 }

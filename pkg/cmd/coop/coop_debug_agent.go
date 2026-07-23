@@ -85,7 +85,7 @@ func (debugAgentEvaluator) Evaluate(context.Context, workflow.EvaluationInput) (
 }
 
 func (a *coopDebugAgent) workflowService() *workflow.Service {
-	return workflow.NewService(a.store, workflow.WithEvaluator(debugAgentEvaluator{}))
+	return workflow.NewService(a.store, workflow.WithRequirementProvider(debugAgentEvaluator{}))
 }
 
 func (a *coopDebugAgent) run(ctx context.Context) error {
@@ -188,6 +188,12 @@ func (a *coopDebugAgent) completeActiveStep(ctx context.Context, step int) error
 	attempt := node.CurrentAttempt()
 	if attempt == nil {
 		return fmt.Errorf("active step %d has no current attempt", step)
+	}
+	// report-work is submission-only. Once submitted, the debug agent waits for
+	// the attached observer to evaluate and move the node; it must not submit a
+	// second report while the node is still active.
+	if attempt.ReportedAt != nil {
+		return a.sleep(ctx, a.pollInterval)
 	}
 
 	service := a.workflowService()

@@ -36,7 +36,7 @@ func TestStartWorkTransitionsNodeAndReturnsTypedNextCommand(t *testing.T) {
 	assert.Equal(t, "Scanning", node.Activity)
 }
 
-func TestReportWorkContinuesStepBeforeReview(t *testing.T) {
+func TestReportWorkWaitsForObserverBeforeContinuingStep(t *testing.T) {
 	store, session := workflowTestStore(t)
 	service := newPassingWorkflowService(store)
 
@@ -45,12 +45,19 @@ func TestReportWorkContinuesStepBeforeReview(t *testing.T) {
 	resp, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Done"})
 	require.NoError(t, err)
 	require.True(t, resp.OK)
-	assert.Equal(t, "review", resp.State)
-	assert.Contains(t, resp.Message, "Continue the remaining work")
-	assert.Contains(t, resp.Next, "--node=2")
+	assert.Equal(t, "active", resp.State)
+	assert.Equal(t, "pending", resp.Decision)
+	assert.Contains(t, resp.Message, "attached Co-op TUI")
+	assert.Contains(t, resp.Next, "await-review")
+
+	observed, err := service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
+	require.NoError(t, err)
+	assert.Equal(t, "review", observed.State)
+	assert.Contains(t, observed.Message, "Continue the remaining work")
+	assert.Contains(t, observed.Next, "--node=2")
 }
 
-func TestReportWorkRoutesToAwaitReviewWhenStepReady(t *testing.T) {
+func TestObserverRoutesToAwaitReviewWhenStepReady(t *testing.T) {
 	store, session := workflowTestStore(t)
 	service := newPassingWorkflowService(store)
 
@@ -58,47 +65,56 @@ func TestReportWorkRoutesToAwaitReviewWhenStepReady(t *testing.T) {
 	require.NoError(t, err)
 	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, first.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented first node"})
 	require.NoError(t, err)
+	_, err = service.Reevaluate(context.Background(), session.ID, 1, first.Attempt, TriggerPoll)
+	require.NoError(t, err)
 	second, err := service.StartWork(session.ID, 2, "Second")
 	require.NoError(t, err)
 	resp, err := service.ReportWorkAttempt(context.Background(), session.ID, 2, second.Attempt, ReportWorkInput{File: "client.go", Note: "Implemented second node"})
 	require.NoError(t, err)
 	require.True(t, resp.OK)
-	assert.Contains(t, resp.Message, "ready for developer review")
 	assert.Contains(t, resp.Next, "stripe coop agent await-review")
+	assert.Equal(t, "pending", resp.Decision)
+
+	observed, err := service.Reevaluate(context.Background(), session.ID, 2, second.Attempt, TriggerPoll)
+	require.NoError(t, err)
+	assert.Contains(t, observed.Message, "ready for developer review")
+	assert.Contains(t, observed.Next, "stripe coop agent await-review")
 }
 
-func TestAutomaticWorkflowRequiresEvaluatorWithoutMutatingWork(t *testing.T) {
+func TestAgentWorkflowRequiresPlannerButNotEvaluator(t *testing.T) {
 	store, session := workflowTestStore(t)
 	service := NewService(store)
 
 	response, err := service.StartWork(session.ID, 1, "Starting")
 	require.NoError(t, err)
 	assert.False(t, response.OK)
-	assert.Contains(t, response.Error, "automatic verification is not configured")
+	assert.Contains(t, response.Error, "verification requirements are not configured")
 
-	configured := newPassingWorkflowService(store)
-	started, err := configured.StartWork(session.ID, 1, "Starting")
+	agentService := NewService(
+		store,
+		WithRequirementProvider(passingWorkflowEvaluator{}),
+		WithAwaitTimeout(time.Millisecond),
+		WithEvaluationInterval(time.Millisecond),
+	)
+	started, err := agentService.StartWork(session.ID, 1, "Starting")
 	require.NoError(t, err)
-	for _, run := range []func() (coop.CommandResponse, error){
-		func() (coop.CommandResponse, error) {
-			return service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
-		},
-		func() (coop.CommandResponse, error) {
-			return service.AwaitReviewAttempt(context.Background(), session.ID, 1, started.Attempt)
-		},
-	} {
-		response, err = run()
-		require.NoError(t, err)
-		assert.False(t, response.OK)
-		assert.Contains(t, response.Error, "automatic verification is not configured")
-	}
+	response, err = agentService.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
+	require.NoError(t, err)
+	require.True(t, response.OK)
+	assert.Equal(t, "pending", response.Decision)
+
+	response, err = agentService.AwaitReviewAttempt(context.Background(), session.ID, 1, started.Attempt)
+	require.NoError(t, err)
+	require.True(t, response.OK)
+	assert.Equal(t, "timeout", response.State)
 
 	loaded, err := store.Read(session.ID)
 	require.NoError(t, err)
 	node, err := loaded.NodeByNumber(1)
 	require.NoError(t, err)
 	assert.Equal(t, coop.NodeActive, node.State)
-	assert.Nil(t, node.CurrentAttempt().ReportedAt)
+	assert.NotNil(t, node.CurrentAttempt().ReportedAt)
+	assert.Empty(t, node.CurrentAttempt().Results)
 }
 
 func TestStartWorkRequirementFailureDoesNotCreateAttempt(t *testing.T) {
@@ -181,7 +197,7 @@ func TestReportCheckRejectsAlreadySubmittedAttemptWithoutMutation(t *testing.T) 
 	require.NoError(t, err)
 	node, err := loaded.NodeByNumber(1)
 	require.NoError(t, err)
-	assert.Equal(t, coop.NodeReview, node.State)
+	assert.Equal(t, coop.NodeActive, node.State)
 	assert.Empty(t, node.CurrentAttempt().AgentChecks)
 }
 
@@ -192,6 +208,8 @@ func TestConfirmAndRequestChangesUseCentralWorkflow(t *testing.T) {
 	started, err := service.StartWork(session.ID, 1, "First")
 	require.NoError(t, err)
 	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
+	require.NoError(t, err)
+	_, err = service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
 	require.NoError(t, err)
 
 	updated, err := service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, nil)
@@ -333,14 +351,15 @@ func TestMultipleFailuresCreateBoundedCorrectionAttempt(t *testing.T) {
 	started, err := service.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
 
-	response, err := service.ReportWorkAttempt(
+	_, err = service.ReportWorkAttempt(
 		context.Background(),
 		session.ID,
 		1,
 		started.Attempt,
 		ReportWorkInput{File: "server.go", Note: "Implemented node"},
 	)
-
+	require.NoError(t, err)
+	response, err := service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
 	require.NoError(t, err)
 	require.True(t, response.OK)
 	assert.Equal(t, string(decisionNeedsAgent), response.Decision)
@@ -363,6 +382,8 @@ func TestRequestChangesMovesReviewNodeBackToActive(t *testing.T) {
 	started, err := service.StartWork(session.ID, 1, "First")
 	require.NoError(t, err)
 	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
+	require.NoError(t, err)
+	_, err = service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
 	require.NoError(t, err)
 	updated, err := service.RequestChangesAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, "Needs tests")
 	require.NoError(t, err)
@@ -405,7 +426,9 @@ func TestReportWorkRoutesToNextActiveCorrection(t *testing.T) {
 
 	first, err := service.StartWork(session.ID, 1, "Fixing one")
 	require.NoError(t, err)
-	response, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, first.Attempt, ReportWorkInput{File: "one.go", Note: "Implemented first node"})
+	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, first.Attempt, ReportWorkInput{File: "one.go", Note: "Implemented first node"})
+	require.NoError(t, err)
+	response, err := service.Reevaluate(context.Background(), session.ID, 1, first.Attempt, TriggerPoll)
 	require.NoError(t, err)
 
 	assert.Equal(t, `stripe coop agent start-work --session=workflow_test --node=2 --note='Redoing: Two'`, response.Next)
@@ -431,7 +454,9 @@ func TestEvaluationRoutesToNextActiveCorrection(t *testing.T) {
 
 	first, err := service.StartWork(session.ID, 1, "Fixing one")
 	require.NoError(t, err)
-	response, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, first.Attempt, ReportWorkInput{File: "one.go", Note: "Implemented first node"})
+	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, first.Attempt, ReportWorkInput{File: "one.go", Note: "Implemented first node"})
+	require.NoError(t, err)
+	response, err := service.Reevaluate(context.Background(), session.ID, 1, first.Attempt, TriggerPoll)
 	require.NoError(t, err)
 
 	assert.Equal(t, string(decisionConfirmed), response.Decision)
@@ -573,8 +598,10 @@ func TestCompletedParentedSessionRoutesNextActionToParent(t *testing.T) {
 	started, err := service.StartWork(child.ID, 1, "Adding integration")
 	require.NoError(t, err)
 
-	resp, err := service.ReportWorkAttempt(context.Background(), child.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Added another integration"})
+	_, err = service.ReportWorkAttempt(context.Background(), child.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Added another integration"})
 
+	require.NoError(t, err)
+	resp, err := service.Reevaluate(context.Background(), child.ID, 1, started.Attempt, TriggerPoll)
 	require.NoError(t, err)
 	require.True(t, resp.OK)
 	assert.Equal(t, "stripe coop agent next-action --session=parent_session --completed=add-integration", resp.Next)
@@ -618,6 +645,8 @@ func requestChangesForBothNodes(t *testing.T, service *Service, sessionID string
 		started, err := service.StartWork(sessionID, nodeNumber, "Initial work")
 		require.NoError(t, err)
 		_, err = service.ReportWorkAttempt(context.Background(), sessionID, nodeNumber, started.Attempt, ReportWorkInput{File: "initial.go", Note: "Implemented node"})
+		require.NoError(t, err)
+		_, err = service.Reevaluate(context.Background(), sessionID, nodeNumber, started.Attempt, TriggerPoll)
 		require.NoError(t, err)
 		refs = append(refs, AttemptRef{Node: nodeNumber, Attempt: started.Attempt})
 	}

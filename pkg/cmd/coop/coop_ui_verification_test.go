@@ -64,8 +64,10 @@ func TestSubscriptionUIEventEvaluatesCausalResourceGraph(t *testing.T) {
 		}}},
 	})
 	evaluator := &coopEvaluator{
-		catalog: catalog, runner: checkrun.NewEvaluator(reader, catalog),
-		accountID: "acct_subscription123", now: func() time.Time { return observed },
+		coopPlanner: &coopPlanner{catalog: catalog},
+		runner:      checkrun.NewEvaluator(reader, catalog),
+		accountID:   "acct_subscription123",
+		now:         func() time.Time { return observed },
 	}
 
 	report, err := evaluator.Evaluate(context.Background(), workflow.EvaluationInput{
@@ -150,8 +152,10 @@ func TestSubscriptionUICandidateContradictionDoesNotReturnWorkToAgent(t *testing
 		}}},
 	})
 	evaluator := &coopEvaluator{
-		catalog: catalog, runner: checkrun.NewEvaluator(reader, catalog),
-		accountID: "acct_subscription123", now: func() time.Time { return observed },
+		coopPlanner: &coopPlanner{catalog: catalog},
+		runner:      checkrun.NewEvaluator(reader, catalog),
+		accountID:   "acct_subscription123",
+		now:         func() time.Time { return observed },
 	}
 	store, err := coop.NewStoreAt(t.TempDir())
 	require.NoError(t, err)

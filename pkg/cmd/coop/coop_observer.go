@@ -24,11 +24,11 @@ import (
 )
 
 const (
-	coopObserverPollInterval   = 3 * time.Second
-	coopObserverStandbyRetry   = time.Second
-	coopObserverHeartbeatFresh = 5 * time.Second
-	coopObserverStreamBuffer   = 64
-	maxObserverFilters         = 128
+	coopObserverPollInterval = 3 * time.Second
+	coopObserverStandbyRetry = time.Second
+	coopObserverAccountGrace = 2 * time.Minute
+	coopObserverStreamBuffer = 64
+	maxObserverFilters       = 128
 )
 
 type observerStore interface {
@@ -36,10 +36,10 @@ type observerStore interface {
 	Update(string, func(*coop.Session) error) (*coop.Session, error)
 	PinStripeAccount(string, string) (*coop.Session, error)
 	AcquireObserverLease(string) (func(), error)
-	HeartbeatAge(string) (time.Duration, error)
 }
 
 type observerWorkflow interface {
+	RecordObservedCandidate(string, int, int, string, string, string) error
 	RecordSupportingResult(string, int, int, coop.CheckResult) error
 	Reevaluate(context.Context, string, int, int, workflow.EvaluationTrigger) (coop.CommandResponse, error)
 	ReevaluateState(context.Context, string, int, int, string, string) (coop.CommandResponse, error)
@@ -80,6 +80,7 @@ type coopObserverController struct {
 	streams         observerStreamFactory
 	pollEvery       time.Duration
 	standbyEvery    time.Duration
+	accountGrace    time.Duration
 	now             func() time.Time
 	sandboxClaimURL func() string
 
@@ -103,6 +104,7 @@ func newCoopObserver(store *coop.Store) *coopObserverController {
 		streams:         startStockObserverStreams,
 		pollEvery:       coopObserverPollInterval,
 		standbyEvery:    coopObserverStandbyRetry,
+		accountGrace:    coopObserverAccountGrace,
 		now:             time.Now,
 		sandboxClaimURL: coopSandboxClaimURL,
 	}
@@ -214,10 +216,11 @@ func (controller *coopObserverController) runOwner(ctx context.Context, sessionI
 		}()
 	}
 	if controller.pollEvery > 0 {
+		accountReadyAfter := controller.now().UTC().Add(controller.accountGrace)
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			controller.poll(ownerCtx, sessionID)
+			controller.poll(ownerCtx, sessionID, accountReadyAfter)
 		}()
 	}
 	statusEvery := controller.standbyEvery
@@ -405,6 +408,18 @@ func (controller *coopObserverController) observe(
 		return
 	}
 	match := observe.MatchSession(session, fact)
+	if event := fact.Event; event != nil && match.Attribution != nil && len(event.Discoveries) == 1 {
+		discovery := event.Discoveries[0]
+		target := match.Attribution.Target
+		_ = service.RecordObservedCandidate(
+			sessionID,
+			target.NodeNumber,
+			target.AttemptNumber,
+			event.Type,
+			discovery.Type,
+			discovery.ID,
+		)
+	}
 	if result, ok := supportingResult(match.Attribution, controller.now()); ok {
 		_ = service.RecordSupportingResult(sessionID, match.Attribution.Target.NodeNumber, match.Attribution.Target.AttemptNumber, result)
 	}
@@ -414,9 +429,10 @@ func (controller *coopObserverController) observe(
 		resourceID = fact.Event.Discoveries[0].ID
 	}
 	for _, target := range match.Triggers {
-		if ctx.Err() != nil {
-			return
-		}
+		// Dispatch an already-admitted fact even when shutdown has canceled the
+		// context. The workflow will not perform a network read, but acquiring
+		// and invalidating (or finding a busy lease) durably coalesces one
+		// refresh for the next observer owner.
 		if fact.Event != nil {
 			_, _ = service.ReevaluateState(ctx, sessionID, target.NodeNumber, target.AttemptNumber, fact.Event.Type, resourceID)
 		} else {
@@ -425,7 +441,7 @@ func (controller *coopObserverController) observe(
 	}
 }
 
-func (controller *coopObserverController) poll(ctx context.Context, sessionID string) {
+func (controller *coopObserverController) poll(ctx context.Context, sessionID string, accountReadyAfter time.Time) {
 	ticker := time.NewTicker(controller.pollEvery)
 	defer ticker.Stop()
 	for {
@@ -433,15 +449,19 @@ func (controller *coopObserverController) poll(ctx context.Context, sessionID st
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if age, err := controller.store.HeartbeatAge(sessionID); err == nil && age >= 0 && age < coopObserverHeartbeatFresh {
-				continue
-			}
 			session, err := controller.store.Read(sessionID)
 			if err != nil {
 				continue
 			}
 			if session.Status != coop.SessionActive {
 				return
+			}
+			// Stream authorization pins the trusted account. Give interactive
+			// authentication a generous bounded window so startup cannot settle
+			// work as unavailable; after it expires, the evaluator discloses the
+			// missing identity instead of wedging the attempt forever.
+			if session.StripeAccountID == "" && controller.now().UTC().Before(accountReadyAfter) {
+				continue
 			}
 			service := controller.workflow()
 			if service == nil {
@@ -452,9 +472,11 @@ func (controller *coopObserverController) poll(ctx context.Context, sessionID st
 				for nodeIndex := range session.Steps[stepIndex].Nodes {
 					nodeNumber++
 					attempt := session.Steps[stepIndex].Nodes[nodeIndex].CurrentAttempt()
-					if attempt != nil && attempt.Number > 0 && attempt.ReportedAt != nil && workflow.AttemptNeedsReevaluation(attempt) {
-						_, _ = service.Reevaluate(ctx, sessionID, nodeNumber, attempt.Number, workflow.TriggerPoll)
+					if attempt == nil || attempt.Number <= 0 || attempt.ReportedAt == nil ||
+						!workflow.AttemptNeedsReevaluation(attempt) {
+						continue
 					}
+					_, _ = service.Reevaluate(ctx, sessionID, nodeNumber, attempt.Number, workflow.TriggerPoll)
 				}
 			}
 		}

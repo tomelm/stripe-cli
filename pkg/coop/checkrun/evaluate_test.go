@@ -788,7 +788,11 @@ func TestEvaluateClassifiesMissingNotFoundAndUnavailable(t *testing.T) {
 		name   string
 		err    error
 		status coop.CheckStatus
-	}{{"not found or wrong account scope", ErrNotFound, coop.CheckUnavailable}, {"transient", ErrTransient, coop.CheckUnavailable}, {"unauthorized", ErrUnauthorized, coop.CheckUnavailable}} {
+	}{
+		{"not found or wrong account scope", ErrNotFound, coop.CheckUnavailable},
+		{"transient", ErrTransient, coop.CheckUnavailable},
+		{"unauthorized", ErrUnauthorized, coop.CheckUnavailable},
+	} {
 		t.Run(test.name, func(t *testing.T) {
 			reader := &memoryReader{errs: map[string]error{"/v1/customers/cus_error123": test.err}}
 			report, err := NewEvaluator(reader, checks.Catalog{}).Evaluate(context.Background(), Input{Plan: plan, Session: boundSession, NodeNumber: 1, AttemptNumber: 1, ObservedAt: started})
@@ -796,6 +800,12 @@ func TestEvaluateClassifiesMissingNotFoundAndUnavailable(t *testing.T) {
 			assert.Equal(t, test.status, resultWithSuffix(t, report, ".exists").Status)
 		})
 	}
+
+	noReader, err := NewEvaluator(nil, checks.Catalog{}).Evaluate(context.Background(), Input{
+		Plan: plan, Session: boundSession, NodeNumber: 1, AttemptNumber: 1, ObservedAt: started,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, coop.CheckUnavailable, resultWithSuffix(t, noReader, ".exists").Status)
 }
 
 func TestEvaluateRetriesTransientReadsWithinTheRunBound(t *testing.T) {

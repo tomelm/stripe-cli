@@ -159,7 +159,7 @@ func TestStripeReaderBoundsTimeAndPath(t *testing.T) {
 	})
 	require.NoError(t, err)
 	_, err = reader.Get(context.Background(), "/v1/customers/cus_reader123")
-	assert.ErrorIs(t, err, ErrUnavailable)
+	assert.ErrorIs(t, err, ErrTransient)
 	assert.Greater(t, performer.remaining, 4*time.Second)
 	assert.LessOrEqual(t, performer.remaining, stripeReadTimeout)
 

@@ -20,6 +20,7 @@ const (
 	MaxOverrideReasonBytes      = 1024
 	MaxActivityBytes            = 1024
 	MaxSkipReasonBytes          = 240
+	AutomaticCheckLease         = 20 * time.Second
 )
 
 var (
@@ -29,6 +30,7 @@ var (
 	ErrAttemptEnded        = errors.New("node attempt has ended")
 	ErrStaleCheckResult    = errors.New("check result is older than the stored result")
 	ErrStaleResultSnapshot = errors.New("automatic result snapshot is not newer than the stored snapshot")
+	ErrAutomaticCheckBusy  = errors.New("automatic verification is already running")
 )
 
 // validTransitions defines allowed state transitions.
@@ -125,6 +127,8 @@ func (node *SessionNode) CloseAttempt(number int, now time.Time, reason AttemptE
 	}
 	attempt.EndedAt = &endedAt
 	attempt.EndReason = reason
+	attempt.AutomaticRefreshPending = false
+	attempt.AutomaticCheckStartedAt = nil
 	return nil
 }
 
@@ -160,9 +164,9 @@ func (node *SessionNode) UpsertResult(number int, result CheckResult) error {
 }
 
 // ReconcileAutomaticResults atomically replaces one complete evaluator
-// snapshot while retaining supporting request/event evidence. A per-attempt
-// watermark rejects an older whole snapshot, including when its result IDs do
-// not overlap the newer snapshot.
+// snapshot while retaining supporting request/event evidence. This unowned
+// helper is used by deterministic local callers; workflow evaluations use the
+// lease-owning variant below.
 func (node *SessionNode) ReconcileAutomaticResults(number int, snapshotAt time.Time, results []CheckResult) error {
 	attempt, err := node.currentAttemptNumber(number)
 	if err != nil {
@@ -172,10 +176,52 @@ func (node *SessionNode) ReconcileAutomaticResults(number int, snapshotAt time.T
 		return errors.New("automatic result snapshot time is required")
 	}
 	snapshotAt = snapshotAt.UTC()
+	ownsLease := attempt.AutomaticCheckStartedAt != nil && attempt.AutomaticCheckStartedAt.Equal(snapshotAt)
+	if attempt.AutomaticCheckPending() && !ownsLease {
+		return ErrAutomaticCheckBusy
+	}
 	if attempt.AutomaticResultsAt != nil && !snapshotAt.After(*attempt.AutomaticResultsAt) {
 		return ErrStaleResultSnapshot
 	}
+	if err := replaceAutomaticResults(attempt, snapshotAt, results); err != nil {
+		if ownsLease {
+			attempt.AutomaticCheckStartedAt = nil
+		}
+		return err
+	}
+	if ownsLease {
+		attempt.AutomaticCheckStartedAt = nil
+	}
+	attempt.AutomaticRefreshPending = false
+	return nil
+}
 
+// ReconcileAutomaticEvaluation accepts results only from the attempt's exact
+// live lease owner. A completion whose lease expired and was reacquired can
+// never overwrite newer evidence or mutate retry scheduling.
+func (node *SessionNode) ReconcileAutomaticEvaluation(number int, snapshotAt time.Time, results []CheckResult) error {
+	attempt, err := node.currentAttemptNumber(number)
+	if err != nil {
+		return err
+	}
+	if snapshotAt.IsZero() {
+		return errors.New("automatic result snapshot time is required")
+	}
+	snapshotAt = snapshotAt.UTC()
+	if attempt.AutomaticCheckStartedAt == nil || !attempt.AutomaticCheckStartedAt.Equal(snapshotAt) {
+		return ErrStaleResultSnapshot
+	}
+	if err := replaceAutomaticResults(attempt, snapshotAt, results); err != nil {
+		attempt.AutomaticCheckStartedAt = nil
+		return err
+	}
+	attempt.AutomaticCheckStartedAt = nil
+	// A request/event trigger may have marked a follow-up while this lease was
+	// running. Preserve that bit; the next successful Begin consumes it.
+	return nil
+}
+
+func replaceAutomaticResults(attempt *NodeAttempt, snapshotAt time.Time, results []CheckResult) error {
 	next := make([]CheckResult, 0, len(attempt.Results)+len(results))
 	existing := make(map[string]CheckResult, len(attempt.Results))
 	for _, result := range attempt.Results {
@@ -208,18 +254,14 @@ func (node *SessionNode) ReconcileAutomaticResults(number int, snapshotAt time.T
 		next = append(next, result)
 	}
 	attempt.Results = next
-	// This ordering watermark must advance even when the durable findings are
-	// identical. Otherwise an older, slower read with different findings can
-	// land after a later-started identical read. Scheduling bounds these writes
-	// to genuinely open pending checks and one post-open UI sample.
+	// ResultsAt is exact read provenance, not completion time.
 	attempt.AutomaticResultsAt = &snapshotAt
 	return nil
 }
 
-// BeginAutomaticCheck records the newest authoritative read before any network
-// work starts. Confirmation compares this marker with AutomaticResultsAt, so a
-// human decision cannot close an attempt while a newer read is still in flight.
-// The returned timestamp is monotonic for this attempt across CLI processes.
+// BeginAutomaticCheck atomically acquires the attempt's single evaluator
+// lease. Tokens remain monotonic across processes; a new caller may recover a
+// lease only after it outlives the globally bounded evaluator timeout.
 func (node *SessionNode) BeginAutomaticCheck(number int, requestedAt time.Time) (time.Time, error) {
 	attempt, err := node.currentAttemptNumber(number)
 	if err != nil {
@@ -229,24 +271,68 @@ func (node *SessionNode) BeginAutomaticCheck(number int, requestedAt time.Time) 
 		return time.Time{}, errors.New("automatic check start time is required")
 	}
 	startedAt := requestedAt.UTC()
-	for _, previous := range []*time.Time{attempt.AutomaticCheckStartedAt, attempt.AutomaticResultsAt} {
-		if previous != nil && !startedAt.After(*previous) {
-			startedAt = previous.Add(time.Nanosecond)
-		}
+	if attempt.AutomaticCheckStartedAt != nil &&
+		startedAt.Before(attempt.AutomaticCheckStartedAt.Add(AutomaticCheckLease)) {
+		return time.Time{}, ErrAutomaticCheckBusy
+	}
+	if attempt.AutomaticResultsAt != nil && !startedAt.After(*attempt.AutomaticResultsAt) {
+		startedAt = attempt.AutomaticResultsAt.Add(time.Nanosecond)
+	}
+	if attempt.AutomaticCheckWatermark != nil && !startedAt.After(*attempt.AutomaticCheckWatermark) {
+		startedAt = attempt.AutomaticCheckWatermark.Add(time.Nanosecond)
 	}
 	attempt.AutomaticCheckStartedAt = &startedAt
+	attempt.AutomaticCheckWatermark = &startedAt
+	// Acquiring a lease consumes all work known before this snapshot. A trigger
+	// that arrives after acquisition sets this bit again and survives reconcile.
+	attempt.AutomaticRefreshPending = false
 	return startedAt, nil
 }
 
-// AutomaticCheckPending reports whether the latest started authoritative read
-// has not yet committed its snapshot. A later completed read supersedes any
-// older read that is still running because older snapshots cannot land.
-func (attempt *NodeAttempt) AutomaticCheckPending() bool {
-	if attempt == nil || attempt.AutomaticCheckStartedAt == nil {
-		return false
+// MarkAutomaticRefresh coalesces an observation that arrived while an
+// evaluator lease was live. The next successful BeginAutomaticCheck consumes
+// it, avoiding a raw observation queue or persisted retry state.
+func (node *SessionNode) MarkAutomaticRefresh(number int) error {
+	attempt, err := node.currentAttemptNumber(number)
+	if err != nil {
+		return err
 	}
-	return attempt.AutomaticResultsAt == nil ||
-		attempt.AutomaticResultsAt.Before(*attempt.AutomaticCheckStartedAt)
+	attempt.AutomaticRefreshPending = true
+	return nil
+}
+
+// FinishAutomaticCheck releases the lease only for its exact owner.
+func (node *SessionNode) FinishAutomaticCheck(number int, token time.Time) error {
+	attempt, err := node.currentAttemptNumber(number)
+	if err != nil {
+		return err
+	}
+	if attempt.AutomaticCheckStartedAt == nil || !attempt.AutomaticCheckStartedAt.Equal(token.UTC()) {
+		return ErrStaleResultSnapshot
+	}
+	attempt.AutomaticCheckStartedAt = nil
+	return nil
+}
+
+// InvalidateAutomaticCheck releases the exact owner and records that its
+// frozen inputs changed. A late expired owner cannot dirty a newer lease.
+func (node *SessionNode) InvalidateAutomaticCheck(number int, token time.Time) error {
+	attempt, err := node.currentAttemptNumber(number)
+	if err != nil {
+		return err
+	}
+	token = token.UTC()
+	if attempt.AutomaticCheckStartedAt == nil || !attempt.AutomaticCheckStartedAt.Equal(token) {
+		return ErrStaleResultSnapshot
+	}
+	attempt.AutomaticCheckStartedAt = nil
+	attempt.AutomaticRefreshPending = true
+	return nil
+}
+
+// AutomaticCheckPending reports whether the attempt owns an evaluator lease.
+func (attempt *NodeAttempt) AutomaticCheckPending() bool {
+	return attempt != nil && attempt.AutomaticCheckStartedAt != nil
 }
 
 func isAutomaticResult(result CheckResult) bool {

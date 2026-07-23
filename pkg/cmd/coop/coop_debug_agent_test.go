@@ -149,6 +149,7 @@ func setupDebugAgentSession(t *testing.T, steps []coop.SessionStep) (*coop.Store
 
 func runDebugAgentForTest(ctx context.Context, store *coop.Store, sessionID string) <-chan error {
 	done := make(chan error, 1)
+	runCtx, cancel := context.WithCancel(ctx)
 	agent := &coopDebugAgent{
 		store:                    store,
 		sessionID:                sessionID,
@@ -157,10 +158,42 @@ func runDebugAgentForTest(ctx context.Context, store *coop.Store, sessionID stri
 		out:                      io.Discard,
 		waitForNextStepSelection: false,
 	}
+	go runDebugObserverForTest(runCtx, store, sessionID)
 	go func() {
-		done <- agent.run(ctx)
+		defer cancel()
+		done <- agent.run(runCtx)
 	}()
 	return done
+}
+
+func runDebugObserverForTest(ctx context.Context, store *coop.Store, sessionID string) {
+	service := workflow.NewService(store, workflow.WithEvaluator(debugAgentEvaluator{}))
+	ticker := time.NewTicker(2 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		session, err := store.Read(sessionID)
+		if err != nil {
+			continue
+		}
+		nodeNumber := 0
+		for stepIndex := range session.Steps {
+			for nodeIndex := range session.Steps[stepIndex].Nodes {
+				nodeNumber++
+				node := &session.Steps[stepIndex].Nodes[nodeIndex]
+				attempt := node.CurrentAttempt()
+				if node.State != coop.NodeActive || attempt == nil || attempt.ReportedAt == nil ||
+					!workflow.AttemptNeedsReevaluation(attempt) {
+					continue
+				}
+				_, _ = service.Reevaluate(ctx, sessionID, nodeNumber, attempt.Number, workflow.TriggerPoll)
+			}
+		}
+	}
 }
 
 func waitForDebugSession(t *testing.T, store *coop.Store, sessionID string, predicate func(*coop.Session) bool) {

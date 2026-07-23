@@ -1,7 +1,6 @@
 package coopcmd
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -60,7 +59,7 @@ func newCoopAgentStartWorkCmd() *coopAgentActionCmd {
 		Use:   "start-work",
 		Short: "Mark a node as active",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			service, err := newWorkflowService(c.session)
+			service, err := newAgentWorkflowService(c.session)
 			if err != nil {
 				return outputAgentError(err)
 			}
@@ -83,7 +82,7 @@ func newCoopAgentReportWorkCmd() *coopAgentActionCmd {
 			if err != nil {
 				return outputAgentError(err)
 			}
-			service, err := newWorkflowService(c.session)
+			service, err := newAgentWorkflowService(c.session)
 			if err != nil {
 				return outputAgentError(err)
 			}
@@ -113,7 +112,7 @@ func newCoopAgentReportCheckCmd() *coopAgentActionCmd {
 			if !cmd.Flags().Changed("passed") {
 				return outputAgentError(errors.New("--passed must be explicit; use --passed or --passed=false"))
 			}
-			service, err := newWorkflowService(c.session)
+			service, err := newAgentWorkflowService(c.session)
 			if err != nil {
 				return outputAgentError(err)
 			}
@@ -134,7 +133,7 @@ func newCoopAgentSkipCmd() *coopAgentActionCmd {
 		Use:   "skip",
 		Short: "Skip a node",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			service, err := newWorkflowService(c.session)
+			service, err := newAgentWorkflowService(c.session)
 			if err != nil {
 				return outputAgentError(err)
 			}
@@ -154,7 +153,7 @@ func newCoopAgentAwaitReviewCmd() *coopAgentActionCmd {
 		Use:   "await-review",
 		Short: "Block until the developer confirms or requests changes",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			service, err := newWorkflowService(c.session)
+			service, err := newAgentWorkflowService(c.session)
 			if err != nil {
 				return outputAgentError(err)
 			}
@@ -239,21 +238,16 @@ func validResourceRole(role string) bool {
 	return true
 }
 
-func newWorkflowService(sessionID string) (*workflow.Service, error) {
+func newAgentWorkflowService(_ string) (*workflow.Service, error) {
 	store, err := coop.NewStore(coopConfigFolder())
 	if err != nil {
 		return nil, fmt.Errorf("creating store: %w", err)
 	}
-	evaluator, err := newCoopEvaluator()
+	planner, err := newCoopPlanner()
 	if err != nil {
 		return nil, fmt.Errorf("loading verification catalog: %w", err)
 	}
-	if accountID, authorizeErr := evaluator.authorizeAccount(context.Background()); authorizeErr == nil {
-		if _, err := store.PinStripeAccount(sessionID, accountID); err != nil {
-			return nil, fmt.Errorf("pinning Stripe account: %w", err)
-		}
-	}
-	return workflow.NewService(store, workflow.WithEvaluator(evaluator)), nil
+	return workflow.NewService(store, workflow.WithRequirementProvider(planner)), nil
 }
 
 func runCoopNextAction(sessionID, completed string) error {
@@ -346,7 +340,7 @@ func validateFollowupParent(parent *coop.Session, actionID string) error {
 
 // outputAgentError renders err as a structured agent JSON response. Used for
 // failures that happen before a workflow CommandResponse exists (e.g.
-// newWorkflowService / store creation), so agent commands never emit a bare
+// newAgentWorkflowService / store creation), so agent commands never emit a bare
 // plain-text error on that path.
 func outputAgentError(err error) error {
 	return outputAgentResponse(coop.CommandResponse{}, err)

@@ -175,8 +175,11 @@ func (reader *StripeReader) get(ctx context.Context, path string) (map[string]an
 		return nil
 	})
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(err, context.Canceled) {
 			return nil, ErrUnavailable
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, ErrTransient
 		}
 		return nil, ErrTransient
 	}

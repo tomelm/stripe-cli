@@ -14,7 +14,12 @@ import (
 	"github.com/stripe/stripe-cli/pkg/coop/helpers"
 )
 
-const AwaitTimeout = 10 * time.Minute
+const (
+	AwaitTimeout                   = 10 * time.Minute
+	AutomaticEvaluationTimeout     = 15 * time.Second
+	AutomaticEventAcquireTimeout   = 25 * time.Second
+	automaticEvaluationAcquirePoll = 100 * time.Millisecond
+)
 
 var (
 	ErrVerificationOverrideRequired = errors.New("explicit override is required")
@@ -29,15 +34,18 @@ type Store interface {
 }
 
 type Service struct {
-	store        Store
-	fetchSnippet func(path, method string, params interface{}, language string) (string, error)
-	now          func() time.Time
-	sleep        func(time.Duration)
-	awaitTimeout time.Duration
-	evalInterval time.Duration
-	evaluator    Evaluator
-	evaluationMu sync.Mutex
-	lastEvalAt   time.Time
+	store               Store
+	fetchSnippet        func(path, method string, params interface{}, language string) (string, error)
+	now                 func() time.Time
+	sleep               func(time.Duration)
+	awaitTimeout        time.Duration
+	evalInterval        time.Duration
+	evalTimeout         time.Duration
+	eventWait           time.Duration
+	requirementProvider RequirementProvider
+	evaluator           Evaluator
+	evaluationMu        sync.Mutex
+	lastEvalAt          time.Time
 }
 
 func (s *Service) nextEvaluationTime() time.Time {
@@ -87,6 +95,15 @@ func WithEvaluationInterval(interval time.Duration) Option {
 func WithEvaluator(evaluator Evaluator) Option {
 	return func(s *Service) {
 		s.evaluator = evaluator
+		if provider, ok := evaluator.(RequirementProvider); ok {
+			s.requirementProvider = provider
+		}
+	}
+}
+
+func WithRequirementProvider(provider RequirementProvider) Option {
+	return func(s *Service) {
+		s.requirementProvider = provider
 	}
 }
 
@@ -98,9 +115,16 @@ func NewService(store Store, opts ...Option) *Service {
 		sleep:        time.Sleep,
 		awaitTimeout: AwaitTimeout,
 		evalInterval: 2 * time.Second,
+		evalTimeout:  AutomaticEvaluationTimeout,
+		eventWait:    AutomaticEventAcquireTimeout,
 	}
 	for _, opt := range opts {
 		opt(s)
+	}
+	// An event keeps its one-shot identity in the waiting call. Its acquisition
+	// window must outlive every possible remaining evaluator lease.
+	if s.eventWait <= coop.AutomaticCheckLease {
+		s.eventWait = coop.AutomaticCheckLease + 5*time.Second
 	}
 	return s
 }
@@ -114,7 +138,7 @@ type ReportWorkInput struct {
 }
 
 func (s *Service) StartWork(sessionID string, nodeNumber int, note string) (coop.CommandResponse, error) {
-	if err := s.requireEvaluator(); err != nil {
+	if err := s.requireRequirementProvider(); err != nil {
 		return errorResponse(err, "stripe coop status"), nil
 	}
 	note = strings.TrimSpace(note)
@@ -211,15 +235,15 @@ func (s *Service) StartWork(sessionID string, nodeNumber int, note string) (coop
 
 // ReportWorkAttempt is the agent protocol entry point. The attempt number is a
 // compare token: a stale report can never modify a later correction attempt.
-func (s *Service) ReportWorkAttempt(ctx context.Context, sessionID string, nodeNumber, attemptNumber int, input ReportWorkInput) (coop.CommandResponse, error) {
-	if err := s.requireEvaluator(); err != nil {
+func (s *Service) ReportWorkAttempt(_ context.Context, sessionID string, nodeNumber, attemptNumber int, input ReportWorkInput) (coop.CommandResponse, error) {
+	if err := s.requireRequirementProvider(); err != nil {
 		return errorResponse(err, fmt.Sprintf("stripe coop agent start-work --session=%s --node=%d", sessionID, nodeNumber)), nil
 	}
 	input.Note = strings.TrimSpace(input.Note)
 	if input.Note == "" {
 		return errorResponse(errors.New("--note is required"), "Summarize the completed implementation with --note."), nil
 	}
-	_, err := s.store.Update(sessionID, func(session *coop.Session) error {
+	session, err := s.store.Update(sessionID, func(session *coop.Session) error {
 		if err := requireActiveSession(session); err != nil {
 			return err
 		}
@@ -281,6 +305,13 @@ func (s *Service) ReportWorkAttempt(ctx context.Context, sessionID string, nodeN
 				return err
 			}
 		}
+		// Reporting establishes a new evaluation basis. This also covers a
+		// request observed while the agent was still implementing: any
+		// pre-report snapshot must be reread with the submitted bindings,
+		// implementation boundary, and app surface.
+		if err := node.MarkAutomaticRefresh(attemptNumber); err != nil {
+			return err
+		}
 
 		node.Activity = ""
 		return nil
@@ -289,7 +320,15 @@ func (s *Service) ReportWorkAttempt(ctx context.Context, sessionID string, nodeN
 		return errorResponse(err, fmt.Sprintf("stripe coop agent start-work --session=%s --node=%d", sessionID, nodeNumber)), nil
 	}
 
-	return s.evaluateAndApply(ctx, sessionID, nodeNumber, attemptNumber, TriggerReport, true)
+	node, _ := session.NodeByNumber(nodeNumber)
+	attempt := node.CurrentAttempt()
+	return coop.CommandResponse{
+		OK: true, SessionID: session.ID, Node: nodeNumber, Attempt: attemptNumber,
+		State: string(node.State), Decision: string(decisionPending),
+		Message:      "Implementation recorded. The attached Co-op TUI will run automatic verification.",
+		Next:         fmt.Sprintf("stripe coop agent await-review --session=%s --node=%d --attempt=%d", session.ID, nodeNumber, attemptNumber),
+		Verification: append([]coop.CheckResult(nil), attempt.Results...),
+	}, nil
 }
 
 func (s *Service) ReportCheckAttempt(sessionID string, nodeNumber, attemptNumber int, check string, passed bool) (coop.CommandResponse, error) {
@@ -436,6 +475,9 @@ func (s *Service) ConfirmReviewAttempts(sessionID string, refs []AttemptRef, ove
 			if node.Type == coop.NodeUIComponent && (attempt.AutomaticResultsAt == nil || !attempt.AutomaticResultsAt.After(*attempt.AppSurface.OpenedAt)) {
 				return fmt.Errorf("automatic verification has not run since the app was opened for node %d", ref.Node)
 			}
+			if attempt.AutomaticRefreshPending {
+				return fmt.Errorf("automatic verification has not incorporated the latest attempt inputs for node %d", ref.Node)
+			}
 			if attempt.AutomaticCheckPending() {
 				return fmt.Errorf("automatic verification is still running for node %d", ref.Node)
 			}
@@ -563,13 +605,10 @@ func (s *Service) MarkAppOpened(sessionID string, nodeNumber, attemptNumber int)
 	return appURL, err
 }
 
-// AwaitReviewAttempt is both the human notification channel and the polling
-// fallback for automatic checks. It is attempt-scoped so a rejection or late
-// deterministic failure wakes the waiting agent with the replacement attempt.
+// AwaitReviewAttempt is an attempt-scoped watch channel. Automatic evaluation
+// belongs exclusively to the attached TUI/session observer; the agent process
+// never performs Stripe reads.
 func (s *Service) AwaitReviewAttempt(ctx context.Context, sessionID string, nodeNumber, attemptNumber int) (coop.CommandResponse, error) {
-	if err := s.requireEvaluator(); err != nil {
-		return errorResponse(err, "stripe coop status"), nil
-	}
 	session, err := s.store.Read(sessionID)
 	if err != nil {
 		return errorResponse(err, "stripe coop status"), nil
@@ -581,22 +620,11 @@ func (s *Service) AwaitReviewAttempt(ctx context.Context, sessionID string, node
 	if err != nil {
 		return errorResponse(err, "stripe coop status"), nil
 	}
-	if current := node.CurrentAttempt(); current == nil || current.Number != attemptNumber {
+	current := node.CurrentAttempt()
+	if current == nil || current.Number != attemptNumber {
 		return responseForChangedAttempt(session, nodeNumber), nil
 	}
 
-	response, err := s.Reevaluate(ctx, sessionID, nodeNumber, attemptNumber, TriggerPoll)
-	if err != nil {
-		return coop.CommandResponse{}, err
-	}
-	if response.Decision == string(decisionConfirmed) || response.Decision == string(decisionUnverified) || response.Decision == string(decisionNeedsAgent) {
-		return response, nil
-	}
-	session, err = s.store.Read(sessionID)
-	if err != nil {
-		return coop.CommandResponse{}, err
-	}
-	node, _ = session.NodeByNumber(nodeNumber)
 	if node.State == coop.NodeActive {
 		return s.awaitAutomatic(ctx, sessionID, nodeNumber, attemptNumber)
 	}
@@ -637,14 +665,38 @@ func (s *Service) awaitAutomatic(ctx context.Context, sessionID string, nodeNumb
 			return coop.CommandResponse{}, err
 		}
 		if s.now().After(deadline) {
-			return timeoutResponseAttempt(sessionID, nodeNumber, attemptNumber), nil
+			return timeoutResponseAttempt(sessionID, nodeNumber, attemptNumber, true), nil
 		}
-		response, err := s.Reevaluate(ctx, sessionID, nodeNumber, attemptNumber, TriggerPoll)
+		session, err := s.store.Read(sessionID)
 		if err != nil {
 			return coop.CommandResponse{}, err
 		}
-		if response.Decision != string(decisionPending) {
-			return response, nil
+		node, err := session.NodeByNumber(nodeNumber)
+		if err != nil {
+			return coop.CommandResponse{}, err
+		}
+		if current := node.CurrentAttempt(); current == nil || current.Number != attemptNumber {
+			return responseForChangedAttempt(session, nodeNumber), nil
+		}
+		switch node.State {
+		case coop.NodeActive:
+			continue
+		case coop.NodeReview:
+			step, stepIndex, _, stepErr := session.StepByNodeNumber(nodeNumber)
+			if stepErr != nil {
+				return errorResponse(stepErr, "stripe coop status"), nil
+			}
+			if !session.StepReadyForReview(stepIndex) {
+				return coop.CommandResponse{
+					OK: true, SessionID: session.ID, Node: nodeNumber, Attempt: attemptNumber,
+					State:   string(coop.NodeReview),
+					Message: fmt.Sprintf("Node %d is ready. Continue the step before asking for human review.", nodeNumber),
+					Next:    nextInStepOrStatus(session, stepIndex, nodeNumber),
+				}, nil
+			}
+			return s.awaitStepReview(ctx, sessionID, step.Title, stepIndex, nodeNumber, attemptNumber)
+		default:
+			return alreadyMovedResponse(session, nodeNumber, node.State), nil
 		}
 	}
 }
@@ -658,13 +710,12 @@ func (s *Service) awaitStepReview(ctx context.Context, sessionID, stepTitle stri
 	}()
 
 	deadline := s.now().Add(s.awaitTimeout)
-	nextEvaluation := s.now().Add(s.evalInterval)
 	for {
 		if err := ctx.Err(); err != nil {
 			return coop.CommandResponse{}, err
 		}
 		if s.now().After(deadline) {
-			return timeoutResponseAttempt(sessionID, nodeNumber, attemptNumber), nil
+			return timeoutResponseAttempt(sessionID, nodeNumber, attemptNumber, false), nil
 		}
 		s.sleep(500 * time.Millisecond)
 		if err := s.store.WriteHeartbeat(sessionID); err != nil {
@@ -699,19 +750,6 @@ func (s *Service) awaitStepReview(ctx context.Context, sessionID, stepTitle stri
 			}
 			return response, nil
 		}
-		if !s.now().Before(nextEvaluation) {
-			for _, ref := range currentReportedReviewAttempts(session, stepIndex) {
-				response, evalErr := s.Reevaluate(ctx, sessionID, ref.Node, ref.Attempt, TriggerPoll)
-				if evalErr != nil {
-					return coop.CommandResponse{}, evalErr
-				}
-				if response.Decision == string(decisionNeedsAgent) ||
-					(ref.Node == nodeNumber && response.Decision == string(decisionConfirmed)) {
-					return response, nil
-				}
-			}
-			nextEvaluation = s.now().Add(s.evalInterval)
-		}
 		if session.StepHasReview(stepIndex) {
 			continue
 		}
@@ -719,41 +757,18 @@ func (s *Service) awaitStepReview(ctx context.Context, sessionID, stepTitle stri
 	}
 }
 
-// currentReportedReviewAttempts returns only open state that can still change
-// through polling. Settled and unavailable checks are event-driven from this
-// point; repeatedly rereading them creates session churn without adding facts.
-func currentReportedReviewAttempts(session *coop.Session, stepIndex int) []AttemptRef {
-	if session == nil || stepIndex < 0 || stepIndex >= len(session.Steps) {
-		return nil
-	}
-	nodeOffset := 0
-	for index := 0; index < stepIndex; index++ {
-		nodeOffset += len(session.Steps[index].Nodes)
-	}
-	step := &session.Steps[stepIndex]
-	refs := make([]AttemptRef, 0, len(step.Nodes))
-	for index := range step.Nodes {
-		node := &step.Nodes[index]
-		attempt := node.CurrentAttempt()
-		if node.State != coop.NodeReview || attempt == nil || attempt.ReportedAt == nil {
-			continue
-		}
-		if !AttemptNeedsReevaluation(attempt) {
-			continue
-		}
-		refs = append(refs, AttemptRef{Node: nodeOffset + index + 1, Attempt: attempt.Number})
-	}
-	return refs
-}
-
-// AttemptNeedsReevaluation is the shared scheduling policy for agent polling
-// and the TUI observer. Keeping one predicate prevents either channel from
-// wedging an event that arrived after the last authoritative snapshot.
+// AttemptNeedsReevaluation is the TUI observer's scheduling policy.
 func AttemptNeedsReevaluation(attempt *coop.NodeAttempt) bool {
 	if attempt == nil {
 		return false
 	}
+	if attempt.AutomaticRefreshPending {
+		return true
+	}
 	if attempt.AutomaticCheckPending() {
+		return true
+	}
+	if attempt.ReportedAt != nil && attempt.AutomaticResultsAt == nil {
 		return true
 	}
 	if attempt.AppSurface != nil && attempt.AppSurface.OpenedAt != nil &&
@@ -776,10 +791,10 @@ func supportingEvidenceNeedsReevaluation(attempt *coop.NodeAttempt) bool {
 		return false
 	}
 	for _, result := range attempt.Results {
-		// A relevant event is expected to trigger a direct state reread. Request
-		// logs are account-wide supporting evidence and must not continuously
-		// starve human review under unrelated matching traffic.
-		if result.Kind != coop.CheckEvent {
+		// Attributable request and event observations trigger a direct reread.
+		// If the trigger arrived while another evaluation held the lease, the
+		// newer evidence keeps polling eligible until a later read settles it.
+		if result.Kind != coop.CheckEvent && result.Kind != coop.CheckRequest {
 			continue
 		}
 		if attempt.AutomaticResultsAt == nil || !attempt.AutomaticResultsAt.After(result.UpdatedAt) {
@@ -890,14 +905,18 @@ func confirmedResponse(session *coop.Session, nodeNumber int) coop.CommandRespon
 	return response
 }
 
-func timeoutResponseAttempt(sessionID string, nodeNumber, attemptNumber int) coop.CommandResponse {
+func timeoutResponseAttempt(sessionID string, nodeNumber, attemptNumber int, automatic bool) coop.CommandResponse {
+	message := "Timed out waiting for developer confirmation. Re-run await-review to wait again."
+	if automatic {
+		message = "Timed out waiting for the attached Co-op TUI to run automatic verification. Keep the TUI open and re-run await-review."
+	}
 	return coop.CommandResponse{
 		OK:        true,
 		SessionID: sessionID,
 		Node:      nodeNumber,
 		Attempt:   attemptNumber,
 		State:     "timeout",
-		Message:   "Timed out waiting for developer confirmation. Re-run await-review to wait again.",
+		Message:   message,
 		Next:      fmt.Sprintf("stripe coop agent await-review --session=%s --node=%d --attempt=%d", sessionID, nodeNumber, attemptNumber),
 	}
 }

@@ -17,7 +17,6 @@ import (
 type EvaluationTrigger string
 
 const (
-	TriggerReport  EvaluationTrigger = "report"
 	TriggerRequest EvaluationTrigger = "request"
 	TriggerEvent   EvaluationTrigger = "event"
 	TriggerPoll    EvaluationTrigger = "poll"
@@ -42,19 +41,45 @@ type Evaluation struct {
 	Bindings []coop.ResourceBinding
 }
 
-// Evaluator is the trusted read-only boundary used by workflow. Requirements
-// is pure; Evaluate performs bounded reads and interprets the closed catalog
-// predicate vocabulary.
-type Evaluator interface {
+// RequirementProvider is the pure catalog/blueprint planning boundary used by
+// agent submission commands. It has no Stripe reader or credentials.
+type RequirementProvider interface {
 	Requirements(*coop.Session, int) ([]coop.ResourceRequirement, error)
+}
+
+// ObservedCandidateProvider resolves an event discovery through the same
+// compiled state rule the evaluator will execute. It is intentionally
+// separate from report-time requirements so UI agents cannot inject the
+// resource identity that human exercise is meant to discover.
+type ObservedCandidateProvider interface {
+	ObservedCandidateRequirement(
+		*coop.Session,
+		int,
+		string,
+		string,
+	) (coop.ResourceRequirement, bool, error)
+}
+
+// Evaluator is the trusted read-only boundary owned by the TUI coordinator.
+type Evaluator interface {
 	Evaluate(context.Context, EvaluationInput) (Evaluation, error)
 }
 
-var errEvaluatorRequired = errors.New("automatic verification is not configured")
+var (
+	errEvaluatorRequired   = errors.New("automatic verification is not configured")
+	errRequirementsMissing = errors.New("verification requirements are not configured")
+)
 
 func (s *Service) requireEvaluator() error {
 	if s.evaluator == nil {
 		return errEvaluatorRequired
+	}
+	return nil
+}
+
+func (s *Service) requireRequirementProvider() error {
+	if s.requirementProvider == nil {
+		return errRequirementsMissing
 	}
 	return nil
 }
@@ -195,10 +220,10 @@ func fallback(value, other string) string {
 }
 
 func (s *Service) requirements(session *coop.Session, nodeNumber int) ([]coop.ResourceRequirement, error) {
-	if err := s.requireEvaluator(); err != nil {
+	if err := s.requireRequirementProvider(); err != nil {
 		return nil, err
 	}
-	requirements, err := s.evaluator.Requirements(session, nodeNumber)
+	requirements, err := s.requirementProvider.Requirements(session, nodeNumber)
 	if err != nil {
 		return nil, err
 	}
@@ -275,64 +300,46 @@ func (s *Service) reevaluate(ctx context.Context, sessionID string, nodeNumber, 
 	return s.evaluateAndApplyObservation(ctx, sessionID, nodeNumber, attemptNumber, trigger, eventType, resourceID, true)
 }
 
-func (s *Service) evaluateAndApply(ctx context.Context, sessionID string, nodeNumber, attemptNumber int, trigger EvaluationTrigger, ignoreStale bool) (coop.CommandResponse, error) {
-	return s.evaluateAndApplyObservation(ctx, sessionID, nodeNumber, attemptNumber, trigger, "", "", ignoreStale)
-}
-
 func (s *Service) evaluateAndApplyObservation(ctx context.Context, sessionID string, nodeNumber, attemptNumber int, trigger EvaluationTrigger, eventType, resourceID string, ignoreStale bool) (coop.CommandResponse, error) {
-	started := evaluationBegin{}
-	session, err := s.store.Update(sessionID, func(session *coop.Session) error {
-		if err := requireActiveSession(session); err != nil {
-			return err
-		}
-		node, err := session.NodeByNumber(nodeNumber)
-		if err != nil {
-			return err
-		}
-		attempt, err := node.AttemptByNumber(attemptNumber)
-		if err != nil || node.CurrentAttempt() != attempt {
-			if ignoreStale {
-				started.stale = true
-				return nil
-			}
-			return fmt.Errorf("%w: node %d attempt %d", coop.ErrAttemptNotCurrent, nodeNumber, attemptNumber)
-		}
-		started.snapshotAt, err = node.BeginAutomaticCheck(attemptNumber, s.nextEvaluationTime())
-		if err != nil {
-			return err
-		}
-		started.basis = captureEvaluationBasis(attempt)
-		return nil
-	})
+	session, started, err := s.acquireAutomaticEvaluation(
+		ctx,
+		sessionID,
+		nodeNumber,
+		attemptNumber,
+		trigger,
+		ignoreStale,
+	)
 	if err != nil {
 		return coop.CommandResponse{}, err
 	}
+	if started.busy {
+		return automaticEvaluationBusyResponse(session, nodeNumber, attemptNumber), nil
+	}
 	if started.stale {
-		node, nodeErr := session.NodeByNumber(nodeNumber)
-		if nodeErr != nil {
-			return coop.CommandResponse{}, nodeErr
-		}
-		if node.CurrentAttempt() != nil {
-			return responseForChangedAttempt(session, nodeNumber), nil
-		}
-		return alreadyMovedResponse(session, nodeNumber, node.State), nil
+		return staleEvaluationResponse(session, nodeNumber), nil
 	}
 	node, nodeErr := session.NodeByNumber(nodeNumber)
 	if nodeErr != nil {
 		return coop.CommandResponse{}, nodeErr
 	}
 	requiredOutcomes := coop.RequiredOutcomesForNode(node)
-	evaluation, evalErr := s.evaluator.Evaluate(ctx, EvaluationInput{
+	evaluation, evalErr := s.evaluateBounded(ctx, EvaluationInput{
 		Session: session, NodeNumber: nodeNumber, Attempt: attemptNumber, Trigger: trigger,
 		EventType: eventType, ResourceID: resourceID,
 	})
+	if ctx.Err() != nil {
+		s.invalidateCanceledEvaluation(sessionID, nodeNumber, attemptNumber, started.snapshotAt)
+		return coop.CommandResponse{}, ctx.Err()
+	}
 	if evalErr != nil {
-		evaluation.Results = []coop.CheckResult{{
+		// The TUI coordinator is the only evaluator. Any bounded timeout or
+		// local contract error is disclosed as unavailable, never as a pass.
+		evaluation = Evaluation{Results: []coop.CheckResult{{
 			ID: "automatic.verification", Kind: coop.CheckCoverage,
 			Importance: coop.CheckRequired, Status: coop.CheckUnavailable,
 			Detail: "Automatic verification could not run after bounded retries.",
 			Repair: "Continue without treating this check as passed.", UpdatedAt: s.now().UTC(),
-		}}
+		}}}
 	}
 	evaluation.Results = withRequiredOutcomeGaps(requiredOutcomes, evaluation.Results, started.snapshotAt)
 	applied := evaluationApply{responseAttempt: attemptNumber}
@@ -345,21 +352,157 @@ func (s *Service) evaluateAndApplyObservation(ctx context.Context, sessionID str
 	if applied.basisChanged {
 		return evaluationBasisChangedResponse(session, nodeNumber, attemptNumber), nil
 	}
+	if applied.lostLease {
+		return supersededEvaluationResponse(session, nodeNumber, attemptNumber), nil
+	}
 	if applied.stale {
 		latest, readErr := s.store.Read(sessionID)
 		if readErr != nil {
 			return coop.CommandResponse{}, readErr
 		}
-		node, nodeErr := latest.NodeByNumber(nodeNumber)
-		if nodeErr != nil {
-			return coop.CommandResponse{}, nodeErr
-		}
-		if node.CurrentAttempt() != nil {
-			return responseForChangedAttempt(latest, nodeNumber), nil
-		}
-		return alreadyMovedResponse(latest, nodeNumber, node.State), nil
+		return staleEvaluationResponse(latest, nodeNumber), nil
 	}
 	return s.evaluationResponse(session, nodeNumber, applied.responseAttempt, applied.policy, applied.results), nil
+}
+
+func (s *Service) acquireAutomaticEvaluation(
+	ctx context.Context,
+	sessionID string,
+	nodeNumber, attemptNumber int,
+	trigger EvaluationTrigger,
+	ignoreStale bool,
+) (*coop.Session, evaluationBegin, error) {
+	acquireDeadline := s.now().UTC().Add(s.eventWait)
+	var (
+		started evaluationBegin
+		session *coop.Session
+		err     error
+	)
+	for {
+		started = evaluationBegin{}
+		session, err = s.store.Update(sessionID, func(session *coop.Session) error {
+			if err := requireActiveSession(session); err != nil {
+				return err
+			}
+			node, err := session.NodeByNumber(nodeNumber)
+			if err != nil {
+				return err
+			}
+			attempt, err := node.AttemptByNumber(attemptNumber)
+			if err != nil || node.CurrentAttempt() != attempt {
+				if ignoreStale {
+					started.stale = true
+					return nil
+				}
+				return fmt.Errorf("%w: node %d attempt %d", coop.ErrAttemptNotCurrent, nodeNumber, attemptNumber)
+			}
+			started.snapshotAt, err = node.BeginAutomaticCheck(attemptNumber, s.nextEvaluationTime())
+			if errors.Is(err, coop.ErrAutomaticCheckBusy) {
+				started.busy = true
+				if trigger == TriggerRequest || trigger == TriggerEvent {
+					if refreshErr := node.MarkAutomaticRefresh(attemptNumber); refreshErr != nil {
+						return refreshErr
+					}
+				}
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			started.basis = captureEvaluationBasis(session, attempt)
+			return nil
+		})
+		if err != nil {
+			return nil, evaluationBegin{}, err
+		}
+		if !started.busy || started.stale {
+			return session, started, nil
+		}
+		if trigger != TriggerEvent || !s.now().UTC().Before(acquireDeadline) {
+			return session, started, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, evaluationBegin{}, err
+		}
+		s.sleep(automaticEvaluationAcquirePoll)
+	}
+}
+
+func (s *Service) invalidateCanceledEvaluation(sessionID string, nodeNumber, attemptNumber int, token time.Time) {
+	_, _ = s.store.Update(sessionID, func(session *coop.Session) error {
+		node, err := session.NodeByNumber(nodeNumber)
+		if err != nil {
+			return err
+		}
+		// A canceled coordinator did not settle the trigger that acquired this
+		// lease. Preserve one coalesced refresh so a rejoined TUI rereads before
+		// the attempt can complete or be confirmed.
+		err = node.InvalidateAutomaticCheck(attemptNumber, token)
+		if errors.Is(err, coop.ErrStaleResultSnapshot) ||
+			errors.Is(err, coop.ErrAttemptEnded) ||
+			errors.Is(err, coop.ErrAttemptNotCurrent) {
+			return nil
+		}
+		return err
+	})
+}
+
+func staleEvaluationResponse(session *coop.Session, nodeNumber int) coop.CommandResponse {
+	node, err := session.NodeByNumber(nodeNumber)
+	if err != nil {
+		return errorResponse(err, "stripe coop status")
+	}
+	if node.CurrentAttempt() != nil {
+		return responseForChangedAttempt(session, nodeNumber)
+	}
+	return alreadyMovedResponse(session, nodeNumber, node.State)
+}
+
+type boundedEvaluation struct {
+	evaluation Evaluation
+	err        error
+}
+
+func (s *Service) evaluateBounded(ctx context.Context, input EvaluationInput) (Evaluation, error) {
+	evalCtx, cancel := context.WithTimeout(ctx, s.evalTimeout)
+	defer cancel()
+	done := make(chan boundedEvaluation, 1)
+	go func() {
+		evaluation, err := s.evaluator.Evaluate(evalCtx, input)
+		done <- boundedEvaluation{evaluation: evaluation, err: err}
+	}()
+	select {
+	case outcome := <-done:
+		return outcome.evaluation, outcome.err
+	case <-evalCtx.Done():
+		return Evaluation{}, evalCtx.Err()
+	}
+}
+
+func automaticEvaluationBusyResponse(session *coop.Session, nodeNumber, attemptNumber int) coop.CommandResponse {
+	node, err := session.NodeByNumber(nodeNumber)
+	if err != nil {
+		return errorResponse(err, "stripe coop status")
+	}
+	attempt := node.CurrentAttempt()
+	if attempt == nil || attempt.Number != attemptNumber {
+		return responseForChangedAttempt(session, nodeNumber)
+	}
+	return coop.CommandResponse{
+		OK: true, SessionID: session.ID, Node: nodeNumber, Attempt: attemptNumber,
+		State: string(node.State), Decision: string(decisionPending),
+		Message:      "Automatic verification is already running from the trusted session.",
+		Next:         fmt.Sprintf("stripe coop agent await-review --session=%s --node=%d --attempt=%d", session.ID, nodeNumber, attemptNumber),
+		Verification: append([]coop.CheckResult(nil), attempt.Results...),
+	}
+}
+
+func supersededEvaluationResponse(session *coop.Session, nodeNumber, attemptNumber int) coop.CommandResponse {
+	response := automaticEvaluationBusyResponse(session, nodeNumber, attemptNumber)
+	if response.OK && response.Attempt == attemptNumber {
+		response.Message = "This automatic evaluation was superseded by a newer trusted-session read."
+	}
+	return response
 }
 
 // withRequiredOutcomeGaps is the core-owned boundary between public
@@ -395,28 +538,32 @@ type evaluationBegin struct {
 	basis      evaluationBasis
 	snapshotAt time.Time
 	stale      bool
+	busy       bool
 }
 
 type evaluationApply struct {
 	policy          resultPolicy
 	responseAttempt int
 	stale           bool
+	lostLease       bool
 	basisChanged    bool
 	results         []coop.CheckResult
 }
 
 type evaluationBasis struct {
-	reportedAt  *time.Time
-	openedAt    *time.Time
-	resources   []coop.ResourceBinding
-	agentChecks []coop.Verification
+	stripeAccountID string
+	reportedAt      *time.Time
+	openedAt        *time.Time
+	resources       []coop.ResourceBinding
+	agentChecks     []coop.Verification
 }
 
-func captureEvaluationBasis(attempt *coop.NodeAttempt) evaluationBasis {
+func captureEvaluationBasis(session *coop.Session, attempt *coop.NodeAttempt) evaluationBasis {
 	basis := evaluationBasis{
-		reportedAt:  copyTime(attempt.ReportedAt),
-		resources:   append([]coop.ResourceBinding(nil), attempt.Resources...),
-		agentChecks: append([]coop.Verification(nil), attempt.AgentChecks...),
+		stripeAccountID: session.StripeAccountID,
+		reportedAt:      copyTime(attempt.ReportedAt),
+		resources:       append([]coop.ResourceBinding(nil), attempt.Resources...),
+		agentChecks:     append([]coop.Verification(nil), attempt.AgentChecks...),
 	}
 	if attempt.AppSurface != nil {
 		basis.openedAt = copyTime(attempt.AppSurface.OpenedAt)
@@ -424,9 +571,10 @@ func captureEvaluationBasis(attempt *coop.NodeAttempt) evaluationBasis {
 	return basis
 }
 
-func (basis evaluationBasis) matches(attempt *coop.NodeAttempt) bool {
-	current := captureEvaluationBasis(attempt)
-	if !sameTime(basis.reportedAt, current.reportedAt) || !sameTime(basis.openedAt, current.openedAt) ||
+func (basis evaluationBasis) matches(session *coop.Session, attempt *coop.NodeAttempt) bool {
+	current := captureEvaluationBasis(session, attempt)
+	if basis.stripeAccountID != current.stripeAccountID ||
+		!sameTime(basis.reportedAt, current.reportedAt) || !sameTime(basis.openedAt, current.openedAt) ||
 		len(basis.resources) != len(current.resources) || len(basis.agentChecks) != len(current.agentChecks) {
 		return false
 	}
@@ -474,7 +622,21 @@ func (s *Service) applyEvaluation(session *coop.Session, nodeNumber, attemptNumb
 		}
 		return fmt.Errorf("%w: node %d attempt %d", coop.ErrAttemptNotCurrent, nodeNumber, attemptNumber)
 	}
-	if !basis.matches(attempt) {
+	if !basis.matches(session, attempt) {
+		if attempt.AutomaticCheckStartedAt == nil || !attempt.AutomaticCheckStartedAt.Equal(snapshotAt) {
+			applied.lostLease = true
+			return nil
+		}
+		if _, err := salvageObservedCandidates(node, attemptNumber, evaluation.Bindings); err != nil {
+			return err
+		}
+		if err := node.InvalidateAutomaticCheck(attemptNumber, snapshotAt); err != nil {
+			if errors.Is(err, coop.ErrStaleResultSnapshot) {
+				applied.lostLease = true
+				return nil
+			}
+			return err
+		}
 		applied.basisChanged = true
 		return nil
 	}
@@ -483,17 +645,9 @@ func (s *Service) applyEvaluation(session *coop.Session, nodeNumber, attemptNumb
 		return err
 	}
 	if !merged {
-		// Stale findings never land. mergeEvaluation may retain only a
-		// one-shot, explicitly untrusted event candidate for a role that was
-		// still unbound; current results continue to decide policy until a
-		// fresh read evaluates that candidate.
-		applied.results = append([]coop.CheckResult(nil), attempt.Results...)
-		applied.policy = decideResults(attempt.Results, attempt.AgentChecks, isHumanReviewNode(node))
-		if attempt.AutomaticCheckPending() {
-			applied.policy.decision = decisionPending
-			return nil
-		}
-		normalizeEvaluationPolicy(session, node, nodeNumber, attempt, &applied.policy)
+		// A reclaimed lease owner has no authority to land findings, bindings,
+		// or policy transitions—even when newer persisted evidence is a failure.
+		applied.lostLease = true
 		return nil
 	}
 	applied.results = append([]coop.CheckResult(nil), attempt.Results...)
@@ -504,7 +658,14 @@ func (s *Service) applyEvaluation(session *coop.Session, nodeNumber, attemptNumb
 		return nil
 	}
 	applied.policy = decideResults(attempt.Results, attempt.AgentChecks, isHumanReviewNode(node))
-	if attempt.AutomaticCheckPending() {
+	if attempt.AutomaticRefreshPending || supportingEvidenceNeedsReevaluation(attempt) {
+		// An observation arrived after this read began. Do not close the attempt
+		// from the older snapshot; the coordinator must perform the coalesced
+		// follow-up read first.
+		applied.policy.decision = decisionPending
+		return nil
+	}
+	if attempt.AutomaticCheckPending() && len(applied.policy.failed) == 0 {
 		applied.policy.decision = decisionPending
 		return nil
 	}
@@ -588,15 +749,12 @@ func normalizeEvaluationPolicy(session *coop.Session, node *coop.SessionNode, no
 }
 
 func (s *Service) mergeEvaluation(node *coop.SessionNode, attemptNumber int, snapshotAt time.Time, evaluation Evaluation) (bool, error) {
-	if err := node.ReconcileAutomaticResults(attemptNumber, snapshotAt, evaluation.Results); err != nil {
+	if err := node.ReconcileAutomaticEvaluation(
+		attemptNumber,
+		snapshotAt,
+		evaluation.Results,
+	); err != nil {
 		if errors.Is(err, coop.ErrStaleResultSnapshot) {
-			// Findings from an older read must not land, but an event-carried
-			// candidate may be one-shot evidence that polling cannot rediscover.
-			// Preserve only an untrusted candidate for a role that remains
-			// entirely unbound; a fresh evaluation will validate or reject it.
-			if err := salvageObservedCandidates(node, attemptNumber, evaluation.Bindings); err != nil {
-				return false, err
-			}
 			return false, nil
 		}
 		return false, err
@@ -609,11 +767,16 @@ func (s *Service) mergeEvaluation(node *coop.SessionNode, attemptNumber int, sna
 	return true, nil
 }
 
-func salvageObservedCandidates(node *coop.SessionNode, attemptNumber int, bindings []coop.ResourceBinding) error {
+// salvageObservedCandidates retains only a safe, replaceable identity proposed
+// by an exact lease owner. This preserves a one-shot event across a concurrent
+// basis change without persisting raw observations or trusting the event as
+// proof.
+func salvageObservedCandidates(node *coop.SessionNode, attemptNumber int, bindings []coop.ResourceBinding) (bool, error) {
 	attempt, err := node.AttemptByNumber(attemptNumber)
 	if err != nil || node.CurrentAttempt() != attempt {
-		return fmt.Errorf("%w: attempt %d", coop.ErrAttemptNotCurrent, attemptNumber)
+		return false, fmt.Errorf("%w: attempt %d", coop.ErrAttemptNotCurrent, attemptNumber)
 	}
+	salvaged := false
 	boundRoles := make(map[string]bool, len(attempt.Resources))
 	for _, binding := range attempt.Resources {
 		boundRoles[binding.Role] = true
@@ -623,11 +786,12 @@ func salvageObservedCandidates(node *coop.SessionNode, attemptNumber int, bindin
 			continue
 		}
 		if err := node.UpsertResource(attemptNumber, binding); err != nil {
-			return err
+			return false, err
 		}
 		boundRoles[binding.Role] = true
+		salvaged = true
 	}
-	return nil
+	return salvaged, nil
 }
 
 func (s *Service) applyEvaluationPolicy(session *coop.Session, node *coop.SessionNode, nodeNumber, attemptNumber int, applied *evaluationApply) error {
@@ -653,7 +817,8 @@ func (s *Service) applyEvaluationPolicy(session *coop.Session, node *coop.Sessio
 			return session.TransitionNode(nodeNumber, coop.NodeReview)
 		}
 	case decisionPending:
-		// await-review and the observer poll the same direct evaluator.
+		// await-review watches the shared attempt while the trusted session owns
+		// transient retries; ordinary nonterminal state keeps its polling path.
 	case decisionConfirmed, decisionUnverified:
 		if node.State != coop.NodeDone {
 			if err := session.TransitionNode(nodeNumber, coop.NodeDone); err != nil {
@@ -687,7 +852,7 @@ func (s *Service) evaluationResponse(session *coop.Session, nodeNumber, attemptN
 		response.Next = fmt.Sprintf("stripe coop agent start-work --session=%s --node=%d --note=%s", session.ID, nodeNumber, quoteArg("Fixing automatic verification findings"))
 	case decisionPending:
 		response.State = string(node.State)
-		response.Message = "Implementation recorded. Exercise the required Stripe flow while Co-op waits for the resulting state."
+		response.Message = "Implementation recorded. Exercise the required Stripe flow while the attached Co-op TUI verifies it."
 		response.Next = fmt.Sprintf("stripe coop agent await-review --session=%s --node=%d --attempt=%d", session.ID, nodeNumber, attemptNumber)
 	case decisionNeedsHuman:
 		response.State = string(coop.NodeReview)
@@ -727,6 +892,60 @@ func unverifiedCompletionMessage(nodeNumber int, node *coop.SessionNode, unavail
 		return fmt.Sprintf("Node %d completed; automatic verification was unavailable and was not reported as passed.", nodeNumber)
 	}
 	return fmt.Sprintf("Node %d completed without a successful automatic verifier; Co-op did not mark it as checked.", nodeNumber)
+}
+
+// RecordObservedCandidate persists one bounded, typed event discovery before
+// the observer starts a cancellable authoritative read. It is not proof: the
+// binding remains replaceable and cannot autonomously complete work. Keeping
+// it on the attempt lets a rejoined TUI recover the identity without a raw
+// event journal.
+func (s *Service) RecordObservedCandidate(
+	sessionID string,
+	nodeNumber, attemptNumber int,
+	eventType, resourceType, resourceID string,
+) error {
+	eventType = strings.TrimSpace(eventType)
+	resourceType = strings.ReplaceAll(strings.TrimSpace(resourceType), ".", "_")
+	resourceID = strings.TrimSpace(resourceID)
+	if eventType == "" || resourceType == "" || !coop.IsSafeStripeObjectID(resourceID) {
+		return errors.New("observed resource candidate is invalid")
+	}
+	provider, ok := s.requirementProvider.(ObservedCandidateProvider)
+	if !ok {
+		return errRequirementsMissing
+	}
+	_, err := s.store.Update(sessionID, func(session *coop.Session) error {
+		if err := requireActiveSession(session); err != nil {
+			return err
+		}
+		node, err := session.NodeByNumber(nodeNumber)
+		if err != nil {
+			return err
+		}
+		attempt, err := node.AttemptByNumber(attemptNumber)
+		if err != nil || node.CurrentAttempt() != attempt {
+			return fmt.Errorf("%w: node %d attempt %d", coop.ErrAttemptNotCurrent, nodeNumber, attemptNumber)
+		}
+		requirement, matched, err := provider.ObservedCandidateRequirement(
+			session,
+			nodeNumber,
+			eventType,
+			resourceType,
+		)
+		if err != nil {
+			return err
+		}
+		if !matched {
+			return nil
+		}
+		if err := node.UpsertResource(attemptNumber, coop.ResourceBinding{
+			Role: requirement.Role, Type: requirement.Type, ID: resourceID, Source: coop.BindingObservedCandidate,
+		}); err != nil {
+			return err
+		}
+		return node.MarkAutomaticRefresh(attemptNumber)
+	})
+	return err
 }
 
 // RecordSupportingResult persists request/event evidence without allowing the

@@ -23,7 +23,9 @@ import (
 func TestVerificationRequirementsIncludeStateResourceBinding(t *testing.T) {
 	catalog, err := checks.LoadCatalog()
 	require.NoError(t, err)
-	evaluator := &coopEvaluator{catalog: catalog, runner: checkrun.NewEvaluator(nil, catalog)}
+	evaluator := &coopEvaluator{
+		coopPlanner: &coopPlanner{catalog: catalog},
+	}
 	session := &coop.Session{Steps: []coop.SessionStep{{
 		StepDefinition: coop.StepDefinition{Key: "webhooks"},
 		Nodes: []coop.SessionNode{{NodeDefinition: coop.NodeDefinition{
@@ -47,11 +49,32 @@ func TestVerificationUIRequirementsOnlyNeedAppURL(t *testing.T) {
 	session := coop.NewSessionFromBlueprint(blueprint, "requirements", nil, nil)
 	// Keep the canonical Checkout/UI step and its separate future handler step.
 	session.Steps = session.Steps[2:]
-	evaluator := &coopEvaluator{catalog: catalog, runner: checkrun.NewEvaluator(nil, catalog)}
+	evaluator := &coopEvaluator{
+		coopPlanner: &coopPlanner{catalog: catalog},
+	}
 
 	requirements, err := evaluator.Requirements(session, 2)
 	require.NoError(t, err)
 	assert.Empty(t, requirements, "the UI event discovers its resource after the app is opened")
+	candidate, matched, err := evaluator.ObservedCandidateRequirement(
+		session,
+		2,
+		"checkout.session.completed",
+		"checkout_session",
+	)
+	require.NoError(t, err)
+	require.True(t, matched)
+	assert.Equal(t, coop.ResourceRequirement{
+		Role: "checkout_session", Type: "checkout_session", Required: false,
+	}, candidate)
+	_, matched, err = evaluator.ObservedCandidateRequirement(
+		session,
+		2,
+		"customer.subscription.created",
+		"checkout_session",
+	)
+	require.NoError(t, err)
+	assert.False(t, matched, "an unrelated event cannot persist a same-type candidate")
 	handlerRequirements, err := evaluator.Requirements(session, 3)
 	require.NoError(t, err)
 	assert.Equal(t, []coop.ResourceRequirement{{
@@ -63,8 +86,10 @@ func TestVerificationAccountSwitchDegradesInsteadOfReadingAnotherAccount(t *test
 	catalog, err := checks.LoadCatalog()
 	require.NoError(t, err)
 	evaluator := &coopEvaluator{
-		catalog: catalog, runner: checkrun.NewEvaluator(nil, catalog),
-		accountID: "acct_other123", now: func() time.Time { return time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC) },
+		coopPlanner: &coopPlanner{catalog: catalog},
+		runner:      checkrun.NewEvaluator(nil, catalog),
+		accountID:   "acct_other123",
+		now:         func() time.Time { return time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC) },
 	}
 	session := &coop.Session{
 		StripeAccountID: "acct_session123",
@@ -90,8 +115,10 @@ func TestVerificationUnpinnedSessionDegradesInsteadOfReadingCurrentAccount(t *te
 	catalog, err := checks.LoadCatalog()
 	require.NoError(t, err)
 	evaluator := &coopEvaluator{
-		catalog: catalog, runner: checkrun.NewEvaluator(nil, catalog),
-		accountID: "acct_current123", now: func() time.Time { return time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC) },
+		coopPlanner: &coopPlanner{catalog: catalog},
+		runner:      checkrun.NewEvaluator(nil, catalog),
+		accountID:   "acct_current123",
+		now:         func() time.Time { return time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC) },
 	}
 	session := &coop.Session{Steps: []coop.SessionStep{{Nodes: []coop.SessionNode{{Attempts: []coop.NodeAttempt{{Number: 1}}}}}}}
 
@@ -111,7 +138,12 @@ func TestCheckoutVerificationEndToEndHumanAndAgentFlow(t *testing.T) {
 	currentTime := time.Date(2026, 7, 21, 10, 0, 0, 0, time.UTC)
 	now := func() time.Time { return currentTime }
 	reader := &acceptanceReader{objects: map[string]map[string]any{}}
-	evaluator := &coopEvaluator{catalog: catalog, runner: checkrun.NewEvaluator(reader, catalog), accountID: "acct_checkout123", now: now}
+	evaluator := &coopEvaluator{
+		coopPlanner: &coopPlanner{catalog: catalog},
+		runner:      checkrun.NewEvaluator(reader, catalog),
+		accountID:   "acct_checkout123",
+		now:         now,
+	}
 	store, err := coop.NewStoreAt(t.TempDir())
 	require.NoError(t, err)
 	session := coop.NewSessionFromBlueprint(blueprint, "checkout_acceptance", nil, nil)
@@ -150,10 +182,12 @@ func TestCheckoutVerificationEndToEndHumanAndAgentFlow(t *testing.T) {
 	created, err := service.StartWork(session.ID, checkoutNodeNumber, "Creating Checkout")
 	require.NoError(t, err)
 	currentTime = currentTime.Add(10 * time.Second)
-	createdResult, err := service.ReportWorkAttempt(context.Background(), session.ID, checkoutNodeNumber, created.Attempt, workflow.ReportWorkInput{
+	_, err = service.ReportWorkAttempt(context.Background(), session.ID, checkoutNodeNumber, created.Attempt, workflow.ReportWorkInput{
 		File: "server/checkout.go", Note: "Created Checkout Session",
 		StripeResources: map[string]string{"checkout_session": "cs_created"},
 	})
+	require.NoError(t, err)
+	createdResult, err := service.Reevaluate(context.Background(), session.ID, checkoutNodeNumber, created.Attempt, workflow.TriggerPoll)
 	require.NoError(t, err)
 	assert.Equal(t, "confirmed", createdResult.Decision)
 	assert.Contains(t, createdResult.Next, "--node=3")
@@ -162,9 +196,20 @@ func TestCheckoutVerificationEndToEndHumanAndAgentFlow(t *testing.T) {
 	ui, err := service.StartWork(session.ID, uiNodeNumber, "Building the app surface")
 	require.NoError(t, err)
 	currentTime = currentTime.Add(10 * time.Second)
-	uiResult, err := service.ReportWorkAttempt(context.Background(), session.ID, uiNodeNumber, ui.Attempt, workflow.ReportWorkInput{
+	injected, err := service.ReportWorkAttempt(context.Background(), session.ID, uiNodeNumber, ui.Attempt, workflow.ReportWorkInput{
+		File: "web/checkout.tsx", Note: "Tried to bypass UI discovery",
+		AppURL:          "http://127.0.0.1:0/checkout",
+		StripeResources: map[string]string{"checkout_session": "cs_created"},
+	})
+	require.NoError(t, err)
+	assert.False(t, injected.OK)
+	assert.Contains(t, injected.Error, `resource role "checkout_session" is not required`,
+		"UI report-work must not accept an identity that human exercise is meant to discover")
+	_, err = service.ReportWorkAttempt(context.Background(), session.ID, uiNodeNumber, ui.Attempt, workflow.ReportWorkInput{
 		File: "web/checkout.tsx", Note: "Built checkout UI", AppURL: "http://127.0.0.1:0/checkout",
 	})
+	require.NoError(t, err)
+	uiResult, err := service.Reevaluate(context.Background(), session.ID, uiNodeNumber, ui.Attempt, workflow.TriggerPoll)
 	require.NoError(t, err)
 	assert.Equal(t, "needs_human", uiResult.Decision)
 	assert.Contains(t, uiResult.Next, "await-review")
@@ -227,6 +272,21 @@ func TestCheckoutVerificationEndToEndHumanAndAgentFlow(t *testing.T) {
 	assert.Equal(t, uiNodeNumber, trigger.NodeNumber, "the UI's explicit event declaration owns the human flow")
 	currentTime = currentTime.Add(10 * time.Second)
 	reader.TakePaths()
+	require.NoError(t, service.RecordObservedCandidate(
+		session.ID,
+		trigger.NodeNumber,
+		trigger.AttemptNumber,
+		"checkout.session.completed",
+		"checkout.session",
+		"cs_human",
+	))
+	candidateSession, err := store.Read(session.ID)
+	require.NoError(t, err)
+	candidateNode, err := candidateSession.NodeByNumber(uiNodeNumber)
+	require.NoError(t, err)
+	require.Len(t, candidateNode.CurrentAttempt().Resources, 1)
+	assert.Equal(t, coop.BindingObservedCandidate, candidateNode.CurrentAttempt().Resources[0].Source)
+	assert.Equal(t, "cs_human", candidateNode.CurrentAttempt().Resources[0].ID)
 	stateResult, err := service.ReevaluateState(context.Background(), session.ID, trigger.NodeNumber, trigger.AttemptNumber, "checkout.session.completed", "cs_human")
 	require.NoError(t, err)
 	assert.Equal(t, "needs_human", stateResult.Decision)

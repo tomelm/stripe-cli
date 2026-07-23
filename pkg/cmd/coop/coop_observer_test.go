@@ -3,6 +3,7 @@ package coopcmd
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +23,11 @@ type recordedEvidence struct {
 	result        coop.CheckResult
 }
 
+type recordedCandidate struct {
+	node, attempt               int
+	eventType, resourceType, id string
+}
+
 type observerEvaluationCall struct {
 	node, attempt int
 	trigger       workflow.EvaluationTrigger
@@ -29,9 +35,23 @@ type observerEvaluationCall struct {
 	resourceID    string
 }
 
+type observerPassingEvaluator struct{}
+
+func (observerPassingEvaluator) Requirements(*coop.Session, int) ([]coop.ResourceRequirement, error) {
+	return nil, nil
+}
+
+func (observerPassingEvaluator) Evaluate(context.Context, workflow.EvaluationInput) (workflow.Evaluation, error) {
+	return workflow.Evaluation{Results: []coop.CheckResult{{
+		ID: "observer.rejoined", Kind: coop.CheckResource,
+		Importance: coop.CheckRequired, Status: coop.CheckPassed, UpdatedAt: time.Now().UTC(),
+	}}}, nil
+}
+
 type recordingObserverWorkflow struct {
-	evidence chan recordedEvidence
-	calls    chan observerEvaluationCall
+	candidates chan recordedCandidate
+	evidence   chan recordedEvidence
+	calls      chan observerEvaluationCall
 }
 
 type recordingObserverEvaluator struct {
@@ -49,9 +69,21 @@ func (evaluator *recordingObserverEvaluator) Evaluate(_ context.Context, input w
 
 func newRecordingObserverWorkflow() *recordingObserverWorkflow {
 	return &recordingObserverWorkflow{
-		evidence: make(chan recordedEvidence, 16),
-		calls:    make(chan observerEvaluationCall, 16),
+		candidates: make(chan recordedCandidate, 16),
+		evidence:   make(chan recordedEvidence, 16),
+		calls:      make(chan observerEvaluationCall, 16),
 	}
+}
+
+func (recorder *recordingObserverWorkflow) RecordObservedCandidate(
+	_ string,
+	node, attempt int,
+	eventType, resourceType, id string,
+) error {
+	recorder.candidates <- recordedCandidate{
+		node: node, attempt: attempt, eventType: eventType, resourceType: resourceType, id: id,
+	}
+	return nil
 }
 
 func (recorder *recordingObserverWorkflow) RecordSupportingResult(_ string, node, attempt int, result coop.CheckResult) error {
@@ -107,6 +139,11 @@ func TestObserverPersistsSupportingFactsAndTriggersAuthoritativeChecks(t *testin
 		ID: "evt_123", Type: "checkout.session.completed",
 		Data: map[string]interface{}{"object": map[string]interface{}{"object": "checkout.session", "id": "cs_123"}},
 	}}
+	eventCandidate := receive(t, service.candidates)
+	assert.Equal(t, recordedCandidate{
+		node: 2, attempt: 2, eventType: "checkout.session.completed",
+		resourceType: "checkout.session", id: "cs_123",
+	}, eventCandidate)
 	eventEvidence := receive(t, service.evidence)
 	assert.Equal(t, coop.CheckEvent, eventEvidence.result.Kind)
 	assert.Equal(t, coop.CheckObserved, eventEvidence.result.Status)
@@ -178,6 +215,28 @@ func TestObserverAmbiguityTriggersCandidatesButCannotPersistFailure(t *testing.T
 	assert.NotContains(t, evidence.result.Detail, "sensitive free text")
 	call := receive(t, service.calls)
 	assert.Equal(t, 1, call.node)
+}
+
+func TestObserverDispatchesAdmittedAmbiguousFactDuringShutdown(t *testing.T) {
+	store := writeObserverSession(t, []coop.SessionNode{
+		observerRequestNode("/v1/payment_intents", 1),
+		observerRequestNode("/v1/payment_intents", 2),
+	})
+	service := newRecordingObserverWorkflow()
+	controller := &coopObserverController{store: store, now: time.Now}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	controller.observe(ctx, service, "observer_session", websocket.DataElement{Data: logtailing.EventPayload{
+		Method: "POST", URL: "/v1/payment_intents", Status: 200,
+	}})
+
+	first := receive(t, service.calls)
+	second := receive(t, service.calls)
+	assert.Equal(t, []int{1, 2}, []int{first.node, second.node})
+	assert.Equal(t, workflow.TriggerRequest, first.trigger)
+	assert.Equal(t, workflow.TriggerRequest, second.trigger)
+	assertNoValue(t, service.evidence)
 }
 
 func TestObserverAmbiguousEventTriggersEveryStateRuleWithoutAttribution(t *testing.T) {
@@ -329,6 +388,93 @@ func TestObserverPollsWithoutCredentialsAndStandbyTakesOverLease(t *testing.T) {
 	second.Close()
 }
 
+func TestObserverDefersUnpinnedPollingUntilPinnedOrGraceExpires(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		ready func(*testing.T, *coop.Store, func(time.Time))
+	}{
+		{
+			name: "account becomes pinned",
+			ready: func(t *testing.T, store *coop.Store, _ func(time.Time)) {
+				_, err := store.Update("observer_session", func(session *coop.Session) error {
+					session.StripeAccountID = "acct_123"
+					return nil
+				})
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "bounded grace expires",
+			ready: func(_ *testing.T, _ *coop.Store, setNow func(time.Time)) {
+				setNow(time.Date(2026, 7, 21, 12, 3, 0, 0, time.UTC))
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := writeObserverSession(t, []coop.SessionNode{observerRequestNode("/v1/customers", 1)})
+			reported := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+			_, err := store.Update("observer_session", func(session *coop.Session) error {
+				session.StripeAccountID = ""
+				attempt := &session.Steps[0].Nodes[0].Attempts[0]
+				attempt.ReportedAt = &reported
+				return nil
+			})
+			require.NoError(t, err)
+			service := newRecordingObserverWorkflow()
+			controller := testObserverController(store, service, nil, false, 5*time.Millisecond)
+			controller.accountGrace = 2 * time.Minute
+			var nowMu sync.Mutex
+			now := reported
+			controller.now = func() time.Time {
+				nowMu.Lock()
+				defer nowMu.Unlock()
+				return now
+			}
+			setNow := func(next time.Time) {
+				nowMu.Lock()
+				defer nowMu.Unlock()
+				now = next
+			}
+			controller.Start("observer_session")
+			defer controller.Close()
+
+			assertNoValue(t, service.calls)
+			test.ready(t, store, setNow)
+			call := receive(t, service.calls)
+			assert.Equal(t, observerEvaluationCall{node: 1, attempt: 1, trigger: workflow.TriggerPoll}, call)
+		})
+	}
+}
+
+func TestObserverRejoinRecoversExpiredAttemptLease(t *testing.T) {
+	store := writeObserverSession(t, []coop.SessionNode{observerRequestNode("/v1/customers", 1)})
+	now := time.Now().UTC()
+	_, err := store.Update("observer_session", func(session *coop.Session) error {
+		node := &session.Steps[0].Nodes[0]
+		node.State = coop.NodeActive
+		attempt := &node.Attempts[0]
+		attempt.StartedAt = now.Add(-time.Minute)
+		attempt.ReportedAt = &now
+		_, beginErr := node.BeginAutomaticCheck(attempt.Number, now.Add(-coop.AutomaticCheckLease-time.Second))
+		return beginErr
+	})
+	require.NoError(t, err)
+	service := workflow.NewService(store, workflow.WithEvaluator(observerPassingEvaluator{}))
+	controller := testObserverController(store, service, nil, false, 5*time.Millisecond)
+	controller.now = time.Now
+	controller.Start("observer_session")
+	defer controller.Close()
+
+	require.Eventually(t, func() bool {
+		session, readErr := store.Read("observer_session")
+		if readErr != nil {
+			return false
+		}
+		node, nodeErr := session.NodeByNumber(1)
+		return nodeErr == nil && node.State == coop.NodeDone && len(node.Attempts[0].Results) == 1
+	}, time.Second, 5*time.Millisecond)
+}
+
 func TestObserverDoesNotPollSettledUnavailableResult(t *testing.T) {
 	store := writeObserverSession(t, []coop.SessionNode{observerRequestNode("/v1/customers", 1)})
 	reported := time.Now().UTC()
@@ -339,6 +485,7 @@ func TestObserverDoesNotPollSettledUnavailableResult(t *testing.T) {
 			ID: "resource.unavailable", Kind: coop.CheckResource, Importance: coop.CheckRequired,
 			Status: coop.CheckUnavailable, UpdatedAt: reported,
 		}}
+		attempt.AutomaticResultsAt = &reported
 		return nil
 	})
 	require.NoError(t, err)
@@ -353,6 +500,63 @@ func TestObserverDoesNotPollSettledUnavailableResult(t *testing.T) {
 	assertNoValue(t, service.calls)
 	require.NoError(t, store.RemoveHeartbeat("observer_session"))
 	assertNoValue(t, service.calls)
+}
+
+func TestObserverPollsReportedPendingDespiteAgentHeartbeat(t *testing.T) {
+	store := writeObserverSession(t, []coop.SessionNode{observerRequestNode("/v1/customers", 1)})
+	reported := time.Now().UTC()
+	_, err := store.Update("observer_session", func(session *coop.Session) error {
+		attempt := &session.Steps[0].Nodes[0].Attempts[0]
+		attempt.ReportedAt = &reported
+		attempt.Results = []coop.CheckResult{{
+			ID: "state.pending", Kind: coop.CheckState, Importance: coop.CheckRequired,
+			Status: coop.CheckPending, UpdatedAt: reported,
+		}}
+		return nil
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.WriteHeartbeat("observer_session"))
+	service := newRecordingObserverWorkflow()
+	controller := testObserverController(store, service, func(context.Context, observerStreamConfig) ([]<-chan websocket.IElement, error) {
+		return nil, nil
+	}, false, 100*time.Millisecond)
+	controller.Start("observer_session")
+	defer controller.Close()
+
+	call := receive(t, service.calls)
+	assert.Equal(t, observerEvaluationCall{node: 1, attempt: 1, trigger: workflow.TriggerPoll}, call)
+	assertNoValue(t, service.calls)
+}
+
+func TestObserverOwnsPostOpenRefreshDespiteAgentHeartbeat(t *testing.T) {
+	store := writeObserverSession(t, []coop.SessionNode{observerRequestNode("/v1/customers", 1)})
+	reported := time.Now().UTC()
+	resultsAt := reported.Add(time.Second)
+	opened := resultsAt.Add(time.Second)
+	_, err := store.Update("observer_session", func(session *coop.Session) error {
+		node := &session.Steps[0].Nodes[0]
+		node.Type = coop.NodeUIComponent
+		attempt := &node.Attempts[0]
+		attempt.ReportedAt = &reported
+		attempt.AutomaticResultsAt = &resultsAt
+		attempt.AppSurface = &coop.AppSurface{URL: "http://localhost:3000/billing", OpenedAt: &opened}
+		attempt.Results = []coop.CheckResult{{
+			ID: "resource.passed", Kind: coop.CheckResource, Importance: coop.CheckRequired,
+			Status: coop.CheckPassed, UpdatedAt: resultsAt,
+		}}
+		return nil
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.WriteHeartbeat("observer_session"))
+	service := newRecordingObserverWorkflow()
+	controller := testObserverController(store, service, func(context.Context, observerStreamConfig) ([]<-chan websocket.IElement, error) {
+		return nil, nil
+	}, false, 100*time.Millisecond)
+	controller.Start("observer_session")
+	defer controller.Close()
+
+	call := receive(t, service.calls)
+	assert.Equal(t, observerEvaluationCall{node: 1, attempt: 1, trigger: workflow.TriggerPoll}, call)
 }
 
 func TestAttemptNeedsPollingAfterAppOpen(t *testing.T) {
@@ -432,7 +636,7 @@ func TestAttemptNeedsPollingAfterAppOpen(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "account-wide request evidence does not starve review",
+			name: "attributable request newer than the direct snapshot is retried",
 			attempt: &coop.NodeAttempt{
 				AutomaticResultsAt: &atOpen,
 				Results: []coop.CheckResult{{
@@ -440,7 +644,7 @@ func TestAttemptNeedsPollingAfterAppOpen(t *testing.T) {
 					Status: coop.CheckObserved, UpdatedAt: afterOpen,
 				}},
 			},
-			want: false,
+			want: true,
 		},
 	}
 

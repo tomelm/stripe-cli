@@ -123,6 +123,76 @@ func TestAutomaticCheckMarkerIsMonotonicAndTracksPendingRead(t *testing.T) {
 	assert.False(t, attempt.AutomaticCheckPending())
 }
 
+func TestAutomaticCheckLeaseIsSingleFlightAndRejectsExpiredOwner(t *testing.T) {
+	now := time.Now().UTC()
+	passed := []CheckResult{{
+		ID: "resource.customer.exists", Kind: CheckResource,
+		Importance: CheckRequired, Status: CheckPassed,
+	}}
+	node := testSessionNode("node", "Node", NodeActive)
+	attempt, err := node.StartAttempt(now, "")
+	require.NoError(t, err)
+	expired, err := node.BeginAutomaticCheck(attempt.Number, now)
+	require.NoError(t, err)
+	_, err = node.BeginAutomaticCheck(attempt.Number, now.Add(AutomaticCheckLease-time.Nanosecond))
+	require.ErrorIs(t, err, ErrAutomaticCheckBusy)
+	require.NotNil(t, attempt.AutomaticCheckStartedAt)
+	assert.Equal(t, expired, *attempt.AutomaticCheckStartedAt)
+
+	fresh, err := node.BeginAutomaticCheck(attempt.Number, now.Add(AutomaticCheckLease))
+	require.NoError(t, err)
+	assert.True(t, fresh.After(expired))
+	require.NotNil(t, attempt.AutomaticCheckStartedAt)
+	assert.Equal(t, fresh, *attempt.AutomaticCheckStartedAt)
+	require.NotNil(t, attempt.AutomaticCheckWatermark)
+	assert.Equal(t, fresh, *attempt.AutomaticCheckWatermark)
+
+	err = node.ReconcileAutomaticEvaluation(attempt.Number, expired, []CheckResult{{
+		ID: "resource.customer.exists", Kind: CheckResource,
+		Importance: CheckRequired, Status: CheckPassed,
+	}})
+	require.ErrorIs(t, err, ErrStaleResultSnapshot)
+	require.NotNil(t, attempt.AutomaticCheckStartedAt)
+	assert.Equal(t, fresh, *attempt.AutomaticCheckStartedAt)
+	assert.Nil(t, attempt.AutomaticResultsAt, "a lease-pruned evaluation cannot land late")
+
+	require.NoError(t, node.ReconcileAutomaticEvaluation(attempt.Number, fresh, passed))
+	assert.False(t, attempt.AutomaticCheckPending())
+	require.NotNil(t, attempt.AutomaticResultsAt)
+	assert.Equal(t, fresh, *attempt.AutomaticResultsAt)
+	require.Len(t, attempt.Results, 1)
+	assert.Equal(t, CheckPassed, attempt.Results[0].Status)
+}
+
+func TestAutomaticCheckInvalidationRequiresExactLeaseOwner(t *testing.T) {
+	now := time.Now().UTC()
+	node := testSessionNode("node", "Node", NodeActive)
+	attempt, err := node.StartAttempt(now, "")
+	require.NoError(t, err)
+	expired, err := node.BeginAutomaticCheck(attempt.Number, now)
+	require.NoError(t, err)
+	current, err := node.BeginAutomaticCheck(attempt.Number, now.Add(AutomaticCheckLease))
+	require.NoError(t, err)
+
+	require.ErrorIs(t, node.InvalidateAutomaticCheck(attempt.Number, expired), ErrStaleResultSnapshot)
+	assert.False(t, attempt.AutomaticRefreshPending)
+	require.NotNil(t, attempt.AutomaticCheckStartedAt)
+	assert.Equal(t, current, *attempt.AutomaticCheckStartedAt)
+
+	require.NoError(t, node.InvalidateAutomaticCheck(attempt.Number, current))
+	assert.True(t, attempt.AutomaticRefreshPending)
+	assert.False(t, attempt.AutomaticCheckPending())
+
+	refresh, err := node.BeginAutomaticCheck(attempt.Number, now.Add(AutomaticCheckLease+time.Second))
+	require.NoError(t, err)
+	require.NoError(t, node.ReconcileAutomaticEvaluation(attempt.Number, refresh, []CheckResult{{
+		ID: "automatic.account-scope", Kind: CheckCoverage,
+		Importance: CheckRequired, Status: CheckUnavailable,
+	}}))
+	assert.False(t, attempt.AutomaticRefreshPending)
+	assert.False(t, attempt.AutomaticCheckPending())
+}
+
 func TestEndedAttemptRejectsMutationHelpers(t *testing.T) {
 	node := testSessionNode("node", "Node", NodeActive)
 	now := time.Now().UTC()

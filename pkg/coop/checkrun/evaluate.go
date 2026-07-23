@@ -697,7 +697,7 @@ func (run *evaluation) match(target target, object map[string]any, predicate che
 	case checks.PredicateEqualsInput:
 		result, scalarValue = run.matchEqualsInput(target, predicate, value, present)
 	case checks.PredicateEqualsBinding:
-		result = run.matchEqualsBinding(predicate, present, observed, scalarValue)
+		result = run.matchEqualsBinding(target, predicate, present, observed, scalarValue)
 	default:
 		result.available, result.expected, result.observed = false, "a supported predicate", "unsupported predicate"
 	}
@@ -752,7 +752,7 @@ func (run *evaluation) matchEqualsInput(target target, predicate checks.Predicat
 	return result, scalarValue
 }
 
-func (run *evaluation) matchEqualsBinding(predicate checks.Predicate, present bool, observed string, scalarValue bool) predicateMatch {
+func (run *evaluation) matchEqualsBinding(target target, predicate checks.Predicate, present bool, observed string, scalarValue bool) predicateMatch {
 	expected, err := run.bindingValue(predicate.Binding)
 	if err != nil {
 		return predicateMatch{available: false, expected: "value from the referenced Stripe resource", observed: observed}

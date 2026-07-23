@@ -15,7 +15,7 @@ request/event streams ─> facts, bindings, triggers       attempt history
                                                             TUI  agent CLI
 ```
 
-The shared JSON session file is the durable boundary between the TUI and agent CLI. Writes are atomic and attempt-scoped. Automatic findings are applied as complete snapshots behind a per-attempt watermark, so an older asynchronous evaluation cannot overwrite or resurrect findings from a newer one. A test-mode reader must authenticate its exact `/v1/account` identity before the first usable account can atomically pin the session; an empty or different account fails closed. A single TUI-owned observer may consume the CLI's existing request/event streams to trigger rereads and attach supporting evidence; polling is the fallback. The observer retries credentials after first-run sandbox provisioning and reconnects closed streams. Stream observations never pass a check by themselves.
+The shared JSON session file is the durable boundary between the TUI and agent CLI. Writes are atomic and attempt-scoped. Agent commands submit work or watch the session; they never execute trusted Stripe reads. The TUI-owned observer is the sole verification coordinator. It applies complete automatic snapshots behind a per-attempt single-flight lease, so a crashed or superseded reader cannot overwrite findings or advance policy. A test-mode reader must authenticate its exact `/v1/account` identity before the first usable account can atomically pin the session; an empty or different account fails closed. The observer consumes the CLI's existing request/event streams to trigger rereads and attach supporting evidence, with polling as the fallback. A bounded typed event candidate is retained on the attempt so a rejoined TUI can recover an admitted event without storing a raw observation journal. Stream observations never pass a check by themselves.
 
 ## Node State Machine
 
@@ -59,7 +59,7 @@ active ──→ completed    (all nodes done/skipped, or "stripe coop stop")
 | `stripe coop agent report-work --node <n> --attempt <a>` | Submit an attempt with implementation evidence, requested resource IDs, and an app URL for UI work |
 | `stripe coop agent report-check --node <n> --attempt <a>` | Add an agent-reported check to the current attempt |
 | `stripe coop agent skip --node <n> --attempt <a>` | Skip an attempt in an explicitly optional step, with a bounded reason |
-| `stripe coop agent await-review --node <n> --attempt <a>` | Poll direct checks and block until Co-op or the developer decides |
+| `stripe coop agent await-review --node <n> --attempt <a>` | Watch the shared attempt until the trusted session or developer decides |
 | `stripe coop agent next-action` | Show post-completion options (blocks until selection) |
 | `stripe coop agent start-followup` | Start an internal guided follow-up session selected from next actions |
 
@@ -141,7 +141,7 @@ Post-completion choices are written into the session file for the agent. Deploy 
 
 - Required direct resource/state checks all pass: non-UI work completes automatically.
 - A deterministic required mismatch: the attempt ends, its evidence is retained, and a correction attempt is created with expected/observed facts and repair guidance.
-- A state is still progressing: `await-review` polls it; during UI review the TUI stays quietly pending.
+- A state is still progressing: the TUI coordinator polls it while `await-review` watches the shared attempt; during UI review the TUI stays quietly pending.
 - A direct check is unavailable: it is never presented as passed. Non-UI work can continue with the explicit unavailable result; UI confirmation requires a visibly recorded human override.
 - Completed-but-unverified work remains distinct in attempt history and in the TUI outline/completion summary; it is not rendered as a green automatic success.
 - Request/event observations are supporting evidence only. Missing or ambiguous observations never become failures. Even a uniquely path-matched 4xx/5xx remains advisory because Stripe request logs are account-wide and carry no Co-op attempt token; Co-op will not blame or wake the agent without a stronger correlation key.
