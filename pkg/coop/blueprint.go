@@ -109,7 +109,7 @@ func validateBlueprintReferences(bp *Blueprint) error {
 	for {
 		token, err := decoder.Token()
 		if err == io.EOF {
-			return nil
+			break
 		}
 		if err != nil {
 			return err
@@ -122,6 +122,39 @@ func validateBlueprintReferences(bp *Blueprint) error {
 			return err
 		}
 	}
+	return validateBlueprintReferenceOrder(bp)
+}
+
+func validateBlueprintReferenceOrder(bp *Blueprint) error {
+	nodeOrder := map[string]int{}
+	order := 0
+	for _, step := range bp.Steps {
+		for _, node := range step.Nodes {
+			order++
+			nodeOrder[step.Key+"."+node.Key] = order
+		}
+	}
+
+	order = 0
+	for _, step := range bp.Steps {
+		for _, node := range step.Nodes {
+			order++
+			data, err := json.Marshal(node)
+			if err != nil {
+				return err
+			}
+			for _, match := range nodeReferencePattern.FindAllStringSubmatch(string(data), -1) {
+				base, _, ok := splitNodeReference(match[1])
+				if !ok {
+					continue
+				}
+				if nodeOrder[base] >= order {
+					return fmt.Errorf("node %q references %q before it has completed", step.Key+"."+node.Key, base)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func validateBlueprintReferenceString(value string, validRefs map[string]bool) error {

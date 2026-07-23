@@ -2,14 +2,22 @@
 // AI agent + human developer Stripe integration building.
 package coop
 
-import "time"
+import (
+	"encoding/json"
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
+)
 
 // NodeState represents the lifecycle state of a single blueprint node.
 type NodeState string
 
 const (
-	CurrentSessionSchemaVersion = 2
+	CurrentSessionSchemaVersion = 3
 )
+
+var commandTemplatePlaceholder = regexp.MustCompile(`<[^>\n]+>`)
 
 const (
 	NodePending NodeState = "pending"
@@ -48,6 +56,11 @@ type Implementation struct {
 	Snippet string `json:"snippet,omitempty"`
 	Note    string `json:"note,omitempty"`
 }
+
+// NodeOutputs stores values produced by a node. The outer key identifies the
+// result source ("default" for a node's primary result, or a named/numeric
+// request result); the inner key is the field path referenced by a blueprint.
+type NodeOutputs map[string]map[string]json.RawMessage
 
 // Verification is a single check the agent ran.
 type Verification struct {
@@ -96,6 +109,7 @@ type SessionNode struct {
 	State          NodeState       `json:"state"`
 	Activity       string          `json:"activity,omitempty"`
 	Implementation *Implementation `json:"implementation,omitempty"`
+	Outputs        NodeOutputs     `json:"outputs,omitempty"`
 	Verifications  []Verification  `json:"verifications,omitempty"`
 	RejectionNote  string          `json:"rejection_note,omitempty"`
 	StartedAt      *time.Time      `json:"started_at,omitempty"`
@@ -141,17 +155,106 @@ type NextStepSuggestion struct {
 	Reason      string `json:"reason,omitempty"`
 }
 
+// CommandInput describes a value an agent must provide before executing a
+// command template.
+type CommandInput struct {
+	Name        string `json:"name"`
+	Flag        string `json:"flag,omitempty"`
+	Description string `json:"description"`
+}
+
+// RequiredOutput describes a node result that a future blueprint node
+// references. Source is empty for the node's primary result.
+type RequiredOutput struct {
+	Source string `json:"source,omitempty"`
+	Field  string `json:"field"`
+}
+
+// Recovery is the single recovery contract for all agent-facing failures.
+// Exactly one of Next and NextTemplate should be set.
+type Recovery struct {
+	Hint           string         `json:"hint"`
+	Next           string         `json:"next,omitempty"`
+	NextTemplate   string         `json:"next_template,omitempty"`
+	RequiredInputs []CommandInput `json:"required_inputs,omitempty"`
+}
+
 // CommandResponse is the JSON output format for agent-facing commands.
 type CommandResponse struct {
-	OK          bool        `json:"ok"`
-	SessionID   string      `json:"session_id,omitempty"`
-	Node        int         `json:"node,omitempty"`
-	State       string      `json:"state,omitempty"`
-	Message     string      `json:"message,omitempty"`
-	Next        string      `json:"next,omitempty"`
-	AgentPrompt string      `json:"agent_prompt,omitempty"`
-	APIRequest  *APIRequest `json:"api_request,omitempty"`
-	SDKExample  string      `json:"sdk_example,omitempty"`
-	Error       string      `json:"error,omitempty"`
-	Hint        string      `json:"hint,omitempty"`
+	OK                 bool                `json:"ok"`
+	SessionID          string              `json:"session_id,omitempty"`
+	Node               int                 `json:"node,omitempty"`
+	State              string              `json:"state,omitempty"`
+	Message            string              `json:"message,omitempty"`
+	Next               string              `json:"next,omitempty"`
+	NextTemplate       string              `json:"next_template,omitempty"`
+	RequiredInputs     []CommandInput      `json:"required_inputs,omitempty"`
+	RequiredOutputs    []RequiredOutput    `json:"required_outputs,omitempty"`
+	WaitTimeoutSeconds int                 `json:"wait_timeout_seconds,omitempty"`
+	AgentPrompt        string              `json:"agent_prompt,omitempty"`
+	APIRequest         *APIRequest         `json:"api_request,omitempty"`
+	TestRequests       []TestHelperRequest `json:"test_requests,omitempty"`
+	Events             []string            `json:"events,omitempty"`
+	SDKExample         string              `json:"sdk_example,omitempty"`
+	Error              string              `json:"error,omitempty"`
+	Recovery           *Recovery           `json:"recovery,omitempty"`
+}
+
+// Validate checks the invariants agents rely on when interpreting a response.
+func (r CommandResponse) Validate() error {
+	if r.WaitTimeoutSeconds < 0 {
+		return fmt.Errorf("wait_timeout_seconds cannot be negative")
+	}
+	if r.OK {
+		if r.Error != "" || r.Recovery != nil {
+			return fmt.Errorf("successful response cannot contain error recovery")
+		}
+		return validateContinuation(r.Next, r.NextTemplate, r.RequiredInputs, true)
+	}
+	if strings.TrimSpace(r.Error) == "" {
+		return fmt.Errorf("failed response must contain error")
+	}
+	if r.Next != "" || r.NextTemplate != "" || len(r.RequiredInputs) > 0 {
+		return fmt.Errorf("failed response must put continuation data inside recovery")
+	}
+	if r.Recovery == nil {
+		return fmt.Errorf("failed response must contain recovery")
+	}
+	if strings.TrimSpace(r.Recovery.Hint) == "" {
+		return fmt.Errorf("recovery must contain hint")
+	}
+	return validateContinuation(r.Recovery.Next, r.Recovery.NextTemplate, r.Recovery.RequiredInputs, false)
+}
+
+func validateContinuation(next, nextTemplate string, requiredInputs []CommandInput, allowEmpty bool) error {
+	if next != "" && nextTemplate != "" {
+		return fmt.Errorf("response cannot contain both next and next_template")
+	}
+	if next == "" && nextTemplate == "" {
+		if allowEmpty {
+			return nil
+		}
+		return fmt.Errorf("recovery must contain next or next_template")
+	}
+	if next != "" {
+		if len(requiredInputs) > 0 {
+			return fmt.Errorf("exact next command cannot require inputs")
+		}
+		if commandTemplatePlaceholder.MatchString(next) {
+			return fmt.Errorf("exact next command contains a template placeholder")
+		}
+		return nil
+	}
+	if len(requiredInputs) == 0 {
+		return fmt.Errorf("next_template must describe required_inputs")
+	}
+	if !commandTemplatePlaceholder.MatchString(nextTemplate) {
+		return fmt.Errorf("next_template must contain a placeholder")
+	}
+	for _, input := range requiredInputs {
+		if strings.TrimSpace(input.Name) == "" || strings.TrimSpace(input.Description) == "" {
+			return fmt.Errorf("required_inputs must contain name and description")
+		}
+	}
+	return nil
 }

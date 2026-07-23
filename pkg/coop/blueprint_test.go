@@ -160,6 +160,41 @@ func TestValidateBlueprintReferences(t *testing.T) {
 	}
 }
 
+func TestValidateBlueprintReferencesRejectsSelfAndForwardReferences(t *testing.T) {
+	tests := []struct {
+		name      string
+		reference string
+	}{
+		{name: "self", reference: "${node.setup.first:id}"},
+		{name: "forward", reference: "${node.setup.second:id}"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bp := &Blueprint{
+				ID: "test",
+				Steps: []BlueprintStep{{
+					StepDefinition: StepDefinition{Key: "setup", Title: "Setup"},
+					Nodes: []NodeDefinition{
+						{
+							Key: "first",
+							Request: &APIRequest{
+								Path:   "/v1/resources/" + tt.reference,
+								Method: "get",
+							},
+						},
+						{Key: "second", Request: &APIRequest{Path: "/v1/resources", Method: "post"}},
+					},
+				}},
+			}
+
+			err := validateBlueprintReferences(bp)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "before it has completed")
+		})
+	}
+}
+
 func TestLoadBlueprintPrefixMatch(t *testing.T) {
 	bp, err := LoadBlueprint("setup-future")
 	require.NoError(t, err)

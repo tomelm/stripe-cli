@@ -238,7 +238,7 @@ func BuildResponse(session *coop.Session, suggestions []Suggestion, selected str
 			Completed:   session.Blueprint,
 			Suggestions: suggestions,
 			AgentPrompt: BuildSummarizePrompt(session),
-			Next:        fmt.Sprintf("Write STRIPE.md, then run: stripe coop agent next-action --session=%s --completed=summarize", session.ID),
+			Next:        fmt.Sprintf("stripe coop agent next-action --session=%s --completed=summarize", session.ID),
 		}
 	case "deploy":
 		return Response{

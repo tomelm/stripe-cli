@@ -80,13 +80,34 @@ func TestCoopRunReturnsStructuredErrorForMalformedSetting(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(stderr), &resp))
 	assert.False(t, resp.OK)
 	assert.Contains(t, resp.Error, "--setting must be in key=value format")
-	assert.Equal(t, "Use --setting key=value and --param key=value.", resp.Hint)
+	require.NotNil(t, resp.Recovery)
+	assert.Equal(t, "stripe coop run \"one-time-payment\"", resp.Recovery.Next)
 
 	store, err := coop.NewStore(coopConfigFolder())
 	require.NoError(t, err)
 	ids, err := store.List()
 	require.NoError(t, err)
 	assert.Empty(t, ids)
+}
+
+func TestCoopRunReturnsCompactBootstrapWithoutBlueprintNodes(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cmd := newCoopAgentRunCmd().cmd
+	cmd.SetArgs([]string{"one-time-payment", "--language", "node"})
+
+	output := captureStdout(t, func() {
+		require.NoError(t, cmd.Execute())
+	})
+
+	var resp coop.CommandResponse
+	require.NoError(t, json.Unmarshal([]byte(output), &resp))
+	require.True(t, resp.OK)
+	assert.Contains(t, resp.AgentPrompt, "one node at a time")
+	assert.Contains(t, resp.Next, "stripe coop agent start-work")
+	assert.NotContains(t, output, `"agent_instructions"`)
+	assert.NotContains(t, output, `"nodes"`)
+	assert.NotContains(t, output, "Create a Stripe Product with inline default_price_data")
+	assert.Less(t, len(output), 2500)
 }
 
 func TestCoopRunReturnsStructuredErrorForMalformedParam(t *testing.T) {
@@ -105,7 +126,8 @@ func TestCoopRunReturnsStructuredErrorForMalformedParam(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(stderr), &resp))
 	assert.False(t, resp.OK)
 	assert.Contains(t, resp.Error, "--param key cannot be empty")
-	assert.Equal(t, "Use --setting key=value and --param key=value.", resp.Hint)
+	require.NotNil(t, resp.Recovery)
+	assert.Equal(t, "stripe coop run \"one-time-payment\"", resp.Recovery.Next)
 
 	store, err := coop.NewStore(coopConfigFolder())
 	require.NoError(t, err)
@@ -130,7 +152,8 @@ func TestCoopRunPreservesBlueprintLoadError(t *testing.T) {
 	assert.False(t, resp.OK)
 	assert.Contains(t, resp.Error, "ambiguous blueprint prefix")
 	assert.NotContains(t, resp.Error, "not found")
-	assert.Equal(t, "stripe coop recommend", resp.Hint)
+	require.NotNil(t, resp.Recovery)
+	assert.Equal(t, "stripe coop recommend", resp.Recovery.Next)
 }
 
 func TestCoopRunKeepsNotFoundGuidance(t *testing.T) {
@@ -147,7 +170,8 @@ func TestCoopRunKeepsNotFoundGuidance(t *testing.T) {
 	var resp coop.CommandResponse
 	require.NoError(t, json.Unmarshal([]byte(stderr), &resp))
 	assert.Contains(t, resp.Error, "not found")
-	assert.Equal(t, "stripe coop recommend", resp.Hint)
+	require.NotNil(t, resp.Recovery)
+	assert.Equal(t, "stripe coop recommend", resp.Recovery.Next)
 }
 
 func TestCoopStartPreservesBlueprintLoadError(t *testing.T) {

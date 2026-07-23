@@ -96,8 +96,19 @@ func TestCoopDebugAgentWaitsForStepReviewAfterStepIsReady(t *testing.T) {
 					State:          coop.NodePending,
 				},
 				{
-					NodeDefinition: coop.NodeDefinition{Key: "checkout", Title: "Build Checkout", Type: coop.NodeAPIRequest},
-					State:          coop.NodePending,
+					NodeDefinition: coop.NodeDefinition{
+						Key:   "checkout",
+						Title: "Build Checkout",
+						Type:  coop.NodeTestHelper,
+						TestRequests: []coop.TestHelperRequest{{
+							Key: "retrieve-product",
+							APIRequest: coop.APIRequest{
+								Path:   "/v1/products/${node.step.product:id}",
+								Method: "get",
+							},
+						}},
+					},
+					State: coop.NodePending,
 				},
 			},
 		},
@@ -123,6 +134,9 @@ func TestCoopDebugAgentWaitsForStepReviewAfterStepIsReady(t *testing.T) {
 	finalSession, err := store.Read(session.ID)
 	require.NoError(t, err)
 	assert.Equal(t, coop.SessionCompleted, finalSession.Status)
+	product, err := finalSession.NodeByNumber(1)
+	require.NoError(t, err)
+	assert.JSONEq(t, `"debug_product_id"`, string(product.Outputs[coop.DefaultOutputSource]["id"]))
 }
 
 func setupDebugAgentSession(t *testing.T, steps []coop.SessionStep) (*coop.Store, *coop.Session) {

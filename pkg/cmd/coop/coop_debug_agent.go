@@ -2,6 +2,7 @@ package coopcmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -164,6 +165,29 @@ func (a *coopDebugAgent) completeActiveStep(ctx context.Context, step int) error
 	if node.State != coop.NodeActive {
 		return nil
 	}
+	requiredOutputs, err := session.RequiredOutputs(step)
+	if err != nil {
+		return err
+	}
+	outputs := coop.NodeOutputs{}
+	for _, output := range requiredOutputs {
+		source := output.Source
+		if source == "" {
+			source = coop.DefaultOutputSource
+		}
+		if outputs[source] == nil {
+			outputs[source] = map[string]json.RawMessage{}
+		}
+		if output.Field == "latest_version" {
+			outputs[source][output.Field] = json.RawMessage("1")
+			continue
+		}
+		value, err := json.Marshal("debug_" + safeDebugFileName(node.Key+"_"+output.Selector()))
+		if err != nil {
+			return err
+		}
+		outputs[source][output.Field] = value
+	}
 
 	service := workflow.NewService(a.store)
 	resp, err := service.ReportCheck(a.sessionID, step, "Debug agent deterministic check", true)
@@ -174,9 +198,10 @@ func (a *coopDebugAgent) completeActiveStep(ctx context.Context, step int) error
 		return fmt.Errorf("%s", resp.Error)
 	}
 	resp, err = service.ReportWork(a.sessionID, step, workflow.ReportWorkInput{
-		File:  "debug/" + safeDebugFileName(node.Key) + ".txt",
-		Lines: "1-1",
-		Note:  "Deterministic debug agent completed " + node.Title,
+		File:    "debug/" + safeDebugFileName(node.Key) + ".txt",
+		Lines:   "1-1",
+		Note:    "Deterministic debug agent completed " + node.Title,
+		Outputs: outputs,
 	}, false)
 	if err != nil {
 		return err

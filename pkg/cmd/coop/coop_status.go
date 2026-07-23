@@ -42,7 +42,10 @@ func (sc *coopStatusCmd) runStatusCmd(cmd *cobra.Command, args []string) error {
 		session, err = store.LatestSession()
 	}
 	if err != nil {
-		return outputCoopError("No active session found. Start one with 'stripe coop start <blueprint>'.", "stripe coop start one-time-payment")
+		return outputCoopError("No active session found.", coop.Recovery{
+			Hint: "Start a Co-op session.",
+			Next: "stripe coop start one-time-payment",
+		})
 	}
 
 	if sc.asJSON {

@@ -55,11 +55,15 @@ func TestExplicitBlueprintPromptIncludesSessionProtocol(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Contains(t, prompt, session.ID)
-	assert.Contains(t, prompt, `"agent_instructions"`)
-	assert.Contains(t, prompt, `"nodes"`)
-	assert.Contains(t, prompt, `"next": "stripe coop agent start-work --session=`+session.ID+` --step=1`)
+	assert.NotContains(t, prompt, `"agent_instructions"`)
+	assert.NotContains(t, prompt, `"nodes"`)
+	assert.NotContains(t, prompt, `"next"`)
+	assert.Contains(t, prompt, "stripe coop agent start-work --session="+session.ID+" --step=1")
 	assert.Contains(t, prompt, "Understand the project")
-	assert.Contains(t, prompt, "Start by running the \"next\" command exactly as written")
+	assert.Contains(t, prompt, "next or next_template fields")
+	assert.Contains(t, prompt, "production-grade Stripe integration")
+	assert.Contains(t, prompt, "context from the current app or codebase")
+	assert.Less(t, len(prompt), 3000)
 }
 
 func TestPromptAutoApproveReturnsPromptErrors(t *testing.T) {

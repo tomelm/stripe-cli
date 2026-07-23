@@ -48,8 +48,8 @@ The developer confirms each step before the agent moves on.`,
   1. stripe coop run <blueprint-id> — begin a session
   2. stripe coop agent start-work --session=<id> --step=<n> --note="..." — mark work active
   3. stripe coop agent report-check --session=<id> --step=<n> --check="..." --passed — add verification
-  4. stripe coop agent report-work --session=<id> --step=<n> --file=... --note="..." — report work complete
-  All commands output JSON with a "next" field suggesting the next command.
+  4. stripe coop agent report-work --session=<id> --step=<n> --note="..." --output=id=... — report work and referenced outputs
+  Responses use "next" for exact commands or "next_template" plus "required_inputs" when values are needed.
   Run "stripe coop recommend --query=..." to discover available blueprints.`,
 		},
 	}

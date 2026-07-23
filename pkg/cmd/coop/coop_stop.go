@@ -46,7 +46,14 @@ func (sc *coopStopCmd) runStopCmd(cmd *cobra.Command, args []string) error {
 		session, err = store.LatestActiveSession()
 	}
 	if err != nil {
-		return outputCoopError("No active session found.", "stripe coop start <blueprint>")
+		return outputCoopError("No active session found.", coop.Recovery{
+			Hint:         "Start a Co-op session before stopping one.",
+			NextTemplate: "stripe coop start \"<blueprint>\"",
+			RequiredInputs: []coop.CommandInput{{
+				Name:        "blueprint",
+				Description: "Blueprint ID returned by stripe coop recommend.",
+			}},
+		})
 	}
 
 	if sc.abort {

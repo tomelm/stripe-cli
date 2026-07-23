@@ -1,7 +1,9 @@
 package workflow
 
 import (
+	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -19,7 +21,9 @@ func TestStartWorkTransitionsNodeAndReturnsTypedNextCommand(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, resp.OK)
 	assert.Equal(t, "active", resp.State)
-	assert.Contains(t, resp.Next, "stripe coop agent report-work")
+	assert.Empty(t, resp.Next)
+	assert.Contains(t, resp.NextTemplate, "stripe coop agent report-work")
+	require.NotEmpty(t, resp.RequiredInputs)
 
 	loaded, err := store.Read(session.ID)
 	require.NoError(t, err)
@@ -27,6 +31,133 @@ func TestStartWorkTransitionsNodeAndReturnsTypedNextCommand(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, coop.NodeActive, node.State)
 	assert.Equal(t, "Scanning", node.Activity)
+}
+
+func TestStartWorkReturnsOnlyCurrentNodeContext(t *testing.T) {
+	store, session := workflowTestStore(t)
+	_, err := store.Update(session.ID, func(session *coop.Session) error {
+		current := &session.Steps[0].Nodes[0]
+		current.Type = coop.NodeTestHelper
+		current.Description = "Advance the test clock and confirm an invoice is created."
+		current.ReviewPrompt = "Confirm the new invoice appears."
+		current.ReviewCommand = "stripe invoices list --limit=1"
+		current.TestRequests = []coop.TestHelperRequest{{
+			Key: "advance-clock",
+			APIRequest: coop.APIRequest{
+				Path:   "/v1/test_helpers/test_clocks/clock_123/advance",
+				Method: "post",
+			},
+		}}
+		current.Events = []string{"invoice.created"}
+		session.Steps[0].Nodes[1].Description = "FUTURE NODE DETAILS MUST NOT LEAK"
+		return nil
+	})
+	require.NoError(t, err)
+
+	resp, err := NewService(store).StartWork(session.ID, 1, "Starting")
+	require.NoError(t, err)
+	require.True(t, resp.OK)
+
+	assert.Contains(t, resp.AgentPrompt, "Current node 1 of 2")
+	assert.Contains(t, resp.AgentPrompt, "Advance the test clock")
+	assert.Contains(t, resp.AgentPrompt, "Confirm the new invoice appears")
+	assert.Contains(t, resp.AgentPrompt, `stripe invoices list --limit=1`)
+	assert.NotContains(t, resp.AgentPrompt, "FUTURE NODE DETAILS MUST NOT LEAK")
+	require.Len(t, resp.TestRequests, 1)
+	assert.Equal(t, "advance-clock", resp.TestRequests[0].Key)
+	assert.Equal(t, []string{"invoice.created"}, resp.Events)
+}
+
+func TestReportWorkPersistsOutputsAndStartWorkResolvesLaterRequest(t *testing.T) {
+	store, err := coop.NewStoreAt(t.TempDir())
+	require.NoError(t, err)
+	session := &coop.Session{
+		SchemaVersion: coop.CurrentSessionSchemaVersion,
+		ID:            "output_workflow",
+		Status:        coop.SessionActive,
+		Settings:      map[string]string{"language": "node"},
+		Steps: []coop.SessionStep{{
+			StepDefinition: coop.StepDefinition{Key: "setup", Title: "Setup"},
+			Nodes: []coop.SessionNode{
+				{
+					NodeDefinition: coop.NodeDefinition{
+						Key:   "create-product",
+						Title: "Create product",
+						Type:  coop.NodeAPIRequest,
+						Request: &coop.APIRequest{
+							Path:   "/v1/products",
+							Method: "post",
+						},
+					},
+					State: coop.NodePending,
+				},
+				{
+					NodeDefinition: coop.NodeDefinition{
+						Key:   "use-product",
+						Title: "Use product",
+						Type:  coop.NodeAPIRequest,
+						Request: &coop.APIRequest{
+							Path:   "/v1/products/${node.setup.create-product:id}",
+							Method: "get",
+							Params: map[string]any{
+								"version": "${node.setup.create-product:latest_version}",
+							},
+						},
+					},
+					State: coop.NodePending,
+				},
+			},
+		}},
+	}
+	require.NoError(t, store.Write(session))
+	service := NewService(store, WithSnippetFetcher(func(path, method string, params interface{}, language string) (string, error) {
+		return "", nil
+	}))
+
+	start, err := service.StartWork(session.ID, 1, "Creating product")
+	require.NoError(t, err)
+	require.True(t, start.OK)
+	assert.Equal(t, []coop.RequiredOutput{
+		{Field: "id"},
+		{Field: "latest_version"},
+	}, start.RequiredOutputs)
+	assert.Empty(t, start.Next)
+	assert.Contains(t, start.NextTemplate, `--output="id=<id>"`)
+
+	missing, err := service.ReportWork(session.ID, 1, ReportWorkInput{Note: "Created product"}, false)
+	require.NoError(t, err)
+	assert.False(t, missing.OK)
+	assert.Contains(t, missing.Error, "missing required --output values")
+	require.NotNil(t, missing.Recovery)
+	assert.Contains(t, missing.Recovery.NextTemplate, "--output")
+
+	loaded, err := store.Read(session.ID)
+	require.NoError(t, err)
+	first, err := loaded.NodeByNumber(1)
+	require.NoError(t, err)
+	assert.Equal(t, coop.NodeActive, first.State)
+	assert.Empty(t, first.Outputs)
+
+	reported, err := service.ReportWork(session.ID, 1, ReportWorkInput{
+		Note: "Created product",
+		Outputs: coop.NodeOutputs{
+			coop.DefaultOutputSource: {
+				"id":             json.RawMessage(`"prod_123"`),
+				"latest_version": json.RawMessage(`7`),
+			},
+		},
+	}, false)
+	require.NoError(t, err)
+	require.True(t, reported.OK)
+
+	next, err := service.StartWork(session.ID, 2, "Using product")
+	require.NoError(t, err)
+	require.True(t, next.OK)
+	require.NotNil(t, next.APIRequest)
+	assert.Equal(t, "/v1/products/prod_123", next.APIRequest.Path)
+	params, ok := next.APIRequest.Params.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, float64(7), params["version"])
 }
 
 func TestReportWorkContinuesStepBeforeReview(t *testing.T) {
@@ -49,15 +180,32 @@ func TestReportWorkRoutesToAwaitReviewWhenStepReady(t *testing.T) {
 
 	_, err := service.StartWork(session.ID, 1, "First")
 	require.NoError(t, err)
-	_, err = service.ReportWork(session.ID, 1, ReportWorkInput{File: "server.go"}, false)
+	_, err = service.ReportWork(session.ID, 1, ReportWorkInput{
+		File: "server.go",
+		Note: "Implemented server work",
+		Outputs: coop.NodeOutputs{
+			coop.DefaultOutputSource: {"id": json.RawMessage(`"prod_123"`)},
+		},
+	}, false)
 	require.NoError(t, err)
 	_, err = service.StartWork(session.ID, 2, "Second")
 	require.NoError(t, err)
-	resp, err := service.ReportWork(session.ID, 2, ReportWorkInput{File: "client.go"}, false)
+	resp, err := service.ReportWork(session.ID, 2, ReportWorkInput{File: "client.go", Note: "Implemented client work"}, false)
 	require.NoError(t, err)
 	require.True(t, resp.OK)
 	assert.Contains(t, resp.Message, "Step ready for review")
 	assert.Contains(t, resp.Next, "stripe coop agent await-review")
+	assert.Equal(t, int(AwaitTimeout.Seconds()), resp.WaitTimeoutSeconds)
+}
+
+func TestAwaitTimeoutContractLeavesHarnessHeadroom(t *testing.T) {
+	assert.Equal(t, 5*time.Minute, AwaitTimeout)
+	assert.Greater(t, AwaitHarnessTimeout, AwaitTimeout)
+
+	resp := timeoutResponse("session_123", 4)
+	require.NoError(t, resp.Validate())
+	assert.Equal(t, int(AwaitTimeout.Seconds()), resp.WaitTimeoutSeconds)
+	assert.Contains(t, resp.Message, AwaitTimeout.String())
 }
 
 func TestConfirmAndRequestChangesUseCentralWorkflow(t *testing.T) {
@@ -66,7 +214,13 @@ func TestConfirmAndRequestChangesUseCentralWorkflow(t *testing.T) {
 
 	_, err := service.StartWork(session.ID, 1, "First")
 	require.NoError(t, err)
-	_, err = service.ReportWork(session.ID, 1, ReportWorkInput{File: "server.go"}, false)
+	_, err = service.ReportWork(session.ID, 1, ReportWorkInput{
+		File: "server.go",
+		Note: "Implemented server work",
+		Outputs: coop.NodeOutputs{
+			coop.DefaultOutputSource: {"id": json.RawMessage(`"prod_123"`)},
+		},
+	}, false)
 	require.NoError(t, err)
 
 	updated, err := service.ConfirmReview(session.ID, []int{1})
@@ -96,7 +250,13 @@ func TestRequestChangesMovesReviewNodeBackToActive(t *testing.T) {
 
 	_, err := service.StartWork(session.ID, 1, "First")
 	require.NoError(t, err)
-	_, err = service.ReportWork(session.ID, 1, ReportWorkInput{File: "server.go"}, false)
+	_, err = service.ReportWork(session.ID, 1, ReportWorkInput{
+		File: "server.go",
+		Note: "Implemented server work",
+		Outputs: coop.NodeOutputs{
+			coop.DefaultOutputSource: {"id": json.RawMessage(`"prod_123"`)},
+		},
+	}, false)
 	require.NoError(t, err)
 	updated, err := service.RequestChanges(session.ID, []int{1}, "Needs tests")
 	require.NoError(t, err)
@@ -105,6 +265,7 @@ func TestRequestChangesMovesReviewNodeBackToActive(t *testing.T) {
 	assert.Equal(t, coop.NodeActive, node.State)
 	assert.Equal(t, "Needs tests", node.RejectionNote)
 	assert.Nil(t, node.Implementation)
+	assert.Nil(t, node.Outputs)
 }
 
 func TestAgentWorkflowRejectsInactiveSessions(t *testing.T) {
@@ -121,7 +282,7 @@ func TestAgentWorkflowRejectsInactiveSessions(t *testing.T) {
 		{
 			name: "report work",
 			run: func(service *Service, sessionID string) (coop.CommandResponse, error) {
-				return service.ReportWork(sessionID, 1, ReportWorkInput{File: "server.go"}, false)
+				return service.ReportWork(sessionID, 1, ReportWorkInput{File: "server.go", Note: "Implemented server work"}, false)
 			},
 		},
 		{
@@ -160,6 +321,7 @@ func TestAgentWorkflowRejectsInactiveSessions(t *testing.T) {
 					require.NoError(t, err)
 					assert.False(t, resp.OK)
 					assert.Contains(t, resp.Error, "session workflow_test is "+string(status)+" and cannot be advanced")
+					require.NoError(t, resp.Validate())
 
 					loaded, err := store.Read(session.ID)
 					require.NoError(t, err)

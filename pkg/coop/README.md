@@ -65,16 +65,30 @@ active ──→ completed    (all nodes done/skipped, or "stripe coop stop")
 ### Agent-facing (AI agent runs these)
 | Command | Purpose |
 |---------|---------|
-| `stripe coop run <blueprint>` | Create a session (outputs JSON with instructions) |
-| `stripe coop agent start-work --step <n>` | Mark a node as active |
-| `stripe coop agent report-work --step <n>` | Mark a node complete (→ review or → done if auto_confirm) |
+| `stripe coop run <blueprint>` | Create a session (outputs a compact JSON bootstrap) |
+| `stripe coop agent start-work --step <n>` | Mark a node active and return its task context |
+| `stripe coop agent report-work --step <n>` | Record implementation and outputs, then mark a node complete |
 | `stripe coop agent report-check --step <n>` | Add a verification check |
 | `stripe coop agent skip --step <n>` | Skip a node |
 | `stripe coop agent await-review --step <n>` | Block until developer confirms or requests changes |
 | `stripe coop agent next-action` | Show post-completion options (blocks until selection) |
 | `stripe coop agent start-followup` | Start an internal guided follow-up session selected from next actions |
 
-All agent commands output JSON with an `ok` field and a `next` field suggesting the next command. The `--step` flag name is retained for the CLI, but its value is the 1-based node number across the session.
+Agent commands output JSON with an `ok` field. `next` is always an executable command. When agent-supplied values are needed, the response uses `next_template` plus `required_inputs` instead. Failures use one `recovery` object with the same exact-command/template distinction. Session creation does not front-load the full blueprint: each successful `start-work` response returns an `agent_prompt` for only the current node, plus any relevant `api_request`, `test_requests`, `events`, SDK example, and `required_outputs`. The `--step` flag name is retained for the CLI, but its value is the 1-based node number across the session.
+
+`report-work` requires a concrete `--note`. Use repeatable `--output` flags for values named by `required_outputs`:
+
+```bash
+stripe coop agent report-work \
+  --session=coop_abc123 \
+  --step=2 \
+  --note="Created the product and captured its result" \
+  --output=id=prod_123 \
+  --output=latest_version=7 \
+  --output=create-test-clock-request:id=clock_123
+```
+
+Values that are valid JSON retain their type; other values are stored as strings. Co-op resolves `${node.<step>.<node>:<field>}` references from these persisted outputs before returning a later node's request.
 
 ## TUI Keybindings
 
@@ -114,16 +128,17 @@ In the completion view:
 $ stripe coop start one-time-payment --language=node
 
 # What happens behind the scenes:
-# 1. CLI creates the session and gives the agent the exact session protocol
+# 1. CLI creates the session and gives the agent a compact protocol bootstrap
 # 2. Agent (Claude/Codex) is launched in right pane
 # 3. TUI appears in left pane showing step progress
-# 4. Agent starts from the provided next command:
+# 4. Agent starts from the provided next command; its response supplies the
+#    current node's task and acceptance criteria:
 #      stripe coop agent start-work --session=coop_abc123 --step=1 --note="Beginning: Understand the project"
 # 5. Agent works through steps, calling:
 #      stripe coop agent start-work --session=coop_abc123 --step=1 --note="Scanning project"
 #      stripe coop agent report-work --session=coop_abc123 --step=1 --note="Found Next.js app"
 #      stripe coop agent start-work --session=coop_abc123 --step=2 --note="Creating product"
-#      stripe coop agent report-work --session=coop_abc123 --step=2 --file=server.js --lines=5-20 --note="Created product"
+#      stripe coop agent report-work --session=coop_abc123 --step=2 --file=server.js --lines=5-20 --note="Created product" --output=id=prod_123
 #      stripe coop agent await-review --session=coop_abc123 --step=2   ← blocks until developer confirms
 # 6. Developer sees progress live, presses 'c' to confirm
 # 7. Agent continues to next step
@@ -157,7 +172,7 @@ When the agent runs `stripe coop agent await-review`, it writes a `.heartbeat` f
 - **Fresh heartbeat (< 5s old):** Agent is actively waiting for confirmation
 - **No heartbeat + no session update in 2min:** Show idle warning
 
-The heartbeat file is cleaned up when `await` exits.
+The heartbeat file is cleaned up when `await` exits. `await-review` returns a structured timeout after five minutes and advertises `wait_timeout_seconds: 300`; agent harnesses should allow at least six minutes so that response can arrive.
 
 ## Resuming
 
@@ -190,6 +205,8 @@ Each node has:
 - `requests` — API-backed test helper requests for `testHelper` nodes
 - `events` — webhook events (for `asyncHandler` nodes)
 
+Node references may only point backward to completed blueprint nodes. Direct node results use `${node.<step>.<node>:<field>}`; named test-helper or numeric event results add a source segment, such as `${node.<step>.<node>.<request>:id}` or `${node.<step>.<node>.0:id}`.
+
 `testHelper` request metadata tells the agent which Stripe-backed test helpers can advance test state. Agents should use those helpers while verifying work, but should not encode helper-only request parameters into the user's application.
 
 ### Syncing Blueprints
@@ -212,7 +229,7 @@ After syncing, test with `go run ./cmd/stripe coop run <blueprint-id>`. Prefix m
 | "timed out waiting for session lock" | A previous writer left a `.lock` file behind | If no `stripe coop` command is running, remove the named lock file and retry |
 | TUI shows wrong session | Multiple sessions exist | Use `stripe coop join <session-id>` with the correct ID |
 | Steps not updating in TUI | Agent created a duplicate session | Check `stripe coop status` for the correct session ID |
-| Agent ignores "next" hint | LLM didn't follow instructions | Copy the `next` value and run it manually, or restart |
+| Agent ignores continuation | LLM didn't follow `next`/`next_template` | Run `next` exactly, or fill every `required_inputs` value in `next_template` |
 | Double footer / layout broken | Terminal resize not detected | Resize the terminal window (triggers recalculation) |
 | "Blueprint not found" | Typo in blueprint ID | Run `stripe coop recommend` to see available IDs |
 
@@ -226,6 +243,7 @@ Writes are serialized with a per-session `.lock` file. `Store.Write()` also chec
 pkg/coop/
   types.go          — Session, Node, Step types and constants
   session.go        — State machine, validation, queries
+  outputs.go        — Required-output discovery and node-reference resolution
   store.go          — Atomic file I/O, heartbeat, lock files, optimistic locking
   blueprint.go      — Blueprint type, embed loader, prefix matching
   guided_action.go  — In-code guided follow-up session model
