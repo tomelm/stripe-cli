@@ -21,13 +21,11 @@ The shared JSON session file is the durable boundary between the TUI and agent C
 
 ```
 pending ──→ active ──→ review ──→ done     (human UI/Dashboard review)
-   │          │          │
-   │          │          └──→ active        (request changes: developer entered feedback)
-   │          │
-   │          └──→ done                     (verified or explicitly unverified non-UI work)
-   │          └──→ skipped                  (agent decides node doesn't apply)
-   │
-   └──→ skipped                             (agent skips from pending)
+              │          │
+              │          └──→ active        (request changes: developer entered feedback)
+              │
+              └──→ done                     (verified or explicitly unverified non-UI work)
+              └──→ skipped                  (agent gives a reason for an explicitly optional step)
 ```
 
 **Terminal states:** `done`, `skipped` — no transitions out.
@@ -57,15 +55,17 @@ active ──→ completed    (all nodes done/skipped, or "stripe coop stop")
 | Command | Purpose |
 |---------|---------|
 | `stripe coop run <blueprint>` | Create a session (outputs JSON with instructions) |
-| `stripe coop agent start-work --step <n>` | Mark a node as active |
-| `stripe coop agent report-work --step <n> --attempt <a>` | Submit an attempt with implementation evidence, requested resource IDs, and an app URL for UI work |
-| `stripe coop agent report-check --step <n> --attempt <a>` | Add an agent-reported check to the current attempt |
-| `stripe coop agent skip --step <n> --attempt <a>` | Skip the current attempt |
-| `stripe coop agent await-review --step <n> --attempt <a>` | Poll direct checks and block until Co-op or the developer decides |
+| `stripe coop agent start-work --node <n>` | Mark a node as active |
+| `stripe coop agent report-work --node <n> --attempt <a>` | Submit an attempt with implementation evidence, requested resource IDs, and an app URL for UI work |
+| `stripe coop agent report-check --node <n> --attempt <a>` | Add an agent-reported check to the current attempt |
+| `stripe coop agent skip --node <n> --attempt <a>` | Skip an attempt in an explicitly optional step, with a bounded reason |
+| `stripe coop agent await-review --node <n> --attempt <a>` | Poll direct checks and block until Co-op or the developer decides |
 | `stripe coop agent next-action` | Show post-completion options (blocks until selection) |
 | `stripe coop agent start-followup` | Start an internal guided follow-up session selected from next actions |
 
-All agent commands output JSON with an `ok` field and an exact `next` command. `start-work` creates or returns the open append-only attempt. Later mutations must carry that attempt number, so delayed writes cannot modify a correction attempt. The `--step` flag name is retained for the CLI, but its value is the 1-based node number across the session.
+All agent commands output JSON with an `ok` field. Successful workflow responses use `next` only for a directly executable continuation. `next_template` is intentionally incomplete and names every value the agent must supply in `required_inputs`; angle-bracket examples are never represented as executable commands. Errors have guidance but no fake continuation. `start-work` creates or returns the open append-only attempt. Later mutations must carry that attempt number, so delayed writes cannot modify a correction attempt. `report-check` requires an explicit `--passed` or `--passed=false`. `--node` is the 1-based node number across the session.
+
+`stripe coop run` also reports blueprint-level automatic coverage: the number of direct cataloged checks, unsupported facts, and app surfaces with observation triggers. This is a preflight disclosure, not a claim of production completeness. Per-attempt results remain the authoritative record of what actually ran.
 
 ## TUI Keybindings
 
@@ -109,14 +109,14 @@ $ stripe coop start one-time-payment --language=node
 # 2. Agent (Claude/Codex) is launched in right pane
 # 3. TUI appears in left pane showing step progress
 # 4. Agent starts from the provided next command:
-#      stripe coop agent start-work --session=coop_abc123 --step=1 --note="Beginning: Understand the project"
+#      stripe coop agent start-work --session=coop_abc123 --node=1 --note="Beginning: Understand the project"
 # 5. Agent works through steps, calling:
-#      stripe coop agent start-work --session=coop_abc123 --step=1 --note="Scanning project"
-#      # start-work returns attempt=1 and its exact report command
-#      stripe coop agent report-work --session=coop_abc123 --step=1 --attempt=1 --note="Found Next.js app"
-#      stripe coop agent start-work --session=coop_abc123 --step=2 --note="Creating product"
-#      stripe coop agent report-work --session=coop_abc123 --step=2 --attempt=1 --file=server.js --lines=5-20 --note="Created product" --stripe-resource=product=prod_123
-#      stripe coop agent await-review --session=coop_abc123 --step=2 --attempt=1
+#      stripe coop agent start-work --session=coop_abc123 --node=1 --note="Scanning project"
+#      # start-work returns attempt=1 plus a report template and required inputs
+#      stripe coop agent report-work --session=coop_abc123 --node=1 --attempt=1 --note="Found Next.js app"
+#      stripe coop agent start-work --session=coop_abc123 --node=2 --note="Creating product"
+#      stripe coop agent report-work --session=coop_abc123 --node=2 --attempt=1 --file=server.js --lines=5-20 --note="Created product" --stripe-resource=product=prod_123
+#      stripe coop agent await-review --session=coop_abc123 --node=2 --attempt=1
 # 6. Supported non-UI work is confirmed automatically. For a uiComponent the
 #    agent supplies --app-url, the developer opens it with 'o', then confirms
 #    the visible UI or requests changes while ordinary checks keep running.
@@ -145,8 +145,8 @@ Post-completion choices are written into the session file for the agent. Deploy 
 - A direct check is unavailable: it is never presented as passed. Non-UI work can continue with the explicit unavailable result; UI confirmation requires a visibly recorded human override.
 - Completed-but-unverified work remains distinct in attempt history and in the TUI outline/completion summary; it is not rendered as a green automatic success.
 - Request/event observations are supporting evidence only. Missing or ambiguous observations never become failures. Even a uniquely path-matched 4xx/5xx remains advisory because Stripe request logs are account-wide and carry no Co-op attempt token; Co-op will not blame or wake the agent without a stronger correlation key.
-- An event may propose a resource binding only for a reported, open UI attempt and a compiler-proven state contract. Cross-step projection is limited to an unambiguous event in the immediately following async-handler step for exactly one resource producer and one UI in the containing step. The event type and discovered resource type must match exactly, and exactly one attempt must match. The window begins at the later of report/open and expires after five minutes. A direct reader must prove the object was created inside it. The ID remains a replaceable, non-blaming candidate unless catalog-declared binding evidence correlates it with this integration attempt; passing object checks alone never proves ownership. Attribution remains pending only while such a relationship can still match, then becomes unavailable; if the compiled plan has no relationship rule, it is unavailable immediately. UI review can record an explicit override, and an uncorrelated candidate cannot autonomously complete non-UI work. A candidate can never replace an agent-reported or reader-verified binding.
-- Catalog evidence may perform a bounded child or related-object read rooted in the verified resource. Request inputs select those reads, `${node...}` references identify the expected upstream field, and the fixed predicate vocabulary (`eq`, `one_of`, `present`, `positive`, `equals_input`, `equals_binding`, and the reusable duration primitive `difference_equals_input`) performs the comparison. An `eventual` related field defers that read until the resource reaches the state where the relation can exist; this is domain readiness, not a UI policy. For the trial-subscription blueprint, the exercised Checkout Session leads to its actual Subscription; Co-op checks the Product's default Price across Checkout and Subscription and derives the exact trial duration from `trial_period_days`.
+- An event may propose a resource binding only for a reported, open UI attempt whose containing step explicitly declares the event and compiles a matching state contract. The event type and discovered resource type must match exactly, and exactly one attempt must match. The window begins at the later of report/open and expires after five minutes. A direct reader must prove the object was created inside it. The ID remains a replaceable, non-blaming candidate: matching a reusable Price or another Stripe object verifies facts about the candidate, not ownership by this attempt. Candidate facts are supporting evidence, contradictions are unavailable rather than agent failures, and UI review requires an explicit override until the flow carries a unique attempt token. A candidate cannot autonomously complete non-UI work or replace an agent-reported binding.
+- Catalog evidence may perform a bounded child or related-object read rooted in the verified resource. Request inputs select those reads, `${node...}` references identify the expected upstream field, and the fixed predicate vocabulary (`eq`, `one_of`, `present`, `positive`, `equals_input`, `equals_binding`) performs the comparison. An `eventual` related field defers that read until the resource reaches the state where the relation can exist; this is domain readiness, not a UI policy. For the trial-subscription blueprint, the exercised Checkout Session leads to its actual Subscription and Co-op checks the Product's default Price across Checkout and Subscription. Exact trial-duration verification remains an explicit coverage gap until it has a reusable declarative rule.
 - A state rule proves the authoritative Stripe object's state, not that application webhook code received or processed the event. Handler-specific side effects remain agent/human evidence until a direct reusable rule can verify them.
 - Real `uiComponent` work requires a syntactically safe application URL. Co-op performs no reachability or authentication probe; the human opens and judges it. `dashboard` work remains human-owned without an app URL.
 
@@ -178,17 +178,25 @@ Blueprints are embedded JSON in `pkg/coop/blueprints/`. Each has:
 - `title`, `description` — human-readable
 - `steps` — ordered groups of nodes
 
+An upstream step may set `required: false` to grant the agent permission to
+skip its nodes. `required: true` and omitted `required` metadata are both
+non-skippable. This fail-closed default prevents missing export metadata or an
+old development session from silently turning integration work into
+agent-optional work.
+
 Each node has:
 - `type` — `apiRequest`, `asyncHandler`, `uiComponent`, `cliCommand`, `dashboard`, `setUpWebhooks`, `testHelper`
-- `description` — what the agent should do (source of truth)
+- `title`, `description` — product intent and explanatory copy
 - `review_prompt` — what the human should check before confirming
 - `review_command` — optional command the TUI can show/copy for developer verification
 - `request` — API request details (for `apiRequest` nodes with SDK snippet support)
 - `request.hidden_params` — request fields that should not be shown directly in the TUI
 - `requests` — API-backed test helper requests for `testHelper` nodes
-- `events` — webhook events (for `asyncHandler` nodes)
+- `events` — webhook events consumed by `asyncHandler` nodes or explicitly expected while exercising a `uiComponent`
 
-Verification applicability is derived from this existing blueprint data: requests select resource and bounded evidence rules, indexed `${node...}` references select cataloged relationship predicates, events select state rules, and `uiComponent` selects the app handoff. Reusable Stripe object predicates, related reads, request gates, binding-correlation markers, and repair guidance live in the strictly validated embedded catalog in `checks/catalog.json`; blueprints do not duplicate them in sidecars. Unsupported operations, events, relationships, extra array elements, and runtime-resolved inputs compile to explicit advisory coverage gaps rather than silently disappearing or being treated as passes.
+Verification applicability is derived from this existing blueprint data: requests select resource and bounded evidence rules, indexed `${node...}` references select cataloged relationship predicates, events select state rules, and `uiComponent` selects the app handoff. Reusable Stripe object predicates, related reads, request gates, ID constraints, and repair guidance live in the strictly validated embedded catalog in `checks/catalog.json`; blueprints do not duplicate them in sidecars. Unsupported operations, events, relationships, extra array elements, and runtime-resolved inputs compile to explicit advisory coverage gaps rather than silently disappearing or being treated as passes.
+
+The structured request, requests, events, references, skippable, and review fields are the executable contract. Descriptions explain why the work exists; they do not override those fields.
 
 `testHelper` request metadata tells the agent which Stripe-backed test helpers can advance test state. Agents should use those helpers while verifying work, but should not encode helper-only request parameters into the user's application.
 
@@ -262,6 +270,7 @@ pkg/coop/tui/
 pkg/coop/workflow/
   service.go        — Attempt-scoped lifecycle operations for agent commands and TUI review actions
   verification.go   — Product-agnostic result policy and evaluator boundary
+  review.go         — Canonical material-evidence digest for transactional human overrides
 
 pkg/coop/helpers/
   nextaction.go     — Post-completion suggestions, environment detection, and next-action responses
