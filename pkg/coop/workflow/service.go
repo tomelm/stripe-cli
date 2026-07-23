@@ -219,7 +219,7 @@ func (s *Service) ReportWorkAttempt(ctx context.Context, sessionID string, nodeN
 	if input.Note == "" {
 		return errorResponse(errors.New("--note is required"), "Summarize the completed implementation with --note."), nil
 	}
-	session, err := s.store.Update(sessionID, func(session *coop.Session) error {
+	_, err := s.store.Update(sessionID, func(session *coop.Session) error {
 		if err := requireActiveSession(session); err != nil {
 			return err
 		}
