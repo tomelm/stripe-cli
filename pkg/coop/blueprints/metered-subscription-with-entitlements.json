@@ -19,7 +19,6 @@
           "key": "create-meter",
           "title": "Create a meter",
           "description": "Create a meter to track AI token usage for your customers.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/billing/meters",
             "method": "post",
@@ -44,7 +43,6 @@
           "key": "create-usage-product",
           "title": "Create a usage-based product",
           "description": "Create a product that will be billed based on usage.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/products",
             "method": "post",
@@ -58,7 +56,6 @@
           "key": "create-usage-price",
           "title": "Create a metered price",
           "description": "Create a price that charges $0.004 per 1,000 AI tokens used, billed monthly.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/prices",
             "method": "post",
@@ -85,7 +82,6 @@
           "key": "create-usage-feature",
           "title": "Create a feature for the usage plan",
           "description": "Create a feature that will be included with the usage-based product.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/entitlements/features",
             "method": "post",
@@ -100,7 +96,6 @@
           "key": "attach-feature-to-product",
           "title": "Attach the feature to the product",
           "description": "Connect the usage feature to the usage-based product so subscribers will have access to this feature.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/products/${node.metering-setup-chapter.create-usage-product:id}/features",
             "method": "post",
@@ -121,7 +116,6 @@
           "key": "create-test-clock",
           "title": "Create a test clock",
           "description": "Run this test helper to create a test clock to control time in your test environment.",
-          "review_prompt": "Run the helper flow and confirm it advances test state without adding helper-only parameters to application code.",
           "requests": [
             {
               "key": "create-test-clock-request",
@@ -135,7 +129,6 @@
           "key": "create-customer",
           "title": "Create a customer",
           "description": "Run this test helper to create a customer for the test blueprint and associate it with the test clock.",
-          "review_prompt": "Run the helper flow and confirm it advances test state without adding helper-only parameters to application code.",
           "requests": [
             {
               "key": "create-customer-request",
@@ -156,7 +149,6 @@
           "key": "create-checkout-session",
           "title": "Create a checkout session",
           "description": "Create a checkout session for the customer to subscribe to the usage-based plan.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/checkout/sessions",
             "method": "post",
@@ -176,16 +168,13 @@
           "type": "uiComponent",
           "key": "complete-checkout",
           "title": "Complete the checkout process",
-          "description": "The customer completes the checkout process to subscribe to the usage-based plan. Preview the checkout form through the link below. Optionally fill in the test card information with the card number as 4242 4242 4242 4242. Use a valid future date and any three-digit CVC.",
-          "review_prompt": "Open the app and confirm the user-facing flow works as described."
+          "description": "The customer completes the checkout process to subscribe to the usage-based plan. Preview the checkout form in the submitted app surface. Optionally fill in the test card information with the card number as 4242 4242 4242 4242. Use a valid future date and any three-digit CVC."
         },
         {
           "type": "asyncHandler",
           "key": "check-entitlements",
           "title": "Check customer entitlements",
           "description": "Listen for the webhook event to identify when there are updates to active entitlements to provision appropriate access for the customer in your application.",
-          "review_prompt": "Run the relevant Stripe CLI trigger or complete the upstream flow, then confirm the handler receives and verifies the expected event.",
-          "review_command": "stripe trigger entitlements.active_entitlement_summary.updated",
           "events": [
             "entitlements.active_entitlement_summary.updated"
           ]
@@ -195,8 +184,6 @@
           "key": "track-subscription-creation",
           "title": "Track subscription creation",
           "description": "Listen for the webhook event to identify when a subscription is created and capture customer information.",
-          "review_prompt": "Run the relevant Stripe CLI trigger or complete the upstream flow, then confirm the handler receives and verifies the expected event.",
-          "review_command": "stripe trigger customer.subscription.created",
           "events": [
             "customer.subscription.created"
           ]
@@ -213,7 +200,6 @@
           "key": "report-usage",
           "title": "Report customer usage",
           "description": "Report AI token usage for the customer by sending data to the meter.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/billing/meter_events",
             "method": "post",
@@ -231,7 +217,6 @@
           "key": "advance-time",
           "title": "Advance time to billing date",
           "description": "Run this test helper to advance the test clock to the next billing cycle to see the invoice generated for the usage.",
-          "review_prompt": "Run the helper flow and confirm it advances test state without adding helper-only parameters to application code.",
           "requests": [
             {
               "key": "advance-time-request",
@@ -245,8 +230,6 @@
           "key": "wait-for-invoice-created",
           "title": "Wait for the invoice to be created",
           "description": "Listen for the webhook event to identify when the invoice is created.",
-          "review_prompt": "Run the relevant Stripe CLI trigger or complete the upstream flow, then confirm the handler receives and verifies the expected event.",
-          "review_command": "stripe trigger invoice.created",
           "events": [
             "invoice.created"
           ]
@@ -256,7 +239,6 @@
           "key": "view-invoice",
           "title": "View the invoice created",
           "description": "Use the id returned in the invoice.created event to retrieve the invoice created for the reported usage during the billing period.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/invoices/${node.usage-chapter.wait-for-invoice-created.0:id}",
             "method": "get"
@@ -273,8 +255,6 @@
           "key": "test-clock-advanced",
           "title": "Wait for test clock to be ready.",
           "description": "To ensure the test clock is done advancing check that the test clock is ready to be advanced.",
-          "review_prompt": "Run the relevant Stripe CLI trigger or complete the upstream flow, then confirm the handler receives and verifies the expected event.",
-          "review_command": "stripe trigger test_helpers.test_clock.ready",
           "events": [
             "test_helpers.test_clock.ready"
           ]
@@ -284,7 +264,6 @@
           "key": "delete-test-clock",
           "title": "Delete the test clock",
           "description": "Run this test helper to delete the test clock to clean up test data.",
-          "review_prompt": "Run the helper flow and confirm it advances test state without adding helper-only parameters to application code.",
           "requests": [
             {
               "key": "delete-test-clock-request",

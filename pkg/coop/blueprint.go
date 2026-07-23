@@ -21,11 +21,14 @@ const (
 // BlueprintStep is a step definition within a blueprint.
 type BlueprintStep struct {
 	StepDefinition
-	Description string             `json:"description,omitempty"`
-	Required    bool               `json:"required,omitempty"`
-	Settings    []BlueprintSetting `json:"settings,omitempty"`
-	Params      []BlueprintParam   `json:"params,omitempty"`
-	Nodes       []NodeDefinition   `json:"nodes"`
+	Description string `json:"description,omitempty"`
+	// Required is a pointer so omitted metadata remains distinguishable from
+	// an explicit false. Omission does not grant an agent permission to skip;
+	// only required:false does.
+	Required *bool              `json:"required,omitempty"`
+	Settings []BlueprintSetting `json:"settings,omitempty"`
+	Params   []BlueprintParam   `json:"params,omitempty"`
+	Nodes    []NodeDefinition   `json:"nodes"`
 }
 
 // Blueprint is the CLI-friendly representation of a Workbench Blueprint.
@@ -290,8 +293,10 @@ func NewSessionFromBlueprint(bp *Blueprint, sessionID string, settings, params m
 				State:          NodePending,
 			}
 		}
+		stepDefinition := ch.StepDefinition
+		stepDefinition.Skippable = ch.Required != nil && !*ch.Required
 		steps = append(steps, SessionStep{
-			StepDefinition: ch.StepDefinition,
+			StepDefinition: stepDefinition,
 			Nodes:          nodes,
 		})
 	}

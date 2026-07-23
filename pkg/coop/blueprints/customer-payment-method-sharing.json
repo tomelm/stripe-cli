@@ -18,8 +18,7 @@
           "type": "dashboard",
           "key": "enable-sharing-settings",
           "title": "Enable sharing in organization settings",
-          "description": "Navigate to your organization sharing settings and create a sharing group that includes both accounts. This step auto-completes once sharing is verified between the two accounts.",
-          "review_prompt": "Open Dashboard and confirm the required configuration is present before continuing."
+          "description": "Navigate to your organization sharing settings and create a sharing group that includes both accounts. Confirm both accounts appear in the sharing group before continuing."
         }
       ]
     },
@@ -34,7 +33,6 @@
           "key": "create-customer",
           "title": "Create a shared customer in Account 1",
           "description": "Use the org-level API key with the Stripe-Context header to create the customer in Account 1. This customer will be available to Account 2 once sharing is enabled.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/customers",
             "method": "post",
@@ -49,7 +47,6 @@
           "key": "create-checkout-session-account-1",
           "title": "Save a card in Account 1",
           "description": "Create a Checkout Session for $10 in Account 1 with the customer attached. The payment method will be saved to the customer for future use.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/checkout/sessions",
             "method": "post",
@@ -82,8 +79,7 @@
           "type": "uiComponent",
           "key": "complete-checkout-account-1",
           "title": "Complete checkout in Account 1",
-          "description": "Complete the Checkout Session. This charges the customer $10 and saves the card as a reusable payment method on the shared customer.",
-          "review_prompt": "Open the app and confirm the user-facing flow works as described."
+          "description": "Complete the Checkout Session. This charges the customer $10 and saves the card as a reusable payment method on the shared customer."
         }
       ]
     },
@@ -97,7 +93,6 @@
           "key": "create-checkout-session-account-2",
           "title": "Charge the shared card in Account 2",
           "description": "Create a Checkout Session for $20 in Account 2 using the shared customer. The payment method saved from the first checkout will be reused.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/checkout/sessions",
             "method": "post",
@@ -130,8 +125,7 @@
           "type": "uiComponent",
           "key": "complete-checkout-account-2",
           "title": "Complete checkout in Account 2",
-          "description": "Complete the Checkout Session using the payment method saved to the shared customer from Account 1. The shared card works—you're ready to enable sharing in production.",
-          "review_prompt": "Open the app and confirm the user-facing flow works as described."
+          "description": "Complete the Checkout Session using the payment method saved to the shared customer from Account 1. The shared card works—you're ready to enable sharing in production."
         }
       ]
     }

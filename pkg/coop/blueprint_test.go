@@ -53,8 +53,10 @@ func TestAllEmbeddedBlueprintsHaveQualityMetadata(t *testing.T) {
 					if n.Description != "" {
 						assertQualityText(t, "node description "+n.Key, n.Description, 20, weakPhrases)
 					}
-					assertQualityText(t, "node review prompt "+n.Key, n.ReviewPrompt, 20, weakPhrases)
-					assertObservableGuidance(t, n.Key, n.ReviewPrompt)
+					if n.ReviewPrompt != "" {
+						assertQualityText(t, "node review prompt "+n.Key, n.ReviewPrompt, 20, weakPhrases)
+						assertObservableGuidance(t, n.Key, n.ReviewPrompt)
+					}
 
 					switch n.Type {
 					case NodeAPIRequest:
@@ -217,8 +219,29 @@ func TestNewSessionFromBlueprint(t *testing.T) {
 	// Total nodes = blueprint nodes (4) + context node (1)
 	assert.Equal(t, 5, session.TotalNodes())
 
-	assert.NotEmpty(t, session.Steps[1].Nodes[0].ReviewPrompt)
-	assert.Equal(t, "stripe trigger checkout.session.completed", session.Steps[3].Nodes[0].ReviewCommand)
+	assert.Empty(t, session.Steps[1].Nodes[0].ReviewPrompt, "the exporter must not invent product review guidance")
+	assert.Empty(t, session.Steps[3].Nodes[0].ReviewCommand, "events without an explicit fixture must not become trigger commands")
+}
+
+func TestNewSessionFromBlueprintOnlyAllowsExplicitlyOptionalStepsToBeSkipped(t *testing.T) {
+	required := true
+	optional := false
+	bp := &Blueprint{
+		ID: "skip-policy",
+		Steps: []BlueprintStep{
+			{StepDefinition: StepDefinition{Key: "omitted"}, Nodes: []NodeDefinition{{Key: "one"}}},
+			{StepDefinition: StepDefinition{Key: "required"}, Required: &required, Nodes: []NodeDefinition{{Key: "two"}}},
+			{StepDefinition: StepDefinition{Key: "optional"}, Required: &optional, Nodes: []NodeDefinition{{Key: "three"}}},
+		},
+	}
+
+	session := NewSessionFromBlueprint(bp, "skip_policy", nil, nil)
+
+	require.Len(t, session.Steps, 4)
+	assert.False(t, session.Steps[0].Skippable, "the generated context step is required")
+	assert.False(t, session.Steps[1].Skippable, "omitted metadata must not grant skip authority")
+	assert.False(t, session.Steps[2].Skippable)
+	assert.True(t, session.Steps[3].Skippable)
 }
 
 func TestListBlueprintsWithMetadata(t *testing.T) {

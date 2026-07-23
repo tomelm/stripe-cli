@@ -16,7 +16,6 @@
           "key": "create-new-customer",
           "title": "Create a new customer",
           "description": "Create a Customer object when users create an account with your business.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/customers",
             "method": "post",
@@ -40,7 +39,6 @@
           "key": "create-financial-connections-session",
           "title": "Create a Financial Connections session",
           "description": "Create a Financial Connections session to collect an account.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/financial_connections/sessions",
             "method": "post",
@@ -65,8 +63,7 @@
           "type": "uiComponent",
           "key": "collect-financial-connections-account",
           "title": "Collect a Financial Connections account",
-          "description": "Use Stripe.js to collect a Financial Connections account. This method loads the authentication flow, the client-side Stripe.js UI that helps your users link their financial accounts to you and Stripe.",
-          "review_prompt": "Open the app and confirm the user-facing flow works as described."
+          "description": "Use Stripe.js to collect a Financial Connections account. This method loads the authentication flow, the client-side Stripe.js UI that helps your users link their financial accounts to you and Stripe."
         }
       ]
     },
@@ -80,7 +77,6 @@
           "key": "retrieve-financial-connections-session",
           "title": "Retrieve the Financial Connections session",
           "description": "Retrieve the completed Financial Connections session to see the accounts that your user has connected.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/financial_connections/sessions/${node.create-financial-connections-session-chapter.create-financial-connections-session:id}",
             "method": "get"
@@ -91,7 +87,6 @@
           "key": "retrieve-financial-connections-account-data",
           "title": "Retrieve Financial Connections account data",
           "description": "Retrieve account data that you requested permissions for in the Financial Connections Session. If you did not prefetch data, you may need to refresh the account.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/financial_connections/accounts/${node.retrieve-financial-connections-account-data-chapter.retrieve-financial-connections-session:accounts.data[0].id}",
             "method": "get"
@@ -102,7 +97,6 @@
           "key": "refresh-financial-connections-account-data",
           "title": "Refresh Financial Connections account data",
           "description": "Refresh account data that you requested permissions for in the Financial Connections Session.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/financial_connections/accounts/${node.retrieve-financial-connections-account-data-chapter.retrieve-financial-connections-session:accounts.data[0].id}/refresh",
             "method": "post",

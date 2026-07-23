@@ -14,7 +14,6 @@
           "type": "apiRequest",
           "key": "create-checkout-session",
           "title": "Create a checkout session",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/checkout/sessions",
             "method": "post",
@@ -29,21 +28,18 @@
         {
           "type": "uiComponent",
           "key": "add-preview-page-snippet",
-          "title": "Add a preview page",
-          "review_prompt": "Open the app and confirm the user-facing flow works as described."
+          "title": "Add a preview page"
         },
         {
           "type": "uiComponent",
           "key": "add-success-page-snippet",
-          "title": "Add a success page",
-          "review_prompt": "Open the app and confirm the user-facing flow works as described."
+          "title": "Add a success page"
         },
         {
           "type": "setUpWebhooks",
           "key": "webhooks-setup",
           "title": "Handle Checkout and billing events reliably",
-          "description": "Run webhook setup and confirm add events to an event destination to send events to your integration",
-          "review_prompt": "Run the Stripe CLI listener and confirm webhook forwarding reaches the local endpoint."
+          "description": "Run webhook setup and confirm add events to an event destination to send events to your integration"
         }
       ]
     }

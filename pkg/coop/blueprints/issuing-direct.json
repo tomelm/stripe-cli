@@ -20,7 +20,6 @@
           "key": "listOpenTreasuryFinancialAccounts",
           "title": "List Financial Accounts (Money Management v2)",
           "description": "GET /v2/money_management/financial_accounts with Stripe-Version 2026-02-25.preview (do not mix issuing_program_beta on this call). Do not send status—this list endpoint often only allows limit and page, and extra fields cause an unknown-parameter error. Pick a row with status open in the response; the blueprint uses data[0].id for the Dashboard link and create card.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v2/money_management/financial_accounts",
             "method": "get",
@@ -31,8 +30,7 @@
           "type": "dashboard",
           "key": "fundInDashboardSandbox",
           "title": "Add funds in Dashboard",
-          "description": "After the v2 list step above succeeds, opens the Dashboard Add funds flow for data[0].id (fa_) and your Workbench merchant (acct_).",
-          "review_prompt": "Open the app and confirm the user-facing flow works as described."
+          "description": "After the v2 list step above succeeds, opens the Dashboard Add funds flow for data[0].id (fa_) and your Workbench merchant (acct_)."
         }
       ]
     },
@@ -47,7 +45,6 @@
           "key": "createCardholder",
           "title": "Create a cardholder",
           "description": "Create a cardholder with name, email, phone, billing address, and individual.user_terms_acceptance for Cross River, Fifth Third, and Lead (Stripe-Version 2026-02-25.preview; issuing_program_beta=v2). A second update is not required for those bank terms. If you see issuing_for_connected_accounts_only, Stripe classifies this API key’s merchant as an Issuing Connect platform (platform-only cardholders are blocked)—not a bad curl. If that appeared after it worked, confirm Workbench is still using the same secret key and merchant; Issuing or program onboarding can flip that classification quickly.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/issuing/cardholders",
             "method": "post",
@@ -105,7 +102,6 @@
           "key": "listV2IssuingProgram",
           "title": "List Issuing programs",
           "description": "Lists your Issuing programs so Create card can send an explicit program (iprg_…) instead of falling back to is_default—needed when the default program does not support financial_account_v2. Use header Stripe-Version 2026-02-25.preview; issuing_program_beta=v2. Results are ordered newest-first (created descending); this blueprint uses data[0].id. If the first row is not your v2-capable program, use another id from data in your own Create card request.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/issuing/programs",
             "method": "get",
@@ -117,7 +113,6 @@
           "key": "createCard",
           "title": "Create a virtual card",
           "description": "POST with program (iprg_xxx) from data[0].id of the list-programs step, financial_account_v2 from the Money Management list, and the cardholder id. Run the list step first so program is set explicitly instead of falling back to is_default.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/issuing/cards",
             "method": "post",
@@ -135,7 +130,6 @@
           "key": "activateCard",
           "title": "Activate the card",
           "description": "Update the card status to active. If activation fails for outstanding requirements, check the cardholder in the Dashboard or GET /v1/issuing/cardholders/:id; Cross River–backed programs may need different terms than Card Issuing.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/issuing/cards/${node.create-card-chapter.createCard:id}",
             "method": "post",
@@ -148,8 +142,7 @@
           "type": "dashboard",
           "key": "fundFinancialAccountReminder",
           "title": "Fund your Financial Account",
-          "description": "Your card is ready. To make purchases, fund your v2 Financial Account from the Dashboard. Open the Add funds flow for the account linked to this card.",
-          "review_prompt": "Open the app and confirm the user-facing flow works as described."
+          "description": "Your card is ready. To make purchases, fund your v2 Financial Account from the Dashboard. Open the Add funds flow for the account linked to this card."
         }
       ]
     },
@@ -163,7 +156,6 @@
           "key": "createAuthorization",
           "title": "Create a test authorization",
           "description": "Simulate a card purchase. Capture only works if this response shows approved true and status pending—if the authorization is declined (for example insufficient balance on the linked financial account), fund the account from the earlier step and create a new authorization.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/test_helpers/issuing/authorizations",
             "method": "post",
@@ -187,7 +179,6 @@
           "key": "captureAuthorization",
           "title": "Capture the authorization",
           "description": "Complete the transaction and create an Issuing transaction. Use the id from the create step above; each authorization can only be captured once while it is still pending.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/test_helpers/issuing/authorizations/${node.use-card-chapter.createAuthorization:id}/capture",
             "method": "post",

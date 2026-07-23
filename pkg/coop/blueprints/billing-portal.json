@@ -19,7 +19,6 @@
           "key": "create-customer",
           "title": "Create customer",
           "description": "Create a new customer to associate with the payment or subscription.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/customers",
             "method": "post",
@@ -42,7 +41,6 @@
           "key": "create-portal-session",
           "title": "Create billing portal session",
           "description": "Create a billing portal session to allow customers to manage their subscriptions.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/billing_portal/sessions",
             "method": "post",
@@ -63,8 +61,7 @@
           "type": "uiComponent",
           "key": "redirect-to-portal",
           "title": "Open billing portal",
-          "description": "Click the link below to open the billing portal in a new tab.",
-          "review_prompt": "Open the app and confirm the user-facing flow works as described."
+          "description": "Open the submitted app surface to open the billing portal in a new tab."
         }
       ]
     }

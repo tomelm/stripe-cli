@@ -19,7 +19,6 @@
           "key": "create-product",
           "title": "Create product and price",
           "description": "Create a product with pricing information.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/products",
             "method": "post",
@@ -48,7 +47,6 @@
           "key": "create-checkout-session",
           "title": "Create Checkout Session",
           "description": "Create a Checkout Session for a subscription with a 7-day trial period.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/checkout/sessions",
             "method": "post",
@@ -73,7 +71,9 @@
           "key": "complete-checkout",
           "title": "Complete checkout",
           "description": "Open the Checkout Session URL to complete the subscription signup.",
-          "review_prompt": "Open the app and confirm the user-facing flow works as described."
+          "events": [
+            "checkout.session.completed"
+          ]
         }
       ]
     },
@@ -87,8 +87,6 @@
           "key": "handle-checkout-completed",
           "title": "Wait for checkout.session.completed event",
           "description": "This event is sent when the customer completes the checkout.",
-          "review_prompt": "Run the relevant Stripe CLI trigger or complete the upstream flow, then confirm the handler receives and verifies the expected event.",
-          "review_command": "stripe trigger checkout.session.completed",
           "events": [
             "checkout.session.completed"
           ]
@@ -98,8 +96,6 @@
           "key": "handle-subscription-created",
           "title": "Wait for customer.subscription.created event",
           "description": "This event is sent when the subscription is created",
-          "review_prompt": "Run the relevant Stripe CLI trigger or complete the upstream flow, then confirm the handler receives and verifies the expected event.",
-          "review_command": "stripe trigger customer.subscription.created",
           "events": [
             "customer.subscription.created"
           ]

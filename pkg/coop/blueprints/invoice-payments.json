@@ -18,7 +18,6 @@
           "key": "create-test-clock",
           "title": "Create a test clock",
           "description": "Run this test helper to create a test clock to control time in your test environment.",
-          "review_prompt": "Run the helper flow and confirm it advances test state without adding helper-only parameters to application code.",
           "requests": [
             {
               "key": "create-test-clock-request",
@@ -32,7 +31,6 @@
           "key": "create-product",
           "title": "Create a product with a price",
           "description": "Create a product with a default price that will be used for the invoice.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/products",
             "method": "post",
@@ -50,7 +48,6 @@
           "key": "create-customer",
           "title": "Create a customer",
           "description": "Create a customer who will receive the invoice. For testing purposes, the customer's email will be your email.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/customers",
             "method": "post",
@@ -72,7 +69,6 @@
           "key": "create-invoice",
           "title": "Create an invoice",
           "description": "Create an invoice for the customer with a 30-day payment term.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/invoices",
             "method": "post",
@@ -88,7 +84,6 @@
           "key": "add-invoice-item",
           "title": "Add an invoice item",
           "description": "Add a line item to the invoice using the product price created earlier.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/invoiceitems",
             "method": "post",
@@ -106,7 +101,6 @@
           "key": "send-invoice",
           "title": "Send the invoice",
           "description": "Send the invoice to the customer via email.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/invoices/${node.create-invoice-chapter.create-invoice:id}/send",
             "method": "post",
@@ -123,16 +117,13 @@
           "type": "uiComponent",
           "key": "view-invoice",
           "title": "View and pay the invoice",
-          "description": "Preview the hosted invoice page where customers can view and pay their invoice online. Optionally fill out the form with the card number as 4242 4242 4242 4242. Use a valid future date, such as 12/34, and any three-digit CVC.",
-          "review_prompt": "Open the app and confirm the user-facing flow works as described."
+          "description": "Preview the hosted invoice page where customers can view and pay their invoice online. Optionally fill out the form with the card number as 4242 4242 4242 4242. Use a valid future date, such as 12/34, and any three-digit CVC."
         },
         {
           "type": "asyncHandler",
           "key": "wait-for-invoice-paid",
           "title": "Handle invoice payment events",
           "description": "Listen for the invoice.paid event that indicates successful payment.",
-          "review_prompt": "Run the relevant Stripe CLI trigger or complete the upstream flow, then confirm the handler receives and verifies the expected event.",
-          "review_command": "stripe trigger invoice.paid",
           "events": [
             "invoice.paid"
           ]

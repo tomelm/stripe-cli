@@ -16,7 +16,6 @@
           "key": "create-new-customer",
           "title": "Create a new customer",
           "description": "Create a new customer to associate with the payment method you save for later use.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/customers",
             "method": "post",
@@ -40,7 +39,6 @@
           "key": "payment-intent-request-account-data",
           "title": "Create a Payment Intent",
           "description": "Request access to additional bank account data from the customer.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/payment_intents",
             "method": "post",
@@ -76,8 +74,7 @@
           "type": "uiComponent",
           "key": "collect-payment-details-with-elements",
           "title": "Collect Payment Details with Elements",
-          "description": "Use Elements to collect a bank account for your Payment Intent.",
-          "review_prompt": "Open the app and confirm the user-facing flow works as described."
+          "description": "Use Elements to collect a bank account for your Payment Intent."
         }
       ]
     }

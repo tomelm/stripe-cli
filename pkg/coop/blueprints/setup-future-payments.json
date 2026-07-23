@@ -19,7 +19,6 @@
           "key": "create-new-customer",
           "title": "Create a new customer",
           "description": "Create a new customer to associate with the payment method you save for later use.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/customers",
             "method": "post",
@@ -42,7 +41,6 @@
           "key": "create-checkout-session",
           "title": "Create a checkout interface",
           "description": "Initiate a checkout session to securely save customer payment details for future charges.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/checkout/sessions",
             "method": "post",
@@ -58,16 +56,13 @@
           "type": "uiComponent",
           "key": "complete-checkout",
           "title": "Complete checkout process in setup mode",
-          "description": "Complete the Checkout Session in setup mode to save the payment method. Click on the link below and fill in the \u003cLink\u003etest card information\u003c/Link\u003e with the card number as 4000 0000 0000 0077. Use a valid future date and any three-digit CVC.",
-          "review_prompt": "Open the app and confirm the user-facing flow works as described."
+          "description": "Complete the Checkout Session in setup mode to save the payment method. Open the submitted app surface and fill in the test card information with the card number as 4000 0000 0000 0077. Use a valid future date and any three-digit CVC."
         },
         {
           "type": "asyncHandler",
           "key": "wait-for-checkout-completed",
           "title": "Verify that the checkout session is complete",
-          "description": "Listen for the \u003cLinkWebhook\u003ewebhook event\u003c/LinkWebhook\u003e to identify if the Checkout Session was completed successfully.",
-          "review_prompt": "Run the relevant Stripe CLI trigger or complete the upstream flow, then confirm the handler receives and verifies the expected event.",
-          "review_command": "stripe trigger checkout.session.completed",
+          "description": "Listen for the webhook event to identify if the Checkout Session was completed successfully.",
           "events": [
             "checkout.session.completed"
           ]
@@ -84,8 +79,7 @@
           "type": "apiRequest",
           "key": "retrieve-setup-intent",
           "title": "Retrieve the SetupIntent",
-          "description": "Retrieve SetupIntent object to obtain the \u003cCode\u003epayment_method\u003c/Code\u003e ID that can be attached to a customer in next step.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
+          "description": "Retrieve SetupIntent object to obtain the payment_method ID that can be attached to a customer in next step.",
           "request": {
             "path": "/v1/setup_intents/${node.create-checkout-session-chapter.create-checkout-session:setup_intent}",
             "method": "get",
@@ -97,7 +91,6 @@
           "key": "charge-payment-method-later",
           "title": "Charge the payment method later",
           "description": "Process a charge on the saved payment method when needed, without requiring the customer to re-enter their payment information.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/payment_intents",
             "method": "post",
@@ -116,8 +109,6 @@
           "key": "wait-for-payment-intent-succeeded",
           "title": "Confirm that the payment intent succeeded",
           "description": "Verify the successful completion of the PaymentIntent to ensure that the transaction was processed.",
-          "review_prompt": "Run the relevant Stripe CLI trigger or complete the upstream flow, then confirm the handler receives and verifies the expected event.",
-          "review_command": "stripe trigger payment_intent.succeeded",
           "events": [
             "payment_intent.succeeded"
           ]

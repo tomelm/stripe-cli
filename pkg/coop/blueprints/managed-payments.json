@@ -11,14 +11,13 @@
     {
       "key": "create-product-chapter",
       "title": "Create a product",
-      "description": "Create a digital product with an eligible tax code. \u003cLink\u003eView eligibility requirements\u003c/Link\u003e",
+      "description": "Create a digital product with an eligible tax code. View eligibility requirements",
       "required": true,
       "nodes": [
         {
           "type": "apiRequest",
           "key": "create-subscription-product",
           "title": "Create Subscription Product",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/products",
             "method": "post",
@@ -40,7 +39,6 @@
           "type": "apiRequest",
           "key": "create-one-time-product",
           "title": "Create One Time Product",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/products",
             "method": "post",
@@ -66,8 +64,7 @@
           "type": "apiRequest",
           "key": "create-checkout-session",
           "title": "Create Checkout Session",
-          "description": "Set the \u003ccode\u003emanaged_payments[enabled]\u003c/code\u003e parameter to \u003ccode\u003etrue\u003c/code\u003e and use \u003ccode\u003e2026.02-25.preview\u003c/code\u003e or above as your version header.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
+          "description": "Set the managed_payments[enabled] parameter to true and use 2026.02-25.preview or above as your version header.",
           "request": {
             "path": "/v1/checkout/sessions",
             "method": "post",
@@ -96,8 +93,7 @@
           "type": "uiComponent",
           "key": "complete-checkout",
           "title": "Complete a test payment",
-          "description": "Try different billing addresses to see how tax is calculated for customers in different locations. Then, process a test payment using \u003cLink\u003ethis test card information\u003c/Link\u003e.",
-          "review_prompt": "Open the app and confirm the user-facing flow works as described."
+          "description": "Try different billing addresses to see how tax is calculated for customers in different locations. Then, process a test payment using this test card information."
         }
       ]
     },
@@ -110,9 +106,7 @@
           "type": "asyncHandler",
           "key": "wait-for-checkout-completed",
           "title": "Listen for checkout.session.completed",
-          "description": "We’ll send this event every time a customer successfully checks out. \u003cLink\u003eAPI docs\u003c/Link\u003e",
-          "review_prompt": "Run the relevant Stripe CLI trigger or complete the upstream flow, then confirm the handler receives and verifies the expected event.",
-          "review_command": "stripe trigger checkout.session.completed",
+          "description": "We’ll send this event every time a customer successfully checks out. API docs",
           "events": [
             "checkout.session.completed"
           ]

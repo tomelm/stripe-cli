@@ -19,7 +19,6 @@
           "key": "create-account",
           "title": "Create a connected account",
           "description": "On your server, create a connected account with the Express account type and request the transfers capability.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/accounts",
             "method": "post",
@@ -38,8 +37,7 @@
           "type": "uiComponent",
           "key": "onboard-account",
           "title": "Render Account Onboarding component",
-          "description": "Embed the Connect Account Onboarding component to collect identity verification and business details from the connected account.",
-          "review_prompt": "Open the app and confirm the user-facing flow works as described."
+          "description": "Embed the Connect Account Onboarding component to collect identity verification and business details from the connected account."
         }
       ]
     }

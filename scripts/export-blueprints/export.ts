@@ -59,11 +59,23 @@ const requestedIds = values.ids
  * MessageDescriptors have shape: { id: string, defaultMessage: string, description?: string }
  */
 function resolveMessage(value: unknown): string {
-  if (typeof value === 'string') return value;
-  if (value && typeof value === 'object' && 'defaultMessage' in value) {
-    return (value as { defaultMessage: string }).defaultMessage;
+  let message = '';
+  if (typeof value === 'string') {
+    message = value;
   }
-  return '';
+  if (value && typeof value === 'object' && 'defaultMessage' in value) {
+    message = (value as { defaultMessage: string }).defaultMessage;
+  }
+  // Workbench messages may contain React-Intl formatter tags whose click
+  // targets are not exported. Keep their readable label, never the inert
+  // markup or instructions to click a link that does not exist in the CLI.
+  return message
+    .replace(/<\/?(?:Link[A-Za-z]*|[Cc]ode)>/g, '')
+    .replace(/\bClick on the link below\b/g, 'Open the submitted app surface')
+    .replace(/\bclick on the link below\b/g, 'open the submitted app surface')
+    .replace(/\bClick the link below\b/g, 'Open the submitted app surface')
+    .replace(/\bclick the link below\b/g, 'open the submitted app surface')
+    .replace(/\bthrough the link below\b/g, 'in the submitted app surface');
 }
 
 function buildAPIRequestRefMap(blueprint: Record<string, unknown>): Map<string, string> {
@@ -117,23 +129,14 @@ function sortJSONValue(value: unknown): unknown {
   return value;
 }
 
-function reviewPromptFor(type: string): string {
-  switch (type) {
-    case 'apiRequest':
-      return 'Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.';
-    case 'asyncHandler':
-      return 'Run the relevant Stripe CLI trigger or complete the upstream flow, then confirm the handler receives and verifies the expected event.';
-    case 'uiComponent':
-      return 'Open the app and confirm the user-facing flow works as described.';
-    case 'testHelper':
-      return 'Run the helper flow and confirm it advances test state without adding helper-only parameters to application code.';
-    case 'dashboard':
-      return 'Open Dashboard and confirm the required configuration is present before continuing.';
-    case 'setUpWebhooks':
-      return 'Run the Stripe CLI listener and confirm webhook forwarding reaches the local endpoint.';
-    default:
-      return 'Confirm this step is complete and report the observable result before continuing.';
+function firstExplicitMessage(node: Record<string, unknown>, ...keys: string[]): string {
+  for (const key of keys) {
+    const value = resolveMessage(node[key]);
+    if (value.trim() !== '') {
+      return value;
+    }
   }
+  return '';
 }
 
 function descriptionFor(type: string, description: string): string {
@@ -211,7 +214,19 @@ function transformNode(node: Record<string, unknown>, apiRequestRefs: Map<string
   if (node.description) {
     result.description = descriptionFor(type, resolveMessage(node.description));
   }
-  result.review_prompt = reviewPromptFor(type);
+  // Acceptance criteria are product semantics, not presentation defaults.
+  // Preserve them when the upstream blueprint declares them; otherwise the
+  // CLI derives a clearly generic fallback at render time. Embedding generic
+  // strings here makes them look authored and causes them to drift across the
+  // corpus.
+  const reviewPrompt = firstExplicitMessage(node, 'reviewPrompt', 'review_prompt');
+  if (reviewPrompt) {
+    result.review_prompt = reviewPrompt;
+  }
+  const reviewCommand = firstExplicitMessage(node, 'reviewCommand', 'review_command');
+  if (reviewCommand) {
+    result.review_command = reviewCommand;
+  }
 
   // API Request nodes
   if (type === 'apiRequest' && node.request) {
@@ -240,18 +255,20 @@ function transformNode(node: Record<string, unknown>, apiRequestRefs: Map<string
     );
   }
 
-  // Async handler nodes
-  if (type === 'asyncHandler' && node.events) {
+  // Async handlers declare the events their code consumes. A UI node may also
+  // declare events as a verification contract for the flow the human
+  // exercises. Preserve either declaration verbatim; never infer one from a
+  // neighboring chapter.
+  if ((type === 'asyncHandler' || type === 'uiComponent') && node.events) {
     const events = (node.events as Array<Record<string, unknown>>)
       .map(e => e.eventType as string)
       .filter(Boolean);
-    if (events.length === 0) {
+    if (events.length === 0 && type === 'asyncHandler') {
       return null;
     }
     if (events.length > 0) {
-      result.review_command = `stripe trigger ${events[0]}`;
+      result.events = events;
     }
-    result.events = events;
   }
 
   return result;
@@ -275,8 +292,10 @@ function transformStep(chapter: Record<string, unknown>, apiRequestRefs: Map<str
   if (chapter.description) {
     result.description = resolveMessage(chapter.description);
   }
-  if (chapter.required) {
-    result.required = true;
+  // Preserve an explicit false: omission fails closed in the CLI, while
+  // required:false is the only upstream capability that lets an agent skip.
+  if (typeof chapter.required === 'boolean') {
+    result.required = chapter.required;
   }
   result.nodes = nodes;
 

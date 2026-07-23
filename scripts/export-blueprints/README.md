@@ -51,5 +51,12 @@ BLUEPRINT_SOURCE=/path/to/pay-server/frontend/workbench/shared/blueprints/dist/b
 - Node types: apiRequest, asyncHandler, uiComponent, testHelper, dashboard
 - API request details: path, method, params (from first configuredDetails)
 - Interpolation strings: `${node.chapter.node:field}` preserved as-is
-- Event types for asyncHandler nodes
+- Event types for asyncHandler nodes and explicit UI verification contracts
+- Product-authored review prompts and commands, when present upstream
 - Product metadata
+
+The exporter does not manufacture review prompts or `stripe trigger` commands.
+Generic guidance is a CLI presentation fallback, and a trigger command is only
+safe when the upstream blueprint explicitly declares one. Not every Stripe
+event has a corresponding CLI trigger fixture. It also does not infer UI event
+contracts from neighboring steps; those must be declared on the UI node.

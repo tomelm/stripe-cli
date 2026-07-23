@@ -19,7 +19,6 @@
           "key": "createCustomer",
           "title": "Create a customer",
           "description": "Create a customer to subscribe to the pricing plan.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/customers",
             "method": "post",
@@ -43,7 +42,6 @@
           "key": "createEmptyPricingPlan",
           "title": "Create a Pricing Plan",
           "description": "Create a Pricing Plan to serve as the container for your pay-as-you-go pricing components.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v2/billing/pricing_plans",
             "method": "post",
@@ -59,7 +57,6 @@
           "key": "createMeter",
           "title": "Create a meter",
           "description": "Create a meter to track usage events reported to Stripe.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/billing/meters",
             "method": "post",
@@ -85,7 +82,6 @@
           "key": "createRateCard",
           "title": "Create a rate card",
           "description": "Create a rate card with monthly service intervals for usage-based billing.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v2/billing/rate_cards",
             "method": "post",
@@ -103,7 +99,6 @@
           "key": "createMeteredItem",
           "title": "Create a metered item",
           "description": "Create a metered item to link the meter to a billable item.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v2/billing/metered_items",
             "method": "post",
@@ -118,7 +113,6 @@
           "key": "addRateToRateCard",
           "title": "Add rate to rate card",
           "description": "Add a flat per-unit rate to the rate card.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v2/billing/rate_cards/${node.create-rate-card-chapter.createRateCard:id}/rates",
             "method": "post",
@@ -133,7 +127,6 @@
           "key": "attachRateCardToPricingPlan",
           "title": "Attach rate card to Pricing Plan",
           "description": "Attach the rate card to the Pricing Plan to complete the pay-as-you-go billing structure.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v2/billing/pricing_plans/${node.create-pricing-plan-chapter.createEmptyPricingPlan:id}/components",
             "method": "post",
@@ -158,7 +151,6 @@
           "key": "setLiveVersion",
           "title": "Set live version to latest",
           "description": "Activate the Pricing Plan so new subscriptions use it.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v2/billing/pricing_plans/${node.create-pricing-plan-chapter.createEmptyPricingPlan:id}",
             "method": "post",
@@ -172,7 +164,6 @@
           "key": "createCheckoutSession",
           "title": "Create checkout session",
           "description": "Create a checkout session to activate the Pricing Plan subscription.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/checkout/sessions",
             "method": "post",
@@ -193,16 +184,13 @@
           "type": "uiComponent",
           "key": "completeCheckout",
           "title": "Complete the checkout",
-          "description": "Complete the hosted checkout page to complete the subscription flow.",
-          "review_prompt": "Open the app and confirm the user-facing flow works as described."
+          "description": "Complete the hosted checkout page to complete the subscription flow."
         },
         {
           "type": "asyncHandler",
           "key": "waitForServicingActivated",
           "title": "Wait for servicing activated event",
           "description": "Wait for the pricing plan subscription to be activated for servicing.",
-          "review_prompt": "Run the relevant Stripe CLI trigger or complete the upstream flow, then confirm the handler receives and verifies the expected event.",
-          "review_command": "stripe trigger v2.billing.pricing_plan_subscription.servicing_activated",
           "events": [
             "v2.billing.pricing_plan_subscription.servicing_activated"
           ]

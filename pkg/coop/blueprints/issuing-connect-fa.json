@@ -20,8 +20,7 @@
           "type": "dashboard",
           "key": "activateProducts",
           "title": "Activate in Dashboard",
-          "description": "Activate Issuing and Treasury for platforms from the Dashboard to get API access.",
-          "review_prompt": "Open the app and confirm the user-facing flow works as described."
+          "description": "Activate Issuing and Treasury for platforms from the Dashboard to get API access."
         }
       ]
     },
@@ -36,7 +35,6 @@
           "key": "createConnectedAccount",
           "title": "Create a connected account",
           "description": "Create a US-based connected account with transfers, card_issuing, treasury, and us_bank_account_ach_payments capabilities.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/accounts",
             "method": "post",
@@ -76,7 +74,6 @@
           "key": "createAccountLink",
           "title": "Create onboarding link",
           "description": "Create an onboarding link for the connected account to complete verification and enable capabilities.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/account_links",
             "method": "post",
@@ -92,8 +89,7 @@
           "type": "uiComponent",
           "key": "completeVerification",
           "title": "Complete account verification",
-          "description": "Open the onboarding link to complete verification for the connected account and enable its capabilities.",
-          "review_prompt": "Open the app and confirm the user-facing flow works as described."
+          "description": "Open the onboarding link to complete verification for the connected account and enable its capabilities."
         }
       ]
     },
@@ -108,7 +104,6 @@
           "key": "createFinancialAccount",
           "title": "Create a financial account",
           "description": "Create a FinancialAccount with card_issuing, deposit_insurance, financial_addresses, and transfer features enabled.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/treasury/financial_accounts",
             "method": "post",
@@ -169,7 +164,6 @@
           "key": "linkBankAccount",
           "title": "Link a bank account",
           "description": "Create a SetupIntent to link an external bank account for ACH transfers.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/setup_intents",
             "method": "post",
@@ -211,7 +205,6 @@
           "key": "verifyMicroDeposit",
           "title": "Verify micro deposits",
           "description": "Complete micro deposit verification for the linked bank account. Use the test code SM11AA.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/setup_intents/${node.fund-financial-account-chapter.linkBankAccount:id}/verify_microdeposits",
             "method": "post",
@@ -225,8 +218,6 @@
           "key": "wait-for-financial-account",
           "title": "Wait for financial account",
           "description": "Wait for the financial account to be created and activated before creating a cardholder. This may take a few minutes.",
-          "review_prompt": "Run the relevant Stripe CLI trigger or complete the upstream flow, then confirm the handler receives and verifies the expected event.",
-          "review_command": "stripe trigger financial_account.features_status_updated",
           "events": [
             "financial_account.features_status_updated"
           ]
@@ -236,7 +227,6 @@
           "key": "addFunds",
           "title": "Add funds to financial account",
           "description": "Create an inbound transfer to move funds from the linked bank account into the financial account.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/treasury/inbound_transfers",
             "method": "post",
@@ -255,8 +245,6 @@
           "key": "wait-for-inbound-transfer",
           "title": "Wait for inbound transfer",
           "description": "Wait for the inbound transfer to be completed before creating a cardholder. This may take a few minutes.",
-          "review_prompt": "Run the relevant Stripe CLI trigger or complete the upstream flow, then confirm the handler receives and verifies the expected event.",
-          "review_command": "stripe trigger treasury.inbound_transfer.succeeded",
           "events": [
             "treasury.inbound_transfer.succeeded",
             "inbound_transfer.succeeded"
@@ -275,7 +263,6 @@
           "key": "createCardholder",
           "title": "Create a cardholder",
           "description": "Create a cardholder with business details including name, email, phone number, and billing address.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/issuing/cardholders",
             "method": "post",
@@ -311,7 +298,6 @@
           "key": "acceptUserTerms",
           "title": "Accept user terms",
           "description": "Update the cardholder to accept the card issuing user terms of service.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/issuing/cardholders/${node.create-cardholder-chapter.createCardholder:id}",
             "method": "post",
@@ -332,7 +318,6 @@
           "key": "createCard",
           "title": "Create a virtual card",
           "description": "Create a virtual card in USD currency and attach it to the cardholder.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/issuing/cards",
             "method": "post",
@@ -349,7 +334,6 @@
           "key": "activateCard",
           "title": "Activate the card",
           "description": "Update the card status to active so it can be used for purchases.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/issuing/cards/${node.create-cardholder-chapter.createCard:id}",
             "method": "post",
@@ -370,7 +354,6 @@
           "key": "createAuthorization",
           "title": "Create a test authorization",
           "description": "Generate a test authorization to simulate a card purchase at a merchant.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/test_helpers/issuing/authorizations",
             "method": "post",
@@ -394,7 +377,6 @@
           "key": "captureAuthorization",
           "title": "Capture the authorization",
           "description": "Capture the pending authorization to complete the transaction and debit the financial account.",
-          "review_prompt": "Confirm the implementation calls the intended Stripe API, reuses values needed by later steps, and handles API errors without exposing secrets.",
           "request": {
             "path": "/v1/test_helpers/issuing/authorizations/${node.use-card-chapter.createAuthorization:id}/capture",
             "method": "post",
