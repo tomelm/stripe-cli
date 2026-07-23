@@ -75,6 +75,162 @@ func TestVerificationAcceptanceRequiredPassAutoCompletesNonUI(t *testing.T) {
 	assert.Equal(t, "cus_acceptance", attempt.Resources[0].ID)
 }
 
+func TestVerificationAcceptanceApplicationOutcomeCompletesNonUIExplicitlyUnverified(t *testing.T) {
+	store, session := newVerificationAcceptanceStore(t, coop.NodeCLICommand)
+	addAcceptanceOutcome(t, store, session.ID)
+	evaluator := &acceptanceEvaluator{evaluations: []Evaluation{{Results: []coop.CheckResult{
+		requiredAcceptanceResult("resource.customer.exists", coop.CheckResource, coop.CheckPassed),
+		requiredAcceptanceResult(coop.ApplicationOutcomeResultPrefix+"durable-access", coop.CheckCoverage, coop.CheckPassed),
+	}}}}
+	service := newVerificationAcceptanceService(store, evaluator, newAcceptanceClock())
+
+	started, err := service.StartWork(session.ID, 1, "Building durable access")
+	require.NoError(t, err)
+	require.Len(t, started.LifecycleFacts, 1)
+	assert.Equal(t, "subscription-state", started.LifecycleFacts[0].ID)
+	require.Len(t, started.RequiredOutcomes, 1)
+	assert.Equal(t, "durable-access", started.RequiredOutcomes[0].ID)
+
+	response, err := service.ReportWorkAttempt(
+		context.Background(),
+		session.ID,
+		1,
+		started.Attempt,
+		ReportWorkInput{File: "server.go", Note: "Persisted subscription access"},
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, string(decisionUnverified), response.Decision)
+	assert.Equal(t, string(decisionUnverified), response.State)
+	outcome := acceptanceResult(t, response.Verification, coop.ApplicationOutcomeResultPrefix+"durable-access")
+	assert.Equal(t, coop.CheckUnavailable, outcome.Status, "an evaluator cannot mask the core-owned application outcome")
+	assert.Equal(t, "Persist subscription state and gate access server-side.", outcome.Expected)
+	assert.Contains(t, outcome.Observed, "No trusted application observation")
+	node := acceptanceNode(t, readAcceptanceSession(t, store, session.ID))
+	assert.Equal(t, coop.NodeDone, node.State)
+	assert.Equal(t, coop.AttemptCompletedUnverified, node.Attempts[0].EndReason)
+}
+
+func TestVerificationAcceptanceEvaluatorCannotMutateAwayApplicationOutcome(t *testing.T) {
+	store, session := newVerificationAcceptanceStore(t, coop.NodeCLICommand)
+	addAcceptanceOutcome(t, store, session.ID)
+	evaluator := &acceptanceEvaluator{evaluate: func(_ context.Context, input EvaluationInput) (Evaluation, error) {
+		node, err := input.Session.NodeByNumber(input.NodeNumber)
+		require.NoError(t, err)
+		node.RequiredOutcomes = nil
+		input.Session.LifecycleFacts = nil
+		return Evaluation{Results: []coop.CheckResult{
+			requiredAcceptanceResult("resource.customer.exists", coop.CheckResource, coop.CheckPassed),
+		}}, nil
+	}}
+	service := newVerificationAcceptanceService(store, evaluator, newAcceptanceClock())
+	started, err := service.StartWork(session.ID, 1, "Building durable access")
+	require.NoError(t, err)
+
+	response, err := service.ReportWorkAttempt(
+		context.Background(),
+		session.ID,
+		1,
+		started.Attempt,
+		ReportWorkInput{File: "server.go", Note: "Persisted subscription access"},
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, string(decisionUnverified), response.Decision)
+	outcome := acceptanceResult(t, response.Verification, coop.ApplicationOutcomeResultPrefix+"durable-access")
+	assert.Equal(t, coop.CheckUnavailable, outcome.Status)
+	persisted := acceptanceNode(t, readAcceptanceSession(t, store, session.ID))
+	require.Len(t, persisted.RequiredOutcomes, 1)
+}
+
+func TestVerificationAcceptanceCorrectionAttemptRetainsApplicationContract(t *testing.T) {
+	store, session := newVerificationAcceptanceStore(t, coop.NodeCLICommand)
+	addAcceptanceOutcome(t, store, session.ID)
+	failure := requiredAcceptanceResult("resource.customer.exists", coop.CheckResource, coop.CheckFailed)
+	failure.Detail = "Customer was not found."
+	failure.Repair = "Create and report the mapped Customer."
+	service := newVerificationAcceptanceService(
+		store,
+		&acceptanceEvaluator{evaluations: []Evaluation{{Results: []coop.CheckResult{failure}}}},
+		newAcceptanceClock(),
+	)
+	started, err := service.StartWork(session.ID, 1, "Building durable access")
+	require.NoError(t, err)
+	failed, err := service.ReportWorkAttempt(
+		context.Background(),
+		session.ID,
+		1,
+		started.Attempt,
+		ReportWorkInput{File: "server.go", Note: "Implemented access"},
+	)
+	require.NoError(t, err)
+	require.Equal(t, string(decisionNeedsAgent), failed.Decision)
+
+	correction, err := service.StartWork(session.ID, 1, "Correcting Customer mapping")
+
+	require.NoError(t, err)
+	assert.Equal(t, 2, correction.Attempt)
+	require.Len(t, correction.LifecycleFacts, 1)
+	assert.Equal(t, "subscription-state", correction.LifecycleFacts[0].ID)
+	require.Len(t, correction.RequiredOutcomes, 1)
+	assert.Equal(t, "durable-access", correction.RequiredOutcomes[0].ID)
+	assert.Contains(t, correction.Message, failure.Repair)
+}
+
+func TestVerificationAcceptanceUIOutcomeRequiresVisibleOverride(t *testing.T) {
+	store, session := newVerificationAcceptanceStore(t, coop.NodeUIComponent)
+	addAcceptanceOutcome(t, store, session.ID)
+	evaluator := &acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) (Evaluation, error) {
+		return Evaluation{Results: []coop.CheckResult{
+			requiredAcceptanceResult("resource.checkout.exists", coop.CheckResource, coop.CheckPassed),
+		}}, nil
+	}}
+	clock := newAcceptanceClock()
+	service := newVerificationAcceptanceService(store, evaluator, clock)
+	started, err := service.StartWork(session.ID, 1, "Building subscription UI")
+	require.NoError(t, err)
+	reported, err := service.ReportWorkAttempt(
+		context.Background(),
+		session.ID,
+		1,
+		started.Attempt,
+		ReportWorkInput{
+			File: "checkout.tsx", Note: "Built subscription UI",
+			AppURL: "http://localhost:4242/checkout",
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, string(decisionNeedsHuman), reported.Decision)
+	outcome := acceptanceResult(t, reported.Verification, coop.ApplicationOutcomeResultPrefix+"durable-access")
+	assert.Equal(t, coop.CheckUnavailable, outcome.Status)
+
+	clock.Set(clock.Now().Add(time.Minute))
+	_, err = service.MarkAppOpened(session.ID, 1, started.Attempt)
+	require.NoError(t, err)
+	clock.Set(clock.Now().Add(time.Nanosecond))
+	_, err = service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
+	require.NoError(t, err)
+
+	refs := []AttemptRef{{Node: 1, Attempt: started.Attempt}}
+	_, err = service.ConfirmReviewAttempts(session.ID, refs, nil)
+	require.ErrorIs(t, err, ErrVerificationOverrideRequired)
+	confirmed, err := service.ConfirmReviewAttempts(
+		session.ID,
+		refs,
+		acceptanceReviewOverride(
+			t,
+			store,
+			session.ID,
+			refs,
+			"Developer reviewed the disclosed application verification gap and chose to continue.",
+		),
+	)
+	require.NoError(t, err)
+	node := acceptanceNode(t, confirmed)
+	assert.Equal(t, coop.NodeDone, node.State)
+	require.NotNil(t, node.Attempts[0].Override)
+}
+
 func TestVerificationAcceptanceCandidateCannotAutoCompleteNonUI(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeCLICommand)
 	passed := requiredAcceptanceResult("state.checkout.complete", coop.CheckState, coop.CheckPassed)
@@ -1863,6 +2019,26 @@ func newVerificationAcceptanceStore(t *testing.T, nodeType coop.NodeType) (*coop
 	}
 	require.NoError(t, store.Write(session))
 	return store, session
+}
+
+func addAcceptanceOutcome(t *testing.T, store *coop.Store, sessionID string) {
+	t.Helper()
+	_, err := store.Update(sessionID, func(session *coop.Session) error {
+		session.LifecycleFacts = []coop.LifecycleFact{{
+			ID: "subscription-state", Statement: "Stripe subscription state may change asynchronously.",
+		}}
+		node, nodeErr := session.NodeByNumber(1)
+		if nodeErr != nil {
+			return nodeErr
+		}
+		node.RequiredOutcomes = []coop.RequiredOutcome{{
+			ID:        "durable-access",
+			FactRefs:  []string{"subscription-state"},
+			Statement: "Persist subscription state and gate access server-side.",
+		}}
+		return nil
+	})
+	require.NoError(t, err)
 }
 
 func requiredAcceptanceResult(id string, kind coop.CheckKind, status coop.CheckStatus) coop.CheckResult {

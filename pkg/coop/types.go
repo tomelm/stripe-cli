@@ -50,6 +50,21 @@ type Verification struct {
 	Passed bool   `json:"passed"`
 }
 
+// LifecycleFact is reusable provider behavior that informs one or more
+// application outcomes without prescribing an application architecture.
+type LifecycleFact struct {
+	ID        string `json:"id"`
+	Statement string `json:"statement"`
+}
+
+// RequiredOutcome is an application-level result the implementation must
+// produce. FactRefs select the canonical provider facts that explain why.
+type RequiredOutcome struct {
+	ID        string   `json:"id"`
+	FactRefs  []string `json:"fact_refs"`
+	Statement string   `json:"statement"`
+}
+
 // AttemptEndReason records why an immutable node attempt ended.
 type AttemptEndReason string
 
@@ -190,15 +205,16 @@ type TestHelperRequest struct {
 
 // NodeDefinition is the source-derived static definition for a node.
 type NodeDefinition struct {
-	Type          NodeType            `json:"type"`
-	Key           string              `json:"key"`
-	Title         string              `json:"title"`
-	Description   string              `json:"description,omitempty"`
-	ReviewPrompt  string              `json:"review_prompt,omitempty"`
-	ReviewCommand string              `json:"review_command,omitempty"`
-	Request       *APIRequest         `json:"request,omitempty"`
-	TestRequests  []TestHelperRequest `json:"requests,omitempty"`
-	Events        []string            `json:"events,omitempty"`
+	Type             NodeType            `json:"type"`
+	Key              string              `json:"key"`
+	Title            string              `json:"title"`
+	Description      string              `json:"description,omitempty"`
+	ReviewPrompt     string              `json:"review_prompt,omitempty"`
+	ReviewCommand    string              `json:"review_command,omitempty"`
+	Request          *APIRequest         `json:"request,omitempty"`
+	TestRequests     []TestHelperRequest `json:"requests,omitempty"`
+	Events           []string            `json:"events,omitempty"`
+	RequiredOutcomes []RequiredOutcome   `json:"required_outcomes,omitempty"`
 }
 
 // StepDefinition is the source-derived static definition for a step.
@@ -234,6 +250,7 @@ type Session struct {
 	ID              string            `json:"id"`
 	Blueprint       string            `json:"blueprint"`
 	StripeAccountID string            `json:"stripe_account_id,omitempty"`
+	LifecycleFacts  []LifecycleFact   `json:"lifecycle_facts,omitempty"`
 	Status          SessionStatus     `json:"status"`
 	Settings        map[string]string `json:"settings,omitempty"`
 	Params          map[string]string `json:"params,omitempty"`
@@ -274,14 +291,16 @@ type CommandResponse struct {
 	// Next is directly executable. NextTemplate requires the agent to fill
 	// every named RequiredInput before execution; shell-shaped placeholders
 	// must never be presented as an exact next command.
-	Next           string                `json:"next,omitempty"`
-	NextTemplate   string                `json:"next_template,omitempty"`
-	RequiredInputs []string              `json:"required_inputs,omitempty"`
-	AgentPrompt    string                `json:"agent_prompt,omitempty"`
-	APIRequest     *APIRequest           `json:"api_request,omitempty"`
-	SDKExample     string                `json:"sdk_example,omitempty"`
-	ResourceRoles  []ResourceRequirement `json:"stripe_resource_roles,omitempty"`
-	Verification   []CheckResult         `json:"verification_results,omitempty"`
-	Error          string                `json:"error,omitempty"`
-	Hint           string                `json:"hint,omitempty"`
+	Next             string                `json:"next,omitempty"`
+	NextTemplate     string                `json:"next_template,omitempty"`
+	RequiredInputs   []string              `json:"required_inputs,omitempty"`
+	AgentPrompt      string                `json:"agent_prompt,omitempty"`
+	APIRequest       *APIRequest           `json:"api_request,omitempty"`
+	SDKExample       string                `json:"sdk_example,omitempty"`
+	ResourceRoles    []ResourceRequirement `json:"stripe_resource_roles,omitempty"`
+	Verification     []CheckResult         `json:"verification_results,omitempty"`
+	LifecycleFacts   []LifecycleFact       `json:"lifecycle_facts,omitempty"`
+	RequiredOutcomes []RequiredOutcome     `json:"required_outcomes,omitempty"`
+	Error            string                `json:"error,omitempty"`
+	Hint             string                `json:"hint,omitempty"`
 }

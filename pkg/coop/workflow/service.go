@@ -124,6 +124,26 @@ func (s *Service) StartWork(sessionID string, nodeNumber int, note string) (coop
 	if err := coop.ValidateSessionText("activity note", note, coop.MaxActivityBytes); err != nil {
 		return errorResponse(err, "Use a shorter single-line --note."), nil
 	}
+
+	// Compile requirements from a read-only snapshot before changing workflow
+	// state. Requirements is a pure compiler boundary, and a malformed catalog
+	// must not leave behind an active node or an empty attempt.
+	frozen, err := s.store.Read(sessionID)
+	if err != nil {
+		return errorResponse(err, "stripe coop status"), nil
+	}
+	if err := requireActiveSession(frozen); err != nil {
+		return errorResponse(err, "stripe coop status"), nil
+	}
+	frozenNode, err := frozen.NodeByNumber(nodeNumber)
+	if err != nil {
+		return errorResponse(err, "stripe coop status"), nil
+	}
+	roles, requirementErr := s.requirements(frozen, nodeNumber)
+	if requirementErr != nil {
+		return errorResponse(requirementErr, "stripe coop status"), nil
+	}
+
 	var attemptNumber int
 	session, err := s.store.Update(sessionID, func(session *coop.Session) error {
 		if err := requireActiveSession(session); err != nil {
@@ -132,6 +152,9 @@ func (s *Service) StartWork(sessionID string, nodeNumber int, note string) (coop
 		node, err := session.NodeByNumber(nodeNumber)
 		if err != nil {
 			return err
+		}
+		if node.Key != frozenNode.Key || node.Type != frozenNode.Type {
+			return errors.New("node definition changed while starting work; retry start-work")
 		}
 		if node.State == coop.NodePending {
 			if err := session.TransitionNode(nodeNumber, coop.NodeActive); err != nil {
@@ -157,21 +180,19 @@ func (s *Service) StartWork(sessionID string, nodeNumber int, note string) (coop
 	}
 
 	node, _ := session.NodeByNumber(nodeNumber)
-	roles, requirementErr := s.requirements(session, nodeNumber)
-	if requirementErr != nil {
-		return errorResponse(requirementErr, "stripe coop status"), nil
-	}
 	nextTemplate, requiredInputs := reportWorkAction(session.ID, nodeNumber, attemptNumber, roles, node.Type)
 	resp := coop.CommandResponse{
-		OK:             true,
-		SessionID:      session.ID,
-		Node:           nodeNumber,
-		Attempt:        attemptNumber,
-		State:          string(coop.NodeActive),
-		Message:        fmt.Sprintf("Started attempt %d: %s", attemptNumber, node.Title),
-		NextTemplate:   nextTemplate,
-		RequiredInputs: requiredInputs,
-		ResourceRoles:  roles,
+		OK:               true,
+		SessionID:        session.ID,
+		Node:             nodeNumber,
+		Attempt:          attemptNumber,
+		State:            string(coop.NodeActive),
+		Message:          fmt.Sprintf("Started attempt %d: %s", attemptNumber, node.Title),
+		NextTemplate:     nextTemplate,
+		RequiredInputs:   requiredInputs,
+		ResourceRoles:    roles,
+		LifecycleFacts:   coop.LifecycleFactsForNode(session, node),
+		RequiredOutcomes: coop.RequiredOutcomesForNode(node),
 	}
 	if attempt := node.CurrentAttempt(); attempt != nil && attempt.Feedback != "" {
 		resp.Message += "\nFeedback: " + attempt.Feedback
@@ -268,7 +289,7 @@ func (s *Service) ReportWorkAttempt(ctx context.Context, sessionID string, nodeN
 		return errorResponse(err, fmt.Sprintf("stripe coop agent start-work --session=%s --node=%d", sessionID, nodeNumber)), nil
 	}
 
-	return s.evaluateAndApply(ctx, sessionID, session, nodeNumber, attemptNumber, TriggerReport, true)
+	return s.evaluateAndApply(ctx, sessionID, nodeNumber, attemptNumber, TriggerReport, true)
 }
 
 func (s *Service) ReportCheckAttempt(sessionID string, nodeNumber, attemptNumber int, check string, passed bool) (coop.CommandResponse, error) {

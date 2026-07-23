@@ -316,7 +316,7 @@ func TestUpdateKeyConfirmUnavailableRequiresTwoExplicitPresses(t *testing.T) {
 	storedAttempt := presentationAttempt(&stored.Steps[0].Nodes[0])
 	require.NotNil(t, storedAttempt)
 	require.NotNil(t, storedAttempt.Override)
-	assert.Contains(t, storedAttempt.Override.Reason, "visible UI")
+	assert.Contains(t, storedAttempt.Override.Reason, "reviewed the disclosed verification gaps")
 }
 
 func TestVerificationOverrideTargetIgnoresSamplingTimeButTracksMaterialChanges(t *testing.T) {

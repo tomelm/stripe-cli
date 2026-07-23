@@ -350,6 +350,13 @@ func (m Model) reviewAutomaticLabels(nodeNumbers []int) []string {
 	}
 	if summary.directUnavailable > 0 {
 		labels = append(labels, m.theme.AttentionStyle.Render(fmt.Sprintf("Automatic check unavailable: %d", summary.directUnavailable)))
+		for index, outcome := range summary.unverifiedOutcomes {
+			if index == 2 {
+				labels = append(labels, m.theme.AttentionStyle.Render("Unverified application outcomes: open details for more"))
+				break
+			}
+			labels = append(labels, m.theme.AttentionStyle.Render("Unverified application outcome: "+outcome))
+		}
 		if len(summary.unavailableDetails) > 0 {
 			labels = append(labels, m.theme.AttentionStyle.Render("Why: "+summary.unavailableDetails[0]))
 		}
@@ -372,6 +379,7 @@ type automaticReviewSummary struct {
 	observedFailures   int
 	possibleMismatches []string
 	unavailableDetails []string
+	unverifiedOutcomes []string
 }
 
 func summarizeAutomaticReview(session *coop.Session, nodeNumbers []int) automaticReviewSummary {
@@ -405,7 +413,11 @@ func (summary *automaticReviewSummary) add(result coop.CheckResult) {
 	case coop.CheckCoverage:
 		if result.Importance == coop.CheckRequired && result.Status == coop.CheckUnavailable {
 			summary.directUnavailable++
-			summary.addUnavailableDetail(result.Detail)
+			if strings.HasPrefix(result.ID, coop.ApplicationOutcomeResultPrefix) && strings.TrimSpace(result.Expected) != "" {
+				summary.unverifiedOutcomes = append(summary.unverifiedOutcomes, safeEvidenceText(result.Expected))
+			} else {
+				summary.addUnavailableDetail(result.Detail)
+			}
 		}
 	}
 }

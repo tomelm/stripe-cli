@@ -887,7 +887,7 @@ func (m *Model) handleConfirm() tea.Cmd {
 	if m.overrideTarget == overrideTarget {
 		override = &workflow.ReviewOverride{
 			EvidenceDigest: overrideTarget,
-			Reason:         "Developer confirmed the visible UI despite unavailable automatic verification.",
+			Reason:         "Developer reviewed the disclosed verification gaps and chose to continue.",
 		}
 	}
 	session, err := workflow.NewService(m.store).ConfirmReviewAttempts(

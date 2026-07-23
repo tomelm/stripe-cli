@@ -272,15 +272,14 @@ func (s *Service) reevaluate(ctx context.Context, sessionID string, nodeNumber, 
 	if attempt == nil || attempt.Number != attemptNumber {
 		return responseForChangedAttempt(session, nodeNumber), nil
 	}
-	return s.evaluateAndApplyObservation(ctx, sessionID, session, nodeNumber, attemptNumber, trigger, eventType, resourceID, true)
+	return s.evaluateAndApplyObservation(ctx, sessionID, nodeNumber, attemptNumber, trigger, eventType, resourceID, true)
 }
 
-func (s *Service) evaluateAndApply(ctx context.Context, sessionID string, frozen *coop.Session, nodeNumber, attemptNumber int, trigger EvaluationTrigger, ignoreStale bool) (coop.CommandResponse, error) {
-	return s.evaluateAndApplyObservation(ctx, sessionID, frozen, nodeNumber, attemptNumber, trigger, "", "", ignoreStale)
+func (s *Service) evaluateAndApply(ctx context.Context, sessionID string, nodeNumber, attemptNumber int, trigger EvaluationTrigger, ignoreStale bool) (coop.CommandResponse, error) {
+	return s.evaluateAndApplyObservation(ctx, sessionID, nodeNumber, attemptNumber, trigger, "", "", ignoreStale)
 }
 
-func (s *Service) evaluateAndApplyObservation(ctx context.Context, sessionID string, frozen *coop.Session, nodeNumber, attemptNumber int, trigger EvaluationTrigger, eventType, resourceID string, ignoreStale bool) (coop.CommandResponse, error) {
-	_ = frozen
+func (s *Service) evaluateAndApplyObservation(ctx context.Context, sessionID string, nodeNumber, attemptNumber int, trigger EvaluationTrigger, eventType, resourceID string, ignoreStale bool) (coop.CommandResponse, error) {
 	started := evaluationBegin{}
 	session, err := s.store.Update(sessionID, func(session *coop.Session) error {
 		if err := requireActiveSession(session); err != nil {
@@ -318,6 +317,11 @@ func (s *Service) evaluateAndApplyObservation(ctx context.Context, sessionID str
 		}
 		return alreadyMovedResponse(session, nodeNumber, node.State), nil
 	}
+	node, nodeErr := session.NodeByNumber(nodeNumber)
+	if nodeErr != nil {
+		return coop.CommandResponse{}, nodeErr
+	}
+	requiredOutcomes := coop.RequiredOutcomesForNode(node)
 	evaluation, evalErr := s.evaluator.Evaluate(ctx, EvaluationInput{
 		Session: session, NodeNumber: nodeNumber, Attempt: attemptNumber, Trigger: trigger,
 		EventType: eventType, ResourceID: resourceID,
@@ -330,6 +334,7 @@ func (s *Service) evaluateAndApplyObservation(ctx context.Context, sessionID str
 			Repair: "Continue without treating this check as passed.", UpdatedAt: s.now().UTC(),
 		}}
 	}
+	evaluation.Results = withRequiredOutcomeGaps(requiredOutcomes, evaluation.Results, started.snapshotAt)
 	applied := evaluationApply{responseAttempt: attemptNumber}
 	session, err = s.store.Update(sessionID, func(session *coop.Session) error {
 		return s.applyEvaluation(session, nodeNumber, attemptNumber, started.basis, started.snapshotAt, evaluation, ignoreStale, &applied)
@@ -355,6 +360,35 @@ func (s *Service) evaluateAndApplyObservation(ctx context.Context, sessionID str
 		return alreadyMovedResponse(latest, nodeNumber, node.State), nil
 	}
 	return s.evaluationResponse(session, nodeNumber, applied.responseAttempt, applied.policy, applied.results), nil
+}
+
+// withRequiredOutcomeGaps is the core-owned boundary between public
+// application obligations and trusted automatic evidence. Evaluators cannot
+// claim this reserved result namespace: until Co-op has a public, trusted
+// application observation contract, every required outcome is explicit
+// unavailable evidence rather than a hidden verifier or an implicit pass.
+func withRequiredOutcomeGaps(outcomes []coop.RequiredOutcome, results []coop.CheckResult, observedAt time.Time) []coop.CheckResult {
+	next := make([]coop.CheckResult, 0, len(results)+len(outcomes))
+	for _, result := range results {
+		if strings.HasPrefix(result.ID, coop.ApplicationOutcomeResultPrefix) {
+			continue
+		}
+		next = append(next, result)
+	}
+	for _, outcome := range outcomes {
+		next = append(next, coop.CheckResult{
+			ID:         coop.ApplicationOutcomeResultPrefix + outcome.ID,
+			Kind:       coop.CheckCoverage,
+			Importance: coop.CheckRequired,
+			Status:     coop.CheckUnavailable,
+			Detail:     "Required application outcome is not independently verified.",
+			Expected:   outcome.Statement,
+			Observed:   "No trusted application observation is configured.",
+			Repair:     "Implement and exercise this outcome; Co-op cannot automatically confirm it yet.",
+			UpdatedAt:  observedAt,
+		})
+	}
+	return next
 }
 
 type evaluationBegin struct {

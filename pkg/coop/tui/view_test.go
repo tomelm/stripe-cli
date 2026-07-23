@@ -313,6 +313,80 @@ func TestRenderSummaryDetailDoesNotRepeatLabels(t *testing.T) {
 	assertNotContainsPlain(t, detail, "You check")
 }
 
+func TestRenderSummaryDetailShowsRequiredApplicationOutcomesCompactly(t *testing.T) {
+	m := testModel()
+	m.selectionCursor = 0
+	m.expanded = true
+	m.detailTab = 0
+	m.session.LifecycleFacts = []coop.LifecycleFact{
+		{ID: "customer_identity", Statement: "A Stripe Customer represents the signed-in application principal."},
+		{ID: "webhook_delivery", Statement: "Webhook deliveries may be duplicated or arrive out of order."},
+		{ID: "unrelated", Statement: "This fact belongs to another node."},
+	}
+	m.session.Steps[0].Nodes[0].RequiredOutcomes = []coop.RequiredOutcome{
+		{
+			ID:        "persist_customer_mapping",
+			Statement: "Persist a retry-safe mapping from the signed-in user to one Stripe Customer.",
+			FactRefs:  []string{"customer_identity"},
+		},
+		{
+			ID:        "process_webhooks_safely",
+			Statement: "Apply signed webhook events idempotently without regressing subscription state.",
+			FactRefs:  []string{"webhook_delivery"},
+		},
+	}
+	m.session.Steps[0].Nodes[1].RequiredOutcomes = []coop.RequiredOutcome{{
+		ID:        "other_node",
+		Statement: "This outcome belongs to another node.",
+		FactRefs:  []string{"unrelated"},
+	}}
+
+	detail := m.renderDetail()
+
+	assertContainsPlain(t, detail, "Required application outcomes")
+	assertContainsPlain(t, detail, "Persist a retry-safe mapping")
+	assertContainsPlain(t, detail, "Apply signed webhook events idempotently")
+	assertNotContainsPlain(t, detail, "This outcome belongs to another node")
+	assertNotContainsPlain(t, detail, "A Stripe Customer represents")
+	assertNotContainsPlain(t, detail, "Webhook deliveries may be duplicated")
+	assertNotContainsPlain(t, detail, "This fact belongs to another node")
+}
+
+func TestRenderRequiredApplicationOutcomesDoesNotDuplicateChecksEvidence(t *testing.T) {
+	m := testModel()
+	m.selectionCursor = 0
+	m.expanded = true
+	node := &m.session.Steps[0].Nodes[0]
+	node.RequiredOutcomes = []coop.RequiredOutcome{{
+		ID:        "persist_customer_mapping",
+		Statement: "Persist the application user to Stripe Customer mapping.",
+		FactRefs:  []string{"customer_identity"},
+	}}
+	testPresentationAttempt(node).Results = []coop.CheckResult{{
+		ID:         "application.outcome.persist_customer_mapping",
+		Kind:       coop.CheckCoverage,
+		Importance: coop.CheckRequired,
+		Status:     coop.CheckUnavailable,
+		Detail:     "Required application outcome is not independently verified.",
+		Expected:   "Persist the application user to Stripe Customer mapping.",
+		Observed:   "No trusted application observation is configured.",
+		Repair:     "Implement and exercise this outcome; Co-op cannot automatically confirm it yet.",
+	}}
+
+	m.detailTab = 0
+	summary := m.renderDetail()
+	assertContainsPlain(t, summary, "Required application outcomes")
+	assertContainsPlain(t, summary, "Persist the application user")
+	assertNotContainsPlain(t, summary, "Automatic check unavailable")
+
+	m.detailTab = 2
+	checks := m.renderDetail()
+	plainChecks := strings.Join(strings.Fields(strings.ReplaceAll(ansi.Strip(checks), "│", " ")), " ")
+	assert.Contains(t, plainChecks, "Automatic check unavailable")
+	assert.Contains(t, plainChecks, "No trusted application observation is configured")
+	assert.NotContains(t, plainChecks, "Required application outcomes")
+}
+
 func TestRenderSummaryDetailShowsStepSDKSnippet(t *testing.T) {
 	m := testModel()
 	m.selectionCursor = 0
@@ -516,6 +590,11 @@ func TestRenderReviewCardGroupsAutomaticAndSupportingEvidence(t *testing.T) {
 			{ID: "resource.exists", Kind: coop.CheckResource, Importance: coop.CheckRequired, Status: coop.CheckPassed, UpdatedAt: now},
 			{ID: "request.observed", Kind: coop.CheckRequest, Importance: coop.CheckAdvisory, Status: coop.CheckObserved, UpdatedAt: now},
 			{ID: "state.unavailable", Kind: coop.CheckState, Importance: coop.CheckRequired, Status: coop.CheckUnavailable, UpdatedAt: now},
+			{
+				ID: "application.outcome.server_authorized_access", Kind: coop.CheckCoverage,
+				Importance: coop.CheckRequired, Status: coop.CheckUnavailable,
+				Expected: "Gate protected application data from durable subscription state.", UpdatedAt: now,
+			},
 		},
 	}}
 
@@ -526,6 +605,8 @@ func TestRenderReviewCardGroupsAutomaticAndSupportingEvidence(t *testing.T) {
 	assertContainsPlain(t, card, "Co-op checked:")
 	assertContainsPlain(t, card, "Stripe observed:")
 	assertContainsPlain(t, card, "Automatic check unavailable:")
+	assertContainsPlain(t, card, "Unverified application outcome:")
+	assertContainsPlain(t, card, "Gate protected application data")
 }
 
 func TestRenderReviewCardFallsBackToBlueprintConfirmation(t *testing.T) {
@@ -724,7 +805,7 @@ func TestOutlineAndDetailDiscloseHumanVerificationOverride(t *testing.T) {
 		EndReason: coop.AttemptConfirmed,
 		Override: &coop.VerificationOverride{
 			At:     now,
-			Reason: "Developer confirmed the visible UI despite unavailable automatic verification.",
+			Reason: "Developer reviewed the disclosed verification gaps and chose to continue.",
 		},
 	}}
 
@@ -740,12 +821,12 @@ func TestOutlineAndDetailDiscloseHumanVerificationOverride(t *testing.T) {
 	m.expanded = true
 	m.detailTab = 0
 	assertContainsPlain(t, m.renderDetail(), "Completed with a human override")
-	assertContainsPlain(t, m.renderDetail(), "Developer confirmed the visible UI")
+	assertContainsPlain(t, m.renderDetail(), "Developer reviewed the disclosed verification gaps")
 
 	m.detailTab = 2
 	assertContainsPlain(t, m.renderDetail(), "Human override: continued while required automatic")
-	assertContainsPlain(t, m.renderDetail(), "unavailable — Developer confirmed")
-	assertContainsPlain(t, m.renderDetail(), "Developer confirmed the visible UI")
+	assertContainsPlain(t, m.renderDetail(), "unavailable — Developer reviewed")
+	assertContainsPlain(t, m.renderDetail(), "Developer reviewed the disclosed verification gaps")
 }
 
 func TestCompletionSummaryBoxUsesSinglePaddingSpace(t *testing.T) {

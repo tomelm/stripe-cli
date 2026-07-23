@@ -97,8 +97,10 @@ func newCoopAgentSessionResponse(title string, session *coop.Session, instructio
 	for _, step := range session.Steps {
 		for _, n := range step.Nodes {
 			nodeNumber++
+			definition := n.NodeDefinition
+			definition.RequiredOutcomes = coop.RequiredOutcomesForNode(&n)
 			nodes = append(nodes, nodeBrief{
-				NodeDefinition: n.NodeDefinition,
+				NodeDefinition: definition,
 				Number:         nodeNumber,
 				StepKey:        step.Key,
 				StepTitle:      step.Title,
@@ -109,12 +111,13 @@ func newCoopAgentSessionResponse(title string, session *coop.Session, instructio
 
 	resp := coopAgentRunResponse{
 		CommandResponse: coop.CommandResponse{
-			OK:        true,
-			SessionID: session.ID,
-			Node:      1,
-			State:     "created",
-			Message:   fmt.Sprintf("Session started: %s (%d nodes)", title, session.TotalNodes()),
-			Next:      fmt.Sprintf("stripe coop agent start-work --session=%s --node=1 --note=%s", session.ID, quoteArg("Beginning: "+session.Steps[0].Nodes[0].Title)),
+			OK:             true,
+			SessionID:      session.ID,
+			Node:           1,
+			State:          "created",
+			Message:        fmt.Sprintf("Session started: %s (%d nodes)", title, session.TotalNodes()),
+			Next:           fmt.Sprintf("stripe coop agent start-work --session=%s --node=1 --note=%s", session.ID, quoteArg("Beginning: "+session.Steps[0].Nodes[0].Title)),
+			LifecycleFacts: append([]coop.LifecycleFact(nil), session.LifecycleFacts...),
 		},
 		AgentInstructions: instructions,
 		Nodes:             nodes,
@@ -167,19 +170,33 @@ type coopAgentRunResponse struct {
 }
 
 type verificationCoverageSummary struct {
-	Status                  string `json:"status"`
-	DirectChecks            int    `json:"direct_checks"`
-	UnsupportedFacts        int    `json:"unsupported_facts"`
-	AppSurfaces             int    `json:"app_surfaces"`
-	AppSurfacesWithTriggers int    `json:"app_surfaces_with_observation_triggers"`
-	Message                 string `json:"message"`
+	Status                        string `json:"status"`
+	DirectChecks                  int    `json:"direct_checks"`
+	UnsupportedFacts              int    `json:"unsupported_facts"`
+	UnverifiedApplicationOutcomes int    `json:"unverified_application_outcomes"`
+	AppSurfaces                   int    `json:"app_surfaces"`
+	AppSurfacesWithTriggers       int    `json:"app_surfaces_with_observation_triggers"`
+	Message                       string `json:"message"`
 }
 
 func verificationCoverageForSession(session *coop.Session) verificationCoverageSummary {
 	summary := verificationCoverageSummary{Status: "partial"}
-	catalog, err := checks.LoadCatalog()
-	if err != nil || session == nil {
+	if session == nil {
 		summary.Message = "Automatic verification coverage is unavailable; Co-op will not treat unchecked work as passed."
+		return summary
+	}
+	for stepIndex := range session.Steps {
+		step := &session.Steps[stepIndex]
+		for nodeIndex := range step.Nodes {
+			summary.UnverifiedApplicationOutcomes += len(step.Nodes[nodeIndex].RequiredOutcomes)
+		}
+	}
+	catalog, err := checks.LoadCatalog()
+	if err != nil {
+		summary.Message = fmt.Sprintf(
+			"Automatic verification coverage is unavailable, including for %d required application outcome(s); Co-op will not treat unchecked work as passed.",
+			summary.UnverifiedApplicationOutcomes,
+		)
 		return summary
 	}
 	for stepIndex := range session.Steps {
@@ -210,15 +227,19 @@ func verificationCoverageForSession(session *coop.Session) verificationCoverageS
 			}
 		}
 	}
-	if summary.UnsupportedFacts == 0 && summary.DirectChecks > 0 &&
+	if summary.UnsupportedFacts == 0 && summary.UnverifiedApplicationOutcomes == 0 &&
+		summary.DirectChecks > 0 &&
 		summary.AppSurfacesWithTriggers == summary.AppSurfaces {
 		summary.Status = "cataloged_facts"
 	}
 	summary.Message = fmt.Sprintf(
-		"Automatic verification covers %d direct check(s); %d blueprint fact(s) are unsupported. "+
-			"%d/%d app surface(s) can trigger checks from Stripe observations. Unsupported facts are disclosed and never treated as passed.",
+		"Automatic verification covers %d direct check(s); %d blueprint fact(s) are unsupported, and "+
+			"%d required application outcome(s) have no independent automatic check. "+
+			"%d/%d app surface(s) can trigger checks from Stripe observations. "+
+			"Unsupported facts and unavailable outcome checks are disclosed and never treated as passed; required outcomes remain implementation obligations.",
 		summary.DirectChecks,
 		summary.UnsupportedFacts,
+		summary.UnverifiedApplicationOutcomes,
 		summary.AppSurfacesWithTriggers,
 		summary.AppSurfaces,
 	)
@@ -244,6 +265,7 @@ func guidedActionAgentInstructions(action *coop.GuidedAction, session *coop.Sess
 }
 
 func sessionLifecycleInstructions(preamble string, session *coop.Session) string {
+	lifecycleContract := lifecycleContractInstructions()
 	return fmt.Sprintf(`%[1]s
 
 BEFORE YOU START — ensure you have API access:
@@ -253,12 +275,14 @@ BEFORE YOU START — ensure you have API access:
    This gives you a working API key without requiring browser login.
    The claim URL will appear automatically in the TUI for the developer.
 
-Each node's structured fields are the contract: request, requests, events, variable references, skippable, review_prompt, and review_command. The title and description explain product intent, but never override those fields. The node type is a hint about the general category:
+Each node's structured fields are the contract: request, requests, events, variable references, required_outcomes, skippable, review_prompt, and review_command. The title and description explain product intent, but never override those fields. A request fixes the Stripe method, path, billing values, mode, and declared relationships. Values for application-owned concerns such as identity or return routes may be illustrative; when a required_outcome refines one, adapt that value while preserving the rest of the request's Stripe semantics. The node type is a hint about the general category:
 - "apiRequest": Usually means writing code that calls a Stripe API. Run it and verify the response.
 - "asyncHandler": Set up a webhook handler. Use "stripe listen --forward-to localhost:<port>/webhook" to test.
 - "uiComponent": Build frontend code or configure something user-facing. Verify it works.
 - "cliCommand": Run a CLI command (e.g. stripe projects init, stripe projects deploy). Report the output.
 - "testHelper": Verify something works end-to-end. Run the flow and confirm the expected outcome.
+
+%[3]s
 
 If a node includes review_prompt, that is the baseline acceptance check shown to the human. If it includes review_command, run that exact command when verifying or explain why it does not apply. Make your implementation note and verifications directly answer these fields. When you add verification checks, write them as useful confirmation guidance for the human too: include concrete actions and expected results, such as "Visit http://localhost:3000/checkout, click Pay, and confirm the browser redirects to Stripe Checkout" rather than vague labels like "manual test passed".
 
@@ -267,7 +291,7 @@ If a node asks you to understand the project, scan files, identify the tech stac
 Agent lifecycle commands (use this session id: %[2]s):
 1. Run an executable "next" command unchanged. When a response instead contains "next_template", fill every named "required_inputs" value before running it; never submit the angle-bracket examples literally.
 2. Start work with: stripe coop agent start-work --session=%[2]s --node=<n> --note="<what you're about to do>". Save the returned attempt number; every later mutation for that work carries --attempt=<number>.
-3. Write and run the code. You may report one of your own checks with: stripe coop agent report-check --session=%[2]s --node=<n> --attempt=<number> --check="<what you verified>" --passed
+3. Write and run the code. You may report one of your own checks with: stripe coop agent report-check --session=%[2]s --node=<n> --attempt=<number> --check="<what you verified>" --passed. This records an agent-authored claim for human context; it is never independent proof and cannot satisfy an automatic check.
 4. Complete the returned report-work template with a concrete implementation summary and every requested Stripe resource ID. For a uiComponent, also provide the absolute HTTP(S) URL of the app surface you built.
 5. Co-op reads supported Stripe resources directly; a request or event observation alone never counts as a pass. If verification or human review remains pending, follow the returned await-review command.
 6. If decision=needs_agent, use the expected/observed/repair findings, run the returned correction command, and report the correction. Do not ask the developer to relay machine findings.
@@ -286,7 +310,15 @@ Important:
 - Only when Co-op identifies a node as skippable, start it first, then skip its exact attempt: stripe coop agent skip --session=%[2]s --node=<n> --attempt=<number> --note="<reason>"
 - Always install the LATEST version of the Stripe SDK for the language in use. Do not pin to old versions.
   Examples: "npm install stripe@latest", "pip install --upgrade stripe", "gem install stripe"
-  Check https://docs.stripe.com/libraries for current versions if unsure.`, preamble, session.ID)
+  Check https://docs.stripe.com/libraries for current versions if unsure.`, preamble, session.ID, lifecycleContract)
+}
+
+func lifecycleContractInstructions() string {
+	return `Application lifecycle contract:
+- lifecycle_facts in the structured session response describe canonical Stripe behavior that should shape the implementation.
+- required_outcomes in each structured node are mandatory application-level results. Treat every one as an implementation obligation even when its automatic check is unavailable; use fact_refs to understand why.
+- start-work repeats the relevant facts and outcomes for the current node so you can implement them at the point of action.
+- report-check records only an agent-authored claim. It is never independent proof that a lifecycle fact or required outcome is satisfied.`
 }
 
 func outputJSON(v interface{}) error {

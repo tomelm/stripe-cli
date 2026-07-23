@@ -191,12 +191,24 @@ func (m Model) writeSummaryDetail(md *strings.Builder, node *coop.SessionNode) {
 	if node.Description != "" {
 		md.WriteString(node.Description + "\n\n")
 	}
+	m.writeRequiredOutcomesDetail(md, node)
 	if prompt := humanReviewPrompt(node); prompt != "" {
 		md.WriteString("**What to try:** " + prompt + "\n\n")
 	}
 	if node.Description == "" && node.ReviewPrompt == "" {
 		md.WriteString("*No summary available for this step.*\n\n")
 	}
+}
+
+func (m Model) writeRequiredOutcomesDetail(md *strings.Builder, node *coop.SessionNode) {
+	if node == nil || len(node.RequiredOutcomes) == 0 {
+		return
+	}
+	md.WriteString("**Required application outcomes**\n\n")
+	for _, outcome := range node.RequiredOutcomes {
+		md.WriteString("- " + safeEvidenceText(outcome.Statement) + "\n")
+	}
+	md.WriteString("\n")
 }
 
 func (m Model) writeStepSDKSnippetDetail(md *strings.Builder, node *coop.SessionNode, currentSnippet bool) {

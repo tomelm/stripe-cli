@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -98,6 +99,27 @@ func TestAutomaticWorkflowRequiresEvaluatorWithoutMutatingWork(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, coop.NodeActive, node.State)
 	assert.Nil(t, node.CurrentAttempt().ReportedAt)
+}
+
+func TestStartWorkRequirementFailureDoesNotCreateAttempt(t *testing.T) {
+	store, session := workflowTestStore(t)
+	before, err := store.Read(session.ID)
+	require.NoError(t, err)
+	service := NewService(store, WithEvaluator(requirementsErrorWorkflowEvaluator{}))
+
+	response, err := service.StartWork(session.ID, 1, "Starting")
+
+	require.NoError(t, err)
+	require.False(t, response.OK)
+	assert.Contains(t, response.Error, "invalid verification catalog")
+	loaded, err := store.Read(session.ID)
+	require.NoError(t, err)
+	node, err := loaded.NodeByNumber(1)
+	require.NoError(t, err)
+	assert.Equal(t, before.Version, loaded.Version)
+	assert.Equal(t, coop.NodePending, node.State)
+	assert.Empty(t, node.Attempts)
+	assert.Empty(t, node.Activity)
 }
 
 func TestReportWorkRequiresEveryDeclaredResourceBeforeSubmission(t *testing.T) {
@@ -627,6 +649,16 @@ func (requiredCustomerWorkflowEvaluator) Requirements(*coop.Session, int) ([]coo
 
 func (requiredCustomerWorkflowEvaluator) Evaluate(context.Context, EvaluationInput) (Evaluation, error) {
 	return passingWorkflowEvaluator{}.Evaluate(context.Background(), EvaluationInput{})
+}
+
+type requirementsErrorWorkflowEvaluator struct{}
+
+func (requirementsErrorWorkflowEvaluator) Requirements(*coop.Session, int) ([]coop.ResourceRequirement, error) {
+	return nil, errors.New("invalid verification catalog")
+}
+
+func (requirementsErrorWorkflowEvaluator) Evaluate(context.Context, EvaluationInput) (Evaluation, error) {
+	return Evaluation{}, errors.New("should not evaluate")
 }
 
 type multiFailureWorkflowEvaluator struct{}

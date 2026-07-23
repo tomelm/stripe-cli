@@ -33,14 +33,15 @@ type BlueprintStep struct {
 
 // Blueprint is the CLI-friendly representation of a Workbench Blueprint.
 type Blueprint struct {
-	ID          string             `json:"id"`
-	Title       string             `json:"title"`
-	Description string             `json:"description,omitempty"`
-	Type        string             `json:"type"`
-	Products    []string           `json:"products,omitempty"`
-	Settings    []BlueprintSetting `json:"settings"`
-	Params      []BlueprintParam   `json:"params,omitempty"`
-	Steps       []BlueprintStep    `json:"steps"`
+	ID             string             `json:"id"`
+	Title          string             `json:"title"`
+	Description    string             `json:"description,omitempty"`
+	Type           string             `json:"type"`
+	Products       []string           `json:"products,omitempty"`
+	Settings       []BlueprintSetting `json:"settings"`
+	Params         []BlueprintParam   `json:"params,omitempty"`
+	LifecycleFacts []LifecycleFact    `json:"lifecycle_facts,omitempty"`
+	Steps          []BlueprintStep    `json:"steps"`
 }
 
 // BlueprintSetting defines a configurable setting for a blueprint.
@@ -86,6 +87,9 @@ func LoadBlueprint(id string) (*Blueprint, error) {
 	}
 	if err := validateBlueprintReferences(&bp); err != nil {
 		return nil, fmt.Errorf("validating blueprint %q: %w", id, err)
+	}
+	if err := validateBlueprintOutcomes(&bp); err != nil {
+		return nil, fmt.Errorf("validating blueprint %q outcomes: %w", id, err)
 	}
 
 	return &bp, nil
@@ -288,6 +292,7 @@ func NewSessionFromBlueprint(bp *Blueprint, sessionID string, settings, params m
 	for _, ch := range bp.Steps {
 		nodes := make([]SessionNode, len(ch.Nodes))
 		for j, n := range ch.Nodes {
+			n.RequiredOutcomes = cloneRequiredOutcomes(n.RequiredOutcomes)
 			nodes[j] = SessionNode{
 				NodeDefinition: n,
 				State:          NodePending,
@@ -302,13 +307,14 @@ func NewSessionFromBlueprint(bp *Blueprint, sessionID string, settings, params m
 	}
 
 	return &Session{
-		ID:        sessionID,
-		Blueprint: bp.ID,
-		Status:    SessionActive,
-		Settings:  settings,
-		Params:    params,
-		Steps:     steps,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:             sessionID,
+		Blueprint:      bp.ID,
+		LifecycleFacts: cloneLifecycleFacts(bp.LifecycleFacts),
+		Status:         SessionActive,
+		Settings:       settings,
+		Params:         params,
+		Steps:          steps,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 }
