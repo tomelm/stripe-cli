@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -259,7 +260,7 @@ func (m Model) applySessionUpdate(msg sessionUpdatedMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	wasComplete := m.session != nil && m.session.IsComplete()
-	m.clearVerificationOverride()
+	armedOverride := m.overrideTarget
 	m.session = msg.session
 	m.lastVersion = msg.session.Version
 	m.lastUpdateTime = time.Now()
@@ -280,6 +281,7 @@ func (m Model) applySessionUpdate(msg sessionUpdatedMsg) (tea.Model, tea.Cmd) {
 	if !m.userMoved {
 		m.autoScroll()
 	}
+	m.restoreVerificationOverride(armedOverride)
 	m.resizeViewport()
 	m.syncViewport()
 	return m, nil
@@ -880,15 +882,30 @@ func (m *Model) handleConfirm() tea.Cmd {
 		m.setStatus(err.Error(), 5*time.Second)
 		return nil
 	}
-	overrideTarget := verificationOverrideTarget(m.session.ID, refs)
+	overrideTarget := workflow.ReviewEvidenceDigest(m.session, refs)
+	var override *workflow.ReviewOverride
+	if m.overrideTarget == overrideTarget {
+		override = &workflow.ReviewOverride{
+			EvidenceDigest: overrideTarget,
+			Reason:         "Developer confirmed the visible UI despite unavailable automatic verification.",
+		}
+	}
 	session, err := workflow.NewService(m.store).ConfirmReviewAttempts(
-		m.session.ID, refs, m.overrideTarget == overrideTarget, "Developer confirmed the visible UI despite unavailable automatic verification.",
+		m.session.ID, refs, override,
 	)
 	if err != nil {
-		if strings.Contains(err.Error(), "explicit override") {
+		switch {
+		case errors.Is(err, workflow.ErrVerificationOverrideRequired):
 			m.overrideTarget = overrideTarget
 			m.setStatus("Automatic check unavailable. Press c again to confirm with a recorded override.", 0)
-		} else {
+		case errors.Is(err, workflow.ErrVerificationOverrideChanged):
+			m.clearVerificationOverride()
+			if latest, readErr := m.store.Read(m.session.ID); readErr == nil {
+				m.session = latest
+				m.lastVersion = latest.Version
+			}
+			m.setStatus("Verification findings changed. Review them, then press c again to confirm.", 0)
+		default:
 			m.clearVerificationOverride()
 			m.setStatus(err.Error(), 5*time.Second)
 		}
@@ -921,7 +938,7 @@ func (m *Model) startReject() tea.Cmd {
 	if m.session == nil {
 		return nil
 	}
-	if target, ok := m.selectedReviewTarget(); ok {
+	if target, ok := m.selectedRejectionTarget(); ok {
 		m.rejecting = true
 		m.rejectTarget = target
 		m.rejectionInput.SetValue("")
@@ -1014,13 +1031,19 @@ func (m Model) attemptRefs(nodeNumbers []int) ([]workflow.AttemptRef, error) {
 	return refs, nil
 }
 
-func verificationOverrideTarget(sessionID string, refs []workflow.AttemptRef) string {
-	var target strings.Builder
-	target.WriteString(sessionID)
-	for _, ref := range refs {
-		fmt.Fprintf(&target, "|%d:%d", ref.Node, ref.Attempt)
+func (m *Model) restoreVerificationOverride(armed string) {
+	m.overrideTarget = ""
+	if armed == "" || m.session == nil {
+		return
 	}
-	return target.String()
+	target, ok := m.selectedReviewTarget()
+	if !ok {
+		return
+	}
+	refs, err := m.attemptRefs(target.nodeNumbers)
+	if err == nil && workflow.ReviewEvidenceDigest(m.session, refs) == armed {
+		m.overrideTarget = armed
+	}
 }
 
 func (m *Model) clearVerificationOverride() {
@@ -1031,6 +1054,8 @@ type appSurfaceSelection struct {
 	node    int
 	attempt int
 	url     string
+	title   string
+	opened  bool
 }
 
 func (m Model) selectedAppSurface() (appSurfaceSelection, bool) {
@@ -1038,31 +1063,101 @@ func (m Model) selectedAppSurface() (appSurfaceSelection, bool) {
 		return appSurfaceSelection{}, false
 	}
 	var candidates []int
-	// Prefer the concrete outline node. Reviews are step-scoped, and one
-	// canonical step contains two UI nodes; selecting each node must open its
-	// own submitted surface rather than repeatedly opening the first in the
-	// containing review target.
-	if index, found := m.selectedNodeIndex(); found {
-		candidates = []int{index + 1}
+	seen := map[int]bool{}
+	addCandidate := func(candidate int) {
+		if candidate > 0 && !seen[candidate] {
+			seen[candidate] = true
+			candidates = append(candidates, candidate)
+		}
 	}
-	if target, found := m.selectedReviewTarget(); found {
-		for _, candidate := range target.nodeNumbers {
-			if len(candidates) == 0 || candidate != candidates[0] {
-				candidates = append(candidates, candidate)
+	// Prefer the concrete outline node. Selecting a UI node must show and open
+	// that node's submitted surface, even when multiple UI nodes share a step.
+	if index, found := m.selectedNodeIndex(); found {
+		addCandidate(index + 1)
+	}
+	if stepIndex, found := m.selectedStepIndex(); found {
+		current := 0
+		for index := range m.session.Steps {
+			for range m.session.Steps[index].Nodes {
+				current++
+				if index == stepIndex {
+					addCandidate(current)
+				}
 			}
 		}
 	}
-	for _, candidate := range candidates {
-		node, err := m.session.NodeByNumber(candidate)
-		if err != nil || node.Type != coop.NodeUIComponent {
-			continue
+	if target, found := m.selectedReviewTarget(); found {
+		for _, candidate := range target.nodeNumbers {
+			addCandidate(candidate)
 		}
-		attempt := node.CurrentAttempt()
-		if attempt != nil && attempt.AppSurface != nil && attempt.AppSurface.URL != "" {
-			return appSurfaceSelection{node: candidate, attempt: attempt.Number, url: attempt.AppSurface.URL}, true
+	}
+	// Keep the handoff visible while the agent continues later work. A user
+	// should not need to rediscover the earlier UI node before pressing "o".
+	for _, surface := range m.exerciseReadyAppSurfaces() {
+		addCandidate(surface.node)
+	}
+	for _, candidate := range candidates {
+		if surface, ok := m.appSurfaceForNode(candidate); ok {
+			return surface, true
 		}
 	}
 	return appSurfaceSelection{}, false
+}
+
+func (m Model) appSurfaceForNode(nodeNumber int) (appSurfaceSelection, bool) {
+	node, err := m.session.NodeByNumber(nodeNumber)
+	if err != nil || node.Type != coop.NodeUIComponent || node.State != coop.NodeReview {
+		return appSurfaceSelection{}, false
+	}
+	attempt := node.CurrentAttempt()
+	if attempt == nil || attempt.AppSurface == nil || attempt.AppSurface.URL == "" {
+		return appSurfaceSelection{}, false
+	}
+	return appSurfaceSelection{
+		node: nodeNumber, attempt: attempt.Number, url: attempt.AppSurface.URL, title: node.Title,
+		opened: attempt.AppSurface.OpenedAt != nil,
+	}, true
+}
+
+func (m Model) exerciseReadyAppSurfaces() []appSurfaceSelection {
+	if m.session == nil {
+		return nil
+	}
+	var surfaces []appSurfaceSelection
+	nodeNumber := 0
+	for stepIndex := range m.session.Steps {
+		for range m.session.Steps[stepIndex].Nodes {
+			nodeNumber++
+			if surface, ok := m.appSurfaceForNode(nodeNumber); ok {
+				surfaces = append(surfaces, surface)
+			}
+		}
+	}
+	return surfaces
+}
+
+func (m Model) appExerciseCallout() string {
+	surfaces := m.exerciseReadyAppSurfaces()
+	if len(surfaces) == 0 {
+		return ""
+	}
+	surface, ok := m.selectedAppSurface()
+	if !ok {
+		surface = surfaces[0]
+	}
+	state := "Ready to exercise"
+	if surface.opened {
+		state = "UI review in progress"
+	}
+	label := state + ": "
+	if surface.title != "" {
+		label += surface.title + " — "
+	}
+	label += surface.url + "  (press o)"
+	if len(surfaces) > 1 {
+		label += fmt.Sprintf("  · %d app surfaces ready; select a UI node to choose", len(surfaces))
+	}
+	return safeEvidenceText(label)
 }
 
 func (m *Model) openSelectedApp() tea.Cmd {
@@ -1080,7 +1175,7 @@ func (m *Model) openSelectedApp() tea.Cmd {
 		m.session = session
 		m.lastVersion = session.Version
 	}
-	m.setStatus("Opening the app. Exercise the visible flow, then confirm or request changes.", 5*time.Second)
+	m.setStatus("Opening the app. Exercise the visible flow; request changes immediately if it is wrong, or confirm when the step is ready.", 5*time.Second)
 	return openBrowserCmd(appURL)
 }
 
@@ -1125,24 +1220,34 @@ func (m Model) selectedReviewTarget() (reviewTarget, bool) {
 	if err != nil || node.State != coop.NodeReview {
 		return reviewTarget{}, false
 	}
-	step, stepIndex, _, err := m.session.StepByNodeNumber(nodeNumber)
+	_, stepIndex, _, err := m.session.StepByNodeNumber(nodeNumber)
 	if err != nil || !m.session.StepReadyForReview(stepIndex) {
 		return reviewTarget{}, false
 	}
-	var nodeNumbers []int
-	current := 0
-	for i := range m.session.Steps {
-		for j := range m.session.Steps[i].Nodes {
-			current++
-			if i == stepIndex && m.session.Steps[i].Nodes[j].State == coop.NodeReview {
-				nodeNumbers = append(nodeNumbers, current)
-			}
-		}
+	return reviewTarget{title: node.Title, kind: "node", nodeNumbers: []int{nodeNumber}, stepIndex: stepIndex}, true
+}
+
+func (m Model) selectedRejectionTarget() (reviewTarget, bool) {
+	if target, ok := m.selectedReviewTarget(); ok {
+		return target, true
 	}
-	if len(nodeNumbers) == 0 {
+	if m.session == nil {
 		return reviewTarget{}, false
 	}
-	return reviewTarget{title: step.Title, kind: "step", nodeNumbers: nodeNumbers, stepIndex: stepIndex}, true
+	nodeIndex, ok := m.selectedNodeIndex()
+	if !ok {
+		return reviewTarget{}, false
+	}
+	nodeNumber := nodeIndex + 1
+	node, err := m.session.NodeByNumber(nodeNumber)
+	if err != nil || node.State != coop.NodeReview || node.CurrentAttempt() == nil {
+		return reviewTarget{}, false
+	}
+	_, stepIndex, _, err := m.session.StepByNodeNumber(nodeNumber)
+	if err != nil {
+		return reviewTarget{}, false
+	}
+	return reviewTarget{title: node.Title, kind: "node", nodeNumbers: []int{nodeNumber}, stepIndex: stepIndex}, true
 }
 
 func (m Model) reviewIsActionable(nodeNumber int) bool {
@@ -1167,7 +1272,10 @@ func (m Model) reviewTargetStillValid(target reviewTarget) bool {
 			return false
 		}
 	}
-	return target.stepIndex >= 0 && target.stepIndex < len(m.session.Steps) && m.session.StepReadyForReview(target.stepIndex)
+	if target.stepIndex < 0 || target.stepIndex >= len(m.session.Steps) {
+		return false
+	}
+	return target.kind == "node" || m.session.StepReadyForReview(target.stepIndex)
 }
 
 func (m Model) selectedReviewCommand() string {

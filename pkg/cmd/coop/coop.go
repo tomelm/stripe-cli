@@ -53,11 +53,11 @@ findings and exact continuation commands.`,
 		Annotations: map[string]string{
 			annotationKey: `  Workflow: start a session, then use typed agent commands to progress through it.
   1. stripe coop run <blueprint-id> — begin a session
-  2. stripe coop agent start-work --session=<id> --step=<n> --note="..." — mark work active
+  2. stripe coop agent start-work --session=<id> --node=<n> --note="..." — mark work active
   3. Save the returned attempt number; all later mutations carry --attempt=<number>
-  4. Run the exact returned report-work command, supplying requested Stripe resource IDs and --app-url for UI work
-  5. Follow the JSON decision and exact next command; await-review delivers automatic findings or the human decision
-  All commands output JSON with a "next" field suggesting the next command.
+  4. Fill every required input in the returned next_template, then run it
+  5. Run executable "next" commands unchanged; await-review delivers automatic findings or the human decision
+  JSON distinguishes executable "next" commands from "next_template" actions that still need agent input.
   Run "stripe coop recommend --query=..." to discover available blueprints.`,
 		},
 	}

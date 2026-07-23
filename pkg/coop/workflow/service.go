@@ -16,6 +16,11 @@ import (
 
 const AwaitTimeout = 10 * time.Minute
 
+var (
+	ErrVerificationOverrideRequired = errors.New("explicit override is required")
+	ErrVerificationOverrideChanged  = errors.New("verification evidence changed")
+)
+
 type Store interface {
 	Read(id string) (*coop.Session, error)
 	Update(id string, fn func(*coop.Session) error) (*coop.Session, error)
@@ -103,7 +108,6 @@ func NewService(store Store, opts ...Option) *Service {
 type ReportWorkInput struct {
 	File            string
 	Lines           string
-	Snippet         string
 	Note            string
 	AppURL          string
 	StripeResources map[string]string
@@ -112,6 +116,13 @@ type ReportWorkInput struct {
 func (s *Service) StartWork(sessionID string, nodeNumber int, note string) (coop.CommandResponse, error) {
 	if err := s.requireEvaluator(); err != nil {
 		return errorResponse(err, "stripe coop status"), nil
+	}
+	note = strings.TrimSpace(note)
+	if note == "" {
+		return errorResponse(errors.New("--note is required"), "Describe the work you are starting with --note."), nil
+	}
+	if err := coop.ValidateSessionText("activity note", note, coop.MaxActivityBytes); err != nil {
+		return errorResponse(err, "Use a shorter single-line --note."), nil
 	}
 	var attemptNumber int
 	session, err := s.store.Update(sessionID, func(session *coop.Session) error {
@@ -150,24 +161,23 @@ func (s *Service) StartWork(sessionID string, nodeNumber int, note string) (coop
 	if requirementErr != nil {
 		return errorResponse(requirementErr, "stripe coop status"), nil
 	}
+	nextTemplate, requiredInputs := reportWorkAction(session.ID, nodeNumber, attemptNumber, roles, node.Type)
 	resp := coop.CommandResponse{
-		OK:            true,
-		SessionID:     session.ID,
-		Node:          nodeNumber,
-		Attempt:       attemptNumber,
-		State:         string(coop.NodeActive),
-		Message:       fmt.Sprintf("Started attempt %d: %s", attemptNumber, node.Title),
-		Next:          reportWorkCommand(session.ID, nodeNumber, attemptNumber, roles),
-		ResourceRoles: roles,
+		OK:             true,
+		SessionID:      session.ID,
+		Node:           nodeNumber,
+		Attempt:        attemptNumber,
+		State:          string(coop.NodeActive),
+		Message:        fmt.Sprintf("Started attempt %d: %s", attemptNumber, node.Title),
+		NextTemplate:   nextTemplate,
+		RequiredInputs: requiredInputs,
+		ResourceRoles:  roles,
 	}
 	if attempt := node.CurrentAttempt(); attempt != nil && attempt.Feedback != "" {
 		resp.Message += "\nFeedback: " + attempt.Feedback
 		if previous := previousAttempt(node, attempt.Number); previous != nil {
 			resp.Verification = append([]coop.CheckResult(nil), previous.Results...)
 		}
-	}
-	if node.Type == coop.NodeUIComponent {
-		resp.Next += " --app-url=<absolute-app-url>"
 	}
 	if node.Type == coop.NodeAPIRequest && node.Request != nil {
 		resp.APIRequest = node.Request
@@ -182,7 +192,11 @@ func (s *Service) StartWork(sessionID string, nodeNumber int, note string) (coop
 // compare token: a stale report can never modify a later correction attempt.
 func (s *Service) ReportWorkAttempt(ctx context.Context, sessionID string, nodeNumber, attemptNumber int, input ReportWorkInput) (coop.CommandResponse, error) {
 	if err := s.requireEvaluator(); err != nil {
-		return errorResponse(err, fmt.Sprintf("stripe coop agent start-work --session=%s --step=%d", sessionID, nodeNumber)), nil
+		return errorResponse(err, fmt.Sprintf("stripe coop agent start-work --session=%s --node=%d", sessionID, nodeNumber)), nil
+	}
+	input.Note = strings.TrimSpace(input.Note)
+	if input.Note == "" {
+		return errorResponse(errors.New("--note is required"), "Summarize the completed implementation with --note."), nil
 	}
 	session, err := s.store.Update(sessionID, func(session *coop.Session) error {
 		if err := requireActiveSession(session); err != nil {
@@ -199,10 +213,6 @@ func (s *Service) ReportWorkAttempt(ctx context.Context, sessionID string, nodeN
 		if err != nil || node.CurrentAttempt() != attempt {
 			return fmt.Errorf("%w: node %d attempt %d", coop.ErrAttemptNotCurrent, nodeNumber, attemptNumber)
 		}
-		implementation := implementationFromInput(input)
-		if err := node.ReportAttempt(attemptNumber, s.now(), implementation); err != nil {
-			return err
-		}
 		requirements, err := s.requirements(session, nodeNumber)
 		if err != nil {
 			return err
@@ -210,6 +220,29 @@ func (s *Service) ReportWorkAttempt(ctx context.Context, sessionID string, nodeN
 		byRole := make(map[string]coop.ResourceRequirement, len(requirements))
 		for _, requirement := range requirements {
 			byRole[requirement.Role] = requirement
+		}
+		for _, requirement := range requirements {
+			if !requirement.Required {
+				continue
+			}
+			if strings.TrimSpace(input.StripeResources[requirement.Role]) == "" {
+				return fmt.Errorf(
+					"--stripe-resource=%s=<%s-id> is required before report-work",
+					requirement.Role,
+					requirement.Type,
+				)
+			}
+		}
+		if node.Type == coop.NodeUIComponent {
+			if err := appsurface.Validate(input.AppURL); err != nil {
+				return err
+			}
+		} else if input.AppURL != "" {
+			return errors.New("--app-url is only valid for an app UI node")
+		}
+		implementation := implementationFromInput(input)
+		if err := node.ReportAttempt(attemptNumber, s.now(), implementation); err != nil {
+			return err
 		}
 		for role, id := range input.StripeResources {
 			requirement, ok := byRole[role]
@@ -223,29 +256,24 @@ func (s *Service) ReportWorkAttempt(ctx context.Context, sessionID string, nodeN
 			}
 		}
 		if node.Type == coop.NodeUIComponent {
-			if err := appsurface.Validate(input.AppURL); err != nil {
-				return err
-			}
 			if err := node.SetAppSurface(attemptNumber, coop.AppSurface{URL: input.AppURL}); err != nil {
 				return err
 			}
-		} else if input.AppURL != "" {
-			return errors.New("--app-url is only valid for an app UI node")
 		}
 
 		node.Activity = ""
 		return nil
 	})
 	if err != nil {
-		return errorResponse(err, fmt.Sprintf("stripe coop agent start-work --session=%s --step=%d", sessionID, nodeNumber)), nil
+		return errorResponse(err, fmt.Sprintf("stripe coop agent start-work --session=%s --node=%d", sessionID, nodeNumber)), nil
 	}
 
-	return s.evaluateAndApply(ctx, session, nodeNumber, attemptNumber, TriggerReport, true)
+	return s.evaluateAndApply(ctx, sessionID, session, nodeNumber, attemptNumber, TriggerReport, true)
 }
 
 func (s *Service) ReportCheckAttempt(sessionID string, nodeNumber, attemptNumber int, check string, passed bool) (coop.CommandResponse, error) {
 	if strings.TrimSpace(check) == "" {
-		return errorResponse(fmt.Errorf("--check flag is required"), fmt.Sprintf("stripe coop agent report-check --session=%s --step=%d --attempt=%d --check=\"<label>\" --passed", sessionID, nodeNumber, attemptNumber)), nil
+		return errorResponse(fmt.Errorf("--check flag is required"), fmt.Sprintf("stripe coop agent report-check --session=%s --node=%d --attempt=%d --check=\"<label>\" --passed", sessionID, nodeNumber, attemptNumber)), nil
 	}
 	session, err := s.store.Update(sessionID, func(session *coop.Session) error {
 		if err := requireActiveSession(session); err != nil {
@@ -254,6 +282,16 @@ func (s *Service) ReportCheckAttempt(sessionID string, nodeNumber, attemptNumber
 		node, err := session.NodeByNumber(nodeNumber)
 		if err != nil {
 			return err
+		}
+		if node.State != coop.NodeActive {
+			return fmt.Errorf("node %d is %s; report-check is only valid before report-work", nodeNumber, node.State)
+		}
+		attempt, err := node.AttemptByNumber(attemptNumber)
+		if err != nil || node.CurrentAttempt() != attempt {
+			return fmt.Errorf("%w: node %d attempt %d", coop.ErrAttemptNotCurrent, nodeNumber, attemptNumber)
+		}
+		if attempt.ReportedAt != nil {
+			return fmt.Errorf("node %d attempt %d was already submitted; report-check is only valid before report-work", nodeNumber, attemptNumber)
 		}
 		verification := coop.Verification{Check: check, Passed: passed}
 		if err := node.AddAgentCheck(attemptNumber, verification); err != nil {
@@ -265,25 +303,46 @@ func (s *Service) ReportCheckAttempt(sessionID string, nodeNumber, attemptNumber
 		return errorResponse(err, "stripe coop status"), nil
 	}
 	node, _ := session.NodeByNumber(nodeNumber)
+	roles, requirementErr := s.requirements(session, nodeNumber)
+	if requirementErr != nil {
+		return errorResponse(requirementErr, "stripe coop status"), nil
+	}
+	nextTemplate, requiredInputs := reportWorkAction(session.ID, nodeNumber, attemptNumber, roles, node.Type)
 	status := "failed"
 	if passed {
 		status = "passed"
 	}
 	return coop.CommandResponse{
-		OK:        true,
-		SessionID: session.ID,
-		Node:      nodeNumber,
-		Attempt:   attemptNumber,
-		State:     string(node.State),
-		Message:   fmt.Sprintf("Verification %s: %s", status, check),
-		Next:      fmt.Sprintf("stripe coop agent start-work --session=%s --step=%d --note=%s", session.ID, nodeNumber, quoteArg("Continuing after agent-reported checks")),
+		OK:             true,
+		SessionID:      session.ID,
+		Node:           nodeNumber,
+		Attempt:        attemptNumber,
+		State:          string(node.State),
+		Message:        fmt.Sprintf("Verification %s: %s", status, check),
+		NextTemplate:   nextTemplate,
+		RequiredInputs: requiredInputs,
+		ResourceRoles:  roles,
 	}, nil
 }
 
 func (s *Service) SkipAttempt(sessionID string, nodeNumber, attemptNumber int, note string) (coop.CommandResponse, error) {
+	note = strings.TrimSpace(note)
+	if note == "" {
+		return errorResponse(errors.New("skip reason is required"), "stripe coop status"), nil
+	}
+	if err := coop.ValidateSessionText("skip reason", note, coop.MaxSkipReasonBytes); err != nil {
+		return errorResponse(err, "stripe coop status"), nil
+	}
 	session, err := s.store.Update(sessionID, func(session *coop.Session) error {
 		if err := requireActiveSession(session); err != nil {
 			return err
+		}
+		step, _, _, err := session.StepByNodeNumber(nodeNumber)
+		if err != nil {
+			return err
+		}
+		if !step.Skippable {
+			return fmt.Errorf("node %d belongs to required step %q and cannot be skipped by the agent", nodeNumber, step.Title)
 		}
 		node, err := session.NodeByNumber(nodeNumber)
 		if err != nil {
@@ -327,13 +386,14 @@ type AttemptRef struct {
 }
 
 // ConfirmReviewAttempts applies a human decision only to the exact attempts
-// that were presented. overrideUnavailable is explicit and is recorded; it
-// cannot override a failure or a check that is still pending.
-func (s *Service) ConfirmReviewAttempts(sessionID string, refs []AttemptRef, overrideUnavailable bool, overrideReason string) (*coop.Session, error) {
+// and material evidence that were presented. An override cannot bypass a
+// failure, a pending check, or findings that changed after consent was armed.
+func (s *Service) ConfirmReviewAttempts(sessionID string, refs []AttemptRef, override *ReviewOverride) (*coop.Session, error) {
 	return s.store.Update(sessionID, func(session *coop.Session) error {
 		if err := requireActiveSession(session); err != nil {
 			return err
 		}
+		overrideDigest := ReviewEvidenceDigest(session, refs)
 		for _, ref := range refs {
 			node, err := session.NodeByNumber(ref.Node)
 			if err != nil {
@@ -355,6 +415,12 @@ func (s *Service) ConfirmReviewAttempts(sessionID string, refs []AttemptRef, ove
 			if node.Type == coop.NodeUIComponent && (attempt.AutomaticResultsAt == nil || !attempt.AutomaticResultsAt.After(*attempt.AppSurface.OpenedAt)) {
 				return fmt.Errorf("automatic verification has not run since the app was opened for node %d", ref.Node)
 			}
+			if attempt.AutomaticCheckPending() {
+				return fmt.Errorf("automatic verification is still running for node %d", ref.Node)
+			}
+			if supportingEvidenceNeedsReevaluation(attempt) {
+				return fmt.Errorf("automatic verification has not incorporated the latest Stripe observation for node %d", ref.Node)
+			}
 			policy := decideResults(attempt.Results, attempt.AgentChecks, true)
 			if len(policy.failed) > 0 {
 				return fmt.Errorf("verification failed for node %d: %s", ref.Node, resultFeedback(policy.failed))
@@ -363,11 +429,22 @@ func (s *Service) ConfirmReviewAttempts(sessionID string, refs []AttemptRef, ove
 				return fmt.Errorf("automatic verification is still pending for node %d", ref.Node)
 			}
 			requiresOverride := policy.requiresOverride || attemptHasObservedCandidate(attempt)
-			if requiresOverride && !overrideUnavailable {
-				return fmt.Errorf("automatic verification is unavailable for node %d; confirm again with an explicit override", ref.Node)
+			if requiresOverride && override == nil {
+				return fmt.Errorf(
+					"%w for node %d because automatic verification is unavailable",
+					ErrVerificationOverrideRequired,
+					ref.Node,
+				)
 			}
 			if requiresOverride {
-				if err := node.RecordVerificationOverride(ref.Attempt, s.now(), overrideReason); err != nil {
+				if override.EvidenceDigest == "" || override.EvidenceDigest != overrideDigest {
+					return fmt.Errorf(
+						"%w for node %d; review the current findings before confirming again",
+						ErrVerificationOverrideChanged,
+						ref.Node,
+					)
+				}
+				if err := node.RecordVerificationOverride(ref.Attempt, s.now(), override.Reason); err != nil {
 					return err
 				}
 			}
@@ -386,8 +463,12 @@ func (s *Service) ConfirmReviewAttempts(sessionID string, refs []AttemptRef, ove
 }
 
 func (s *Service) RequestChangesAttempts(sessionID string, refs []AttemptRef, note string) (*coop.Session, error) {
-	if strings.TrimSpace(note) == "" {
+	note = strings.TrimSpace(note)
+	if note == "" {
 		return nil, fmt.Errorf("request changes note is required")
+	}
+	if err := coop.ValidateSessionText("request changes note", note, coop.MaxAttemptFeedbackBytes); err != nil {
+		return nil, err
 	}
 	return s.store.Update(sessionID, func(session *coop.Session) error {
 		if err := requireActiveSession(session); err != nil {
@@ -439,10 +520,22 @@ func (s *Service) MarkAppOpened(sessionID string, nodeNumber, attemptNumber int)
 		if node.Type != coop.NodeUIComponent {
 			return fmt.Errorf("node %d is not an app UI node", nodeNumber)
 		}
+		attempt, err := node.AttemptByNumber(attemptNumber)
+		if err != nil || node.CurrentAttempt() != attempt {
+			return fmt.Errorf("%w: node %d attempt %d", coop.ErrAttemptNotCurrent, nodeNumber, attemptNumber)
+		}
+		if attempt.AppSurface == nil {
+			return errors.New("app surface is not available")
+		}
+		// Session files are local state and may be damaged or manually edited
+		// after report-work. Revalidate at the OS-open boundary rather than
+		// relying solely on ingestion-time validation.
+		if err := appsurface.Validate(attempt.AppSurface.URL); err != nil {
+			return fmt.Errorf("stored app surface URL is invalid: %w", err)
+		}
 		if err := node.OpenApp(attemptNumber, s.now()); err != nil {
 			return err
 		}
-		attempt, _ := node.AttemptByNumber(attemptNumber)
 		appURL = attempt.AppSurface.URL
 		return nil
 	})
@@ -605,6 +698,9 @@ func (s *Service) awaitStepReview(ctx context.Context, sessionID, stepTitle stri
 	}
 }
 
+// currentReportedReviewAttempts returns only open state that can still change
+// through polling. Settled and unavailable checks are event-driven from this
+// point; repeatedly rereading them creates session churn without adding facts.
 func currentReportedReviewAttempts(session *coop.Session, stepIndex int) []AttemptRef {
 	if session == nil || stepIndex < 0 || stepIndex >= len(session.Steps) {
 		return nil
@@ -621,9 +717,55 @@ func currentReportedReviewAttempts(session *coop.Session, stepIndex int) []Attem
 		if node.State != coop.NodeReview || attempt == nil || attempt.ReportedAt == nil {
 			continue
 		}
+		if !AttemptNeedsReevaluation(attempt) {
+			continue
+		}
 		refs = append(refs, AttemptRef{Node: nodeOffset + index + 1, Attempt: attempt.Number})
 	}
 	return refs
+}
+
+// AttemptNeedsReevaluation is the shared scheduling policy for agent polling
+// and the TUI observer. Keeping one predicate prevents either channel from
+// wedging an event that arrived after the last authoritative snapshot.
+func AttemptNeedsReevaluation(attempt *coop.NodeAttempt) bool {
+	if attempt == nil {
+		return false
+	}
+	if attempt.AutomaticCheckPending() {
+		return true
+	}
+	if attempt.AppSurface != nil && attempt.AppSurface.OpenedAt != nil &&
+		(attempt.AutomaticResultsAt == nil || !attempt.AutomaticResultsAt.After(*attempt.AppSurface.OpenedAt)) {
+		return true
+	}
+	if supportingEvidenceNeedsReevaluation(attempt) {
+		return true
+	}
+	for _, result := range attempt.Results {
+		if result.Importance == coop.CheckRequired && result.Status == coop.CheckPending {
+			return true
+		}
+	}
+	return false
+}
+
+func supportingEvidenceNeedsReevaluation(attempt *coop.NodeAttempt) bool {
+	if attempt == nil {
+		return false
+	}
+	for _, result := range attempt.Results {
+		// A relevant event is expected to trigger a direct state reread. Request
+		// logs are account-wide supporting evidence and must not continuously
+		// starve human review under unrelated matching traffic.
+		if result.Kind != coop.CheckEvent {
+			continue
+		}
+		if attempt.AutomaticResultsAt == nil || !attempt.AutomaticResultsAt.After(result.UpdatedAt) {
+			return true
+		}
+	}
+	return false
 }
 
 func nextAfterNode(session *coop.Session, nodeNumber int) string {
@@ -632,7 +774,7 @@ func nextAfterNode(session *coop.Session, nodeNumber int) string {
 	}
 	if nextNodeNumber := session.NextPendingNode(nodeNumber); nextNodeNumber > 0 {
 		nextNode, _ := session.NodeByNumber(nextNodeNumber)
-		return fmt.Sprintf("stripe coop agent start-work --session=%s --step=%d --note=%s", session.ID, nextNodeNumber, quoteArg("Beginning: "+nextNode.Title))
+		return fmt.Sprintf("stripe coop agent start-work --session=%s --node=%d --note=%s", session.ID, nextNodeNumber, quoteArg("Beginning: "+nextNode.Title))
 	}
 	for stepIndex := range session.Steps {
 		if !session.StepReadyForReview(stepIndex) {
@@ -641,7 +783,7 @@ func nextAfterNode(session *coop.Session, nodeNumber int) string {
 		reviewNodeNumber := session.FirstReviewNodeInStep(stepIndex)
 		reviewNode, err := session.NodeByNumber(reviewNodeNumber)
 		if err == nil && reviewNode.CurrentAttempt() != nil {
-			return fmt.Sprintf("stripe coop agent await-review --session=%s --step=%d --attempt=%d", session.ID, reviewNodeNumber, reviewNode.CurrentAttempt().Number)
+			return fmt.Sprintf("stripe coop agent await-review --session=%s --node=%d --attempt=%d", session.ID, reviewNodeNumber, reviewNode.CurrentAttempt().Number)
 		}
 	}
 	if session.IsComplete() {
@@ -660,7 +802,7 @@ func nextInStepOrStatus(session *coop.Session, stepIndex, afterNode int) string 
 	}
 	if nextNodeNumber := helpers.NextPendingNodeInStep(session, stepIndex+1, afterNode); nextNodeNumber > 0 {
 		nextNode, _ := session.NodeByNumber(nextNodeNumber)
-		return fmt.Sprintf("stripe coop agent start-work --session=%s --step=%d --note=%s", session.ID, nextNodeNumber, quoteArg("Beginning: "+nextNode.Title))
+		return fmt.Sprintf("stripe coop agent start-work --session=%s --node=%d --note=%s", session.ID, nextNodeNumber, quoteArg("Beginning: "+nextNode.Title))
 	}
 	return fmt.Sprintf("stripe coop status --session=%s", session.ID)
 }
@@ -670,7 +812,7 @@ func activeWorkCommand(session *coop.Session, nodeNumber int, node *coop.Session
 	if attempt := node.CurrentAttempt(); attempt != nil && attempt.Number > 1 {
 		note = "Redoing: " + node.Title
 	}
-	return fmt.Sprintf("stripe coop agent start-work --session=%s --step=%d --note=%s", session.ID, nodeNumber, quoteArg(note))
+	return fmt.Sprintf("stripe coop agent start-work --session=%s --node=%d --note=%s", session.ID, nodeNumber, quoteArg(note))
 }
 
 func alreadyMovedResponse(session *coop.Session, nodeNumber int, state coop.NodeState) coop.CommandResponse {
@@ -735,7 +877,7 @@ func timeoutResponseAttempt(sessionID string, nodeNumber, attemptNumber int) coo
 		Attempt:   attemptNumber,
 		State:     "timeout",
 		Message:   "Timed out waiting for developer confirmation. Re-run await-review to wait again.",
-		Next:      fmt.Sprintf("stripe coop agent await-review --session=%s --step=%d --attempt=%d", sessionID, nodeNumber, attemptNumber),
+		Next:      fmt.Sprintf("stripe coop agent await-review --session=%s --node=%d --attempt=%d", sessionID, nodeNumber, attemptNumber),
 	}
 }
 
@@ -757,7 +899,7 @@ func responseForChangedAttempt(session *coop.Session, nodeNumber int) coop.Comma
 			OK: true, SessionID: session.ID, Node: nodeNumber, Attempt: current.Number,
 			State: string(node.State), Decision: string(decisionNeedsAgent),
 			Message: message, Verification: results,
-			Next: fmt.Sprintf("stripe coop agent start-work --session=%s --step=%d --note=%s", session.ID, nodeNumber, quoteArg("Continuing the current correction attempt")),
+			Next: fmt.Sprintf("stripe coop agent start-work --session=%s --node=%d --note=%s", session.ID, nodeNumber, quoteArg("Continuing the current correction attempt")),
 		}
 	}
 	return alreadyMovedResponse(session, nodeNumber, node.State)
@@ -794,5 +936,5 @@ func language(session *coop.Session) string {
 }
 
 func quoteArg(value string) string {
-	return fmt.Sprintf("%q", value)
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }

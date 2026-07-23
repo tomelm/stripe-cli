@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
-	"strconv"
 	"strings"
 	"unicode"
 )
@@ -15,7 +14,6 @@ const (
 	maxIDPrefixBytes  = 32
 	maxEvidenceReads  = 2
 	maxPredicates     = 8
-	maxMultiplier     = 1_000_000_000
 )
 
 type predicateValidationContext uint8
@@ -164,8 +162,7 @@ func validateDistinctStatePredicates(pass, terminal []PredicateTemplate, where s
 
 func predicateKey(predicate PredicateTemplate) string {
 	return strings.Join([]string{
-		string(predicate.Kind), predicate.Field, predicate.BaseField, predicate.Input,
-		strconv.FormatInt(predicate.Multiplier, 10),
+		string(predicate.Kind), predicate.Field, predicate.Input,
 		predicate.Value, strings.Join(predicate.Values, "\x00"),
 	}, "|")
 }
@@ -213,13 +210,6 @@ func validateEvidence(evidence []EvidenceRule, where string) error {
 		}
 		if err := validatePredicates(item.Predicates, itemWhere+".predicates", predicateRequest); err != nil {
 			return err
-		}
-		if item.CorrelatesAttempt {
-			for predicateIndex, predicate := range item.Predicates {
-				if predicate.Kind != PredicateEqualsBinding {
-					return fmt.Errorf("%s.predicates[%d] must use equals_binding when correlates_attempt is true", itemWhere, predicateIndex)
-				}
-			}
 		}
 		if strings.TrimSpace(item.Repair) == "" || len(item.Repair) > maxCatalogText {
 			return fmt.Errorf("%s.repair must contain 1..%d bytes", itemWhere, maxCatalogText)
@@ -364,9 +354,6 @@ func validatePredicates(predicates []PredicateTemplate, where string, context pr
 		if !fieldPattern.MatchString(predicate.Field) || len(predicate.Field) > maxCatalogText {
 			return fmt.Errorf("%s.field %q is invalid", item, predicate.Field)
 		}
-		if predicate.BaseField != "" && (!fieldPattern.MatchString(predicate.BaseField) || len(predicate.BaseField) > maxCatalogText) {
-			return fmt.Errorf("%s.base_field %q is invalid", item, predicate.BaseField)
-		}
 		key := predicateKey(predicate)
 		if seen[key] {
 			return fmt.Errorf("%s duplicates predicate %q", item, key)
@@ -390,7 +377,7 @@ func validatePredicateShape(predicate PredicateTemplate, item string, context pr
 	switch predicate.Kind {
 	case PredicateEq, PredicateOneOf, PredicatePresent, PredicatePositive:
 		return validateStaticPredicateShape(predicate, item)
-	case PredicateEqualsInput, PredicateEqualsBinding, PredicateDifferenceEqualsInput:
+	case PredicateEqualsInput, PredicateEqualsBinding:
 		return validateRequestPredicateShape(predicate, item, context)
 	default:
 		return fmt.Errorf("%s.op %q is invalid", item, predicate.Kind)
@@ -400,19 +387,16 @@ func validatePredicateShape(predicate PredicateTemplate, item string, context pr
 func validateStaticPredicateShape(predicate PredicateTemplate, item string) error {
 	switch predicate.Kind {
 	case PredicateEq:
-		if predicate.Value == "" || predicate.Input != "" || len(predicate.Values) != 0 ||
-			predicate.BaseField != "" || predicate.Multiplier != 0 {
+		if predicate.Value == "" || predicate.Input != "" || len(predicate.Values) != 0 {
 			return fmt.Errorf("%s eq requires only field and non-empty value", item)
 		}
 	case PredicateOneOf:
-		if predicate.Value != "" || predicate.Input != "" || len(predicate.Values) < 2 ||
-			predicate.BaseField != "" || predicate.Multiplier != 0 {
+		if predicate.Value != "" || predicate.Input != "" || len(predicate.Values) < 2 {
 			return fmt.Errorf("%s one_of requires only field and at least two values", item)
 		}
 		return validateStrings(predicate.Values, item+".values", true)
 	case PredicatePresent, PredicatePositive:
-		if predicate.Value != "" || predicate.Input != "" || len(predicate.Values) != 0 ||
-			predicate.BaseField != "" || predicate.Multiplier != 0 {
+		if predicate.Value != "" || predicate.Input != "" || len(predicate.Values) != 0 {
 			return fmt.Errorf("%s %s requires only field", item, predicate.Kind)
 		}
 	}
@@ -425,19 +409,13 @@ func validateRequestPredicateShape(predicate PredicateTemplate, item string, con
 		if context != predicateRequest {
 			return fmt.Errorf("%s equals_input requires request context", item)
 		}
-		if !fieldPattern.MatchString(predicate.Input) || predicate.Value != "" || len(predicate.Values) != 0 ||
-			predicate.BaseField != "" || predicate.Multiplier != 0 {
+		if !fieldPattern.MatchString(predicate.Input) || predicate.Value != "" || len(predicate.Values) != 0 {
 			return fmt.Errorf("%s %s requires only field and dotted input", item, predicate.Kind)
 		}
 	case PredicateEqualsBinding:
 		if context != predicateRequest || !fieldPattern.MatchString(predicate.Input) || predicate.Value != "" ||
-			len(predicate.Values) != 0 || predicate.BaseField != "" || predicate.Multiplier != 0 {
+			len(predicate.Values) != 0 {
 			return fmt.Errorf("%s equals_binding requires only field and dotted request input", item)
-		}
-	case PredicateDifferenceEqualsInput:
-		if context != predicateRequest || !fieldPattern.MatchString(predicate.Input) || predicate.BaseField == "" ||
-			predicate.Multiplier <= 0 || predicate.Multiplier > maxMultiplier || predicate.Value != "" || len(predicate.Values) != 0 {
-			return fmt.Errorf("%s difference_equals_input requires request context, field, base_field, dotted input, and multiplier 1..%d", item, maxMultiplier)
 		}
 	}
 	return nil

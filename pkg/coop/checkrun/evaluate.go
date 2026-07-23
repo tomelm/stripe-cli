@@ -93,8 +93,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, input Input) (Report, error) {
 	runCtx, cancel := context.WithTimeout(ctx, evaluationTimeout)
 	defer cancel()
 	run := evaluation{ctx: runCtx, evaluator: e, session: input.Session, node: node,
-		attempt: attempt, step: step.Key, at: at, cache: map[string]objectRead{},
-		candidateCorrelationRules: make(map[string]bool), candidateCorrelations: make(map[string]bool)}
+		attempt: attempt, step: step.Key, at: at, cache: map[string]objectRead{}}
 	targets := run.targets(input.Plan, input.State)
 	if len(targets) > MaxTargetsPerRun {
 		run.coverage(fmt.Sprintf("%d compiled checks exceeded the %d-target bound", len(targets), MaxTargetsPerRun))
@@ -116,10 +115,6 @@ func (e *Evaluator) Evaluate(ctx context.Context, input Input) (Report, error) {
 		for index := range target.evidence {
 			if len(target.evidence[index].Predicates) > MaxPredicatesPerTarget {
 				run.coverage("compiled evidence predicates exceeded the per-target bound")
-				// Correlation is all-or-nothing. A truncated relationship may
-				// still produce ordinary findings, but it cannot establish that
-				// an account-wide event belongs to this attempt.
-				target.evidence[index].CorrelatesAttempt = false
 				target.evidence[index].Predicates = target.evidence[index].Predicates[:MaxPredicatesPerTarget]
 			}
 		}
@@ -153,20 +148,18 @@ type objectRead struct {
 }
 
 type evaluation struct {
-	ctx                       context.Context
-	evaluator                 *Evaluator
-	session                   *coop.Session
-	node                      *coop.SessionNode
-	attempt                   *coop.NodeAttempt
-	step                      string
-	at                        time.Time
-	cache                     map[string]objectRead
-	results                   []coop.CheckResult
-	bindings                  []coop.ResourceBinding
-	resultCandidates          []string
-	candidateCorrelationRules map[string]bool
-	candidateCorrelations     map[string]bool
-	covered                   bool
+	ctx              context.Context
+	evaluator        *Evaluator
+	session          *coop.Session
+	node             *coop.SessionNode
+	attempt          *coop.NodeAttempt
+	step             string
+	at               time.Time
+	cache            map[string]objectRead
+	results          []coop.CheckResult
+	bindings         []coop.ResourceBinding
+	resultCandidates []string
+	covered          bool
 }
 
 func (run *evaluation) targets(plan checks.StepPlan, state *StateObservation) []target {
@@ -352,14 +345,6 @@ func (run *evaluation) evaluate(target target) {
 }
 
 func (run *evaluation) prepareCandidate(target target) {
-	if target.candidateBinding {
-		for _, evidence := range target.evidence {
-			if evidence.CorrelatesAttempt {
-				run.candidateCorrelationRules[candidateKey(target)] = true
-				break
-			}
-		}
-	}
 	if target.candidateBinding && !target.discovered {
 		// A persisted candidate remains non-attributable even if its app
 		// window has ended or its ID is malformed for the compiled role.
@@ -428,10 +413,10 @@ func (run *evaluation) handleInvalidObservationWindow(target target) bool {
 
 func (run *evaluation) persistDiscoveredCandidate(target target) {
 	if target.candidateBinding && target.discovered && !target.discoveryWindow.IsZero() {
-		// Preserve a safe, attributable event identity before the read so a
+		// Preserve a safe event identity before the read so a
 		// transient outage cannot lose a one-shot event. It remains replaceable
-		// until the complete candidate passes or declarative relationship
-		// evidence correlates it with this attempt.
+		// and untrusted; direct reads may verify facts about it, but cannot
+		// attribute the account-wide event to this attempt.
 		run.bind(target, coop.BindingObservedCandidate)
 	}
 }
@@ -557,14 +542,9 @@ func (run *evaluation) evaluateEvidence(target target, parent map[string]any, ev
 	}
 	run.add(target, evidenceSuffix(evidence.ID, "exists"), coop.CheckPassed,
 		"supporting Stripe evidence exists in the authorized test account", "supporting evidence read", evidence.Repair)
-	correlated := evidence.CorrelatesAttempt
 	for _, predicate := range evidence.Predicates {
-		match := run.predicateWithSuffix(target, read.object, predicate,
+		run.predicateWithSuffix(target, read.object, predicate,
 			evidenceSuffix(evidence.ID, fieldSuffix(predicate.Field)), evidence.Repair)
-		correlated = correlated && match.available && match.matched
-	}
-	if correlated && target.candidateBinding {
-		run.candidateCorrelations[candidateKey(target)] = true
 	}
 }
 
@@ -718,8 +698,6 @@ func (run *evaluation) match(target target, object map[string]any, predicate che
 		result, scalarValue = run.matchEqualsInput(target, predicate, value, present)
 	case checks.PredicateEqualsBinding:
 		result = run.matchEqualsBinding(predicate, present, observed, scalarValue)
-	case checks.PredicateDifferenceEqualsInput:
-		result = run.matchDifferenceEqualsInput(target, object, predicate, value, present, observed)
 	default:
 		result.available, result.expected, result.observed = false, "a supported predicate", "unsupported predicate"
 	}
@@ -785,34 +763,6 @@ func (run *evaluation) matchEqualsBinding(predicate checks.Predicate, present bo
 		observed:  observed,
 		matched:   present && scalarValue && observed == expected,
 	}
-}
-
-func (run *evaluation) matchDifferenceEqualsInput(target target, object map[string]any, predicate checks.Predicate, value any, present bool, observed string) predicateMatch {
-	result := predicateMatch{available: true, observed: observed}
-	input, inputAvailable := run.inputValue(target.meta.Source, predicate.Input)
-	inputInteger, validInput := integer(input)
-	if !validDurationInput(inputAvailable, validInput, inputInteger, predicate.Multiplier) {
-		result.available = false
-		result.expected = "duration derived from the request input"
-		return result
-	}
-	expectedDuration := inputInteger * predicate.Multiplier
-	result.expected = fmt.Sprintf("%d seconds (%d x %d)", expectedDuration, inputInteger, predicate.Multiplier)
-	base, basePresent := valueAt(object, predicate.BaseField)
-	baseInteger, validBase := integer(base)
-	fieldInteger, validField := integer(value)
-	if !present || !validField || !basePresent || !validBase || fieldInteger < 0 || baseInteger < 0 {
-		result.observed = predicate.Field + " or " + predicate.BaseField + " is missing or non-integer"
-		return result
-	}
-	observedDuration := fieldInteger - baseInteger
-	result.observed = fmt.Sprintf("%d seconds", observedDuration)
-	result.matched = observedDuration == expectedDuration
-	return result
-}
-
-func validDurationInput(available, valid bool, value, multiplier int64) bool {
-	return available && valid && value >= 0 && multiplier > 0 && value <= (1<<63-1)/multiplier
 }
 
 func normalizePredicateMatch(result predicateMatch, kind checks.PredicateKind, present, scalarValue bool) predicateMatch {
@@ -914,21 +864,21 @@ func (run *evaluation) coverage(observed string) {
 	}
 	run.covered = true
 	run.results = append(run.results, coop.CheckResult{
-		ID: "checkrun.coverage", Kind: coop.CheckCoverage, Importance: coop.CheckAdvisory,
+		ID: "checkrun.coverage", Kind: coop.CheckCoverage, Importance: coop.CheckRequired,
 		Status: coop.CheckUnavailable, Expected: "complete bounded coverage", Observed: bounded(observed),
 		Repair: "Narrow the compiled checks and run verification again.", UpdatedAt: run.at,
 	})
 	run.resultCandidates = append(run.resultCandidates, "")
 }
 
-// finalizeCandidates separates account-wide event candidates from bindings
-// that are safe to use for agent-attributed failures. Only catalog-declared
-// relationship evidence may promote a candidate. Passing checks prove facts
-// about the Stripe object, not that the account-wide event belongs to this
-// attempt. Uncorrelated findings remain replaceable and non-blaming. A stable
-// attribution finding makes that uncertainty explicit: it remains pending
-// while a declared relationship can still match, then becomes unavailable so
-// human review can override it instead of waiting forever.
+// finalizeCandidates separates facts about an account-wide event candidate
+// from facts attributable to this attempt. An authoritative read can verify
+// the candidate object's configuration and state, but neither a matching
+// Price nor any other reusable Stripe resource proves that the object came
+// from this human interaction. Candidate facts therefore remain advisory and
+// contradictions become unavailable rather than blaming the agent. A required
+// attribution finding keeps automatic completion fail closed while preserving
+// the useful supporting evidence for human review.
 func (run *evaluation) finalizeCandidates() {
 	for bindingIndex := range run.bindings {
 		binding := &run.bindings[bindingIndex]
@@ -936,57 +886,29 @@ func (run *evaluation) finalizeCandidates() {
 			continue
 		}
 		key := bindingKey(binding.Role, binding.Type, binding.ID)
-		window := run.discoveryWindowStart()
-		correlationWindowActive := run.discoveryWindowActive(window)
-		if run.candidateCorrelations[key] && correlationWindowActive {
-			binding.Source = coop.BindingObserved
-			continue
-		}
-		canCorrelate := run.candidateCorrelationRules[key]
-		expired := !correlationWindowActive
-		repairPrefix := "Exercise the app again; this account-wide event remains a candidate until it matches this attempt's blueprint wiring. "
-		if expired {
-			repairPrefix = "Automatic attribution was unavailable; continue with explicit human review or start a new attempt. "
-		}
-		attributionStatus := coop.CheckPending
-		attributionObserved := "catalog-declared relationship evidence has not matched"
-		attributionRepair := "Exercise the app again while Co-op waits for an event tied to this attempt's blueprint wiring."
-		if !canCorrelate {
-			repairPrefix = "Automatic attribution was unavailable; continue with explicit human review. "
-			attributionStatus = coop.CheckUnavailable
-			attributionObserved = "the compiled plan has no relationship rule for this event binding"
-			attributionRepair = "Continue with explicit human review; Co-op cannot attribute this account-wide event to the attempt."
-		} else if expired {
-			attributionStatus = coop.CheckUnavailable
-			attributionObserved = "the attribution window expired without a relationship match"
-			attributionRepair = "Continue with explicit human review, or start a new attempt and exercise the app again."
-		}
 		for resultIndex, resultKey := range run.resultCandidates {
 			if resultKey != key {
 				continue
 			}
 			result := &run.results[resultIndex]
-			if expired || !canCorrelate {
-				if result.Status != coop.CheckPassed {
-					result.Status = coop.CheckUnavailable
-					result.Repair = bounded(repairPrefix + result.Repair)
-				}
-				continue
+			result.Importance = coop.CheckAdvisory
+			if result.Detail == "" {
+				result.Detail = "Supporting check on an account-wide event candidate; the object is not attributed to this attempt."
 			}
-			if result.Status == coop.CheckFailed {
-				result.Status = coop.CheckPending
-				result.Repair = bounded(repairPrefix + result.Repair)
+			if result.Status != coop.CheckPassed {
+				result.Status = coop.CheckUnavailable
+				result.Repair = bounded("Automatic attribution was unavailable; continue with explicit human review. " + result.Repair)
 			}
 		}
 		run.results = append(run.results, coop.CheckResult{
 			ID:         boundedID("checkrun.attribution." + binding.Type + "." + binding.Role),
 			Kind:       coop.CheckResource,
 			Importance: coop.CheckRequired,
-			Status:     attributionStatus,
+			Status:     coop.CheckUnavailable,
 			Detail:     "Co-op could not attribute the observed Stripe object to this attempt.",
-			Expected:   "event linked to this attempt's blueprint wiring",
-			Observed:   bounded(attributionObserved),
-			Repair:     bounded(attributionRepair),
+			Expected:   "event linked by a unique value issued for this attempt",
+			Observed:   "account-wide event without a unique attempt token",
+			Repair:     "Continue with explicit human review; Co-op cannot attribute this account-wide event to the attempt.",
 			UpdatedAt:  run.at,
 		})
 		run.resultCandidates = append(run.resultCandidates, key)
@@ -1194,15 +1116,6 @@ func number(value any) (float64, bool) {
 }
 
 func unixSeconds(value any) (int64, bool) {
-	text, ok := scalar(value)
-	if !ok {
-		return 0, false
-	}
-	result, err := strconv.ParseInt(text, 10, 64)
-	return result, err == nil
-}
-
-func integer(value any) (int64, bool) {
 	text, ok := scalar(value)
 	if !ok {
 		return 0, false

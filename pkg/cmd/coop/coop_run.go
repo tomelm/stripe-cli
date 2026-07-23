@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -12,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
+	"github.com/stripe/stripe-cli/pkg/coop/checks"
 )
 
 type coopAgentRunCmd struct {
@@ -80,7 +80,11 @@ func (rc *coopAgentRunCmd) runCmd(cmd *cobra.Command, args []string) error {
 }
 
 func newCoopAgentRunResponse(bp *coop.Blueprint, session *coop.Session) coopAgentRunResponse {
-	return newCoopAgentSessionResponse(bp.Title, session, agentInstructions(bp, session))
+	response := newCoopAgentSessionResponse(bp.Title, session, agentInstructions(bp, session))
+	coverage := verificationCoverageForSession(session)
+	response.VerificationCoverage = &coverage
+	response.Message += ". " + coverage.Message
+	return response
 }
 
 func newCoopAgentGuidedActionResponse(action *coop.GuidedAction, session *coop.Session) coopAgentRunResponse {
@@ -94,12 +98,11 @@ func newCoopAgentSessionResponse(title string, session *coop.Session, instructio
 		for _, n := range step.Nodes {
 			nodeNumber++
 			nodes = append(nodes, nodeBrief{
-				Number:        nodeNumber,
-				Title:         n.Title,
-				Type:          string(n.Type),
-				Description:   n.Description,
-				ReviewPrompt:  n.ReviewPrompt,
-				ReviewCommand: n.ReviewCommand,
+				NodeDefinition: n.NodeDefinition,
+				Number:         nodeNumber,
+				StepKey:        step.Key,
+				StepTitle:      step.Title,
+				Skippable:      step.Skippable,
 			})
 		}
 	}
@@ -111,7 +114,7 @@ func newCoopAgentSessionResponse(title string, session *coop.Session, instructio
 			Node:      1,
 			State:     "created",
 			Message:   fmt.Sprintf("Session started: %s (%d nodes)", title, session.TotalNodes()),
-			Next:      fmt.Sprintf("stripe coop agent start-work --session=%s --step=1 --note=%s", session.ID, quoteArg("Beginning: "+session.Steps[0].Nodes[0].Title)),
+			Next:      fmt.Sprintf("stripe coop agent start-work --session=%s --node=1 --note=%s", session.ID, quoteArg("Beginning: "+session.Steps[0].Nodes[0].Title)),
 		},
 		AgentInstructions: instructions,
 		Nodes:             nodes,
@@ -158,17 +161,76 @@ func mergeKeyValues(dst map[string]string, flag string, values []string) error {
 
 type coopAgentRunResponse struct {
 	coop.CommandResponse
-	AgentInstructions string      `json:"agent_instructions"`
-	Nodes             []nodeBrief `json:"nodes"`
+	AgentInstructions    string                       `json:"agent_instructions"`
+	Nodes                []nodeBrief                  `json:"nodes"`
+	VerificationCoverage *verificationCoverageSummary `json:"verification_coverage,omitempty"`
+}
+
+type verificationCoverageSummary struct {
+	Status                  string `json:"status"`
+	DirectChecks            int    `json:"direct_checks"`
+	UnsupportedFacts        int    `json:"unsupported_facts"`
+	AppSurfaces             int    `json:"app_surfaces"`
+	AppSurfacesWithTriggers int    `json:"app_surfaces_with_observation_triggers"`
+	Message                 string `json:"message"`
+}
+
+func verificationCoverageForSession(session *coop.Session) verificationCoverageSummary {
+	summary := verificationCoverageSummary{Status: "partial"}
+	catalog, err := checks.LoadCatalog()
+	if err != nil || session == nil {
+		summary.Message = "Automatic verification coverage is unavailable; Co-op will not treat unchecked work as passed."
+		return summary
+	}
+	for stepIndex := range session.Steps {
+		step := &session.Steps[stepIndex]
+		plan, compileErr := checks.CompileStep(catalog, *step)
+		if compileErr != nil {
+			summary.UnsupportedFacts++
+			continue
+		}
+		summary.DirectChecks += len(plan.Resources) + len(plan.States)
+		summary.UnsupportedFacts += len(plan.CoverageGaps)
+
+		stepHasRequestTrigger := false
+		for nodeIndex := range step.Nodes {
+			node := &step.Nodes[nodeIndex]
+			if node.Request != nil || len(node.TestRequests) > 0 {
+				stepHasRequestTrigger = true
+			}
+		}
+		for nodeIndex := range step.Nodes {
+			node := &step.Nodes[nodeIndex]
+			if node.Type != coop.NodeUIComponent {
+				continue
+			}
+			summary.AppSurfaces++
+			if stepHasRequestTrigger || len(node.Events) > 0 {
+				summary.AppSurfacesWithTriggers++
+			}
+		}
+	}
+	if summary.UnsupportedFacts == 0 && summary.DirectChecks > 0 &&
+		summary.AppSurfacesWithTriggers == summary.AppSurfaces {
+		summary.Status = "cataloged_facts"
+	}
+	summary.Message = fmt.Sprintf(
+		"Automatic verification covers %d direct check(s); %d blueprint fact(s) are unsupported. "+
+			"%d/%d app surface(s) can trigger checks from Stripe observations. Unsupported facts are disclosed and never treated as passed.",
+		summary.DirectChecks,
+		summary.UnsupportedFacts,
+		summary.AppSurfacesWithTriggers,
+		summary.AppSurfaces,
+	)
+	return summary
 }
 
 type nodeBrief struct {
-	Number        int    `json:"number"`
-	Title         string `json:"title"`
-	Type          string `json:"type"`
-	Description   string `json:"description,omitempty"`
-	ReviewPrompt  string `json:"review_prompt,omitempty"`
-	ReviewCommand string `json:"review_command,omitempty"`
+	coop.NodeDefinition
+	Number    int    `json:"number"`
+	StepKey   string `json:"step_key"`
+	StepTitle string `json:"step_title"`
+	Skippable bool   `json:"skippable"`
 }
 
 func agentInstructions(bp *coop.Blueprint, session *coop.Session) string {
@@ -191,7 +253,7 @@ BEFORE YOU START — ensure you have API access:
    This gives you a working API key without requiring browser login.
    The claim URL will appear automatically in the TUI for the developer.
 
-Each node has a description that tells you what to do. Follow the description — it's the source of truth. The node type is a hint about the general category:
+Each node's structured fields are the contract: request, requests, events, variable references, skippable, review_prompt, and review_command. The title and description explain product intent, but never override those fields. The node type is a hint about the general category:
 - "apiRequest": Usually means writing code that calls a Stripe API. Run it and verify the response.
 - "asyncHandler": Set up a webhook handler. Use "stripe listen --forward-to localhost:<port>/webhook" to test.
 - "uiComponent": Build frontend code or configure something user-facing. Verify it works.
@@ -203,26 +265,25 @@ If a node includes review_prompt, that is the baseline acceptance check shown to
 If a node asks you to understand the project, scan files, identify the tech stack, and summarize what you found. This helps you adapt the remaining nodes to the developer's actual setup. Don't ask the developer questions you can answer by reading the code.
 
 Agent lifecycle commands (use this session id: %[2]s):
-1. stripe coop agent start-work --session=%[2]s --step=<n> --note="<what you're about to do>"
-2. Save the returned attempt number. Every later command for that work carries --attempt=<number>.
-3. Write the code, run it, and optionally report your own check with: stripe coop agent report-check --session=%[2]s --step=<n> --attempt=<number> --check="<what you verified>" --passed
-4. Run the exact report-work command returned by start-work. It includes required --stripe-resource=<role>=<id> placeholders. For a uiComponent, also provide --app-url=<absolute HTTP(S) URL in the app you built>.
-5. Follow the JSON response's exact next command. Co-op will read supported Stripe resources directly; a request or event observation alone never counts as a pass.
-6. When the response says verification or human review is pending, run stripe coop agent await-review --session=%[2]s --step=<n> --attempt=<number>. It polls bounded direct checks and blocks until Co-op or the developer decides.
-7. If decision=needs_agent, use the expected/observed/repair findings, start the correction attempt named in the response, and report again. Do not ask the developer to relay machine findings.
-8. When the final node is confirmed: IMMEDIATELY run the JSON response's next command. Do not stop or ask. It will return to the parent session for follow-up work or show the developer their options in the TUI.
+1. Run an executable "next" command unchanged. When a response instead contains "next_template", fill every named "required_inputs" value before running it; never submit the angle-bracket examples literally.
+2. Start work with: stripe coop agent start-work --session=%[2]s --node=<n> --note="<what you're about to do>". Save the returned attempt number; every later mutation for that work carries --attempt=<number>.
+3. Write and run the code. You may report one of your own checks with: stripe coop agent report-check --session=%[2]s --node=<n> --attempt=<number> --check="<what you verified>" --passed
+4. Complete the returned report-work template with a concrete implementation summary and every requested Stripe resource ID. For a uiComponent, also provide the absolute HTTP(S) URL of the app surface you built.
+5. Co-op reads supported Stripe resources directly; a request or event observation alone never counts as a pass. If verification or human review remains pending, follow the returned await-review command.
+6. If decision=needs_agent, use the expected/observed/repair findings, run the returned correction command, and report the correction. Do not ask the developer to relay machine findings.
+7. When the final node is confirmed, immediately run the executable "next" command. It returns to the parent session for follow-up work or shows the developer their options in the TUI.
 
 If that final command is next-action, keep it as the sole foreground waiter and remain active until it returns the developer's selection. Do not background it, replace it with status polling, or give your final summary while it is pending. Follow the returned JSON before stopping.
 
 Non-UI work completes automatically when all known required direct checks pass. Human review is reserved for real app UI and Dashboard-owned work. For UI work, keep the app/server running at the submitted app URL and explain the visible result. While the developer clicks through it, Co-op continues checking the ordinary Stripe resource and state rules.
 
-The "await" command is the agent notification channel. Do not proceed when the response tells you to await. Run the exact await-review command directly as the sole foreground waiter; do not wrap, background, or duplicate it. Co-op bounds the wait itself. If it returns state=timeout, immediately run its exact next command. A late deterministic failure or human rejection returns actionable feedback directly.
+The "await" command is the agent notification channel. Do not proceed when the response tells you to await. Run the returned await-review command directly as the sole foreground waiter; do not wrap, background, or duplicate it. Co-op bounds the wait itself. If it returns state=timeout, immediately run its executable "next" command. A late deterministic failure or human rejection returns actionable feedback directly.
 
 Important:
 - The human is watching your progress live in a terminal UI.
 - Write working code, not stubs. Run it. Verify it actually works.
 - Report what you did concretely (file paths, line numbers, test results).
-- If a node doesn't apply to the user's setup, start it first, then skip its exact attempt: stripe coop agent skip --session=%[2]s --step=<n> --attempt=<number> --note="<reason>"
+- Only when Co-op identifies a node as skippable, start it first, then skip its exact attempt: stripe coop agent skip --session=%[2]s --node=<n> --attempt=<number> --note="<reason>"
 - Always install the LATEST version of the Stripe SDK for the language in use. Do not pin to old versions.
   Examples: "npm install stripe@latest", "pip install --upgrade stripe", "gem install stripe"
   Check https://docs.stripe.com/libraries for current versions if unsure.`, preamble, session.ID)
@@ -238,7 +299,7 @@ func outputJSON(v interface{}) error {
 }
 
 func quoteArg(value string) string {
-	return strconv.Quote(value)
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func outputCoopError(msg, hint string) error {

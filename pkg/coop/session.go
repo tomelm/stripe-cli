@@ -5,12 +5,21 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const (
-	MaxCheckResultIDBytes     = 128
-	MaxCheckResultDetailBytes = 240
-	MaxAgentCheckBytes        = 240
+	MaxCheckResultIDBytes       = 128
+	MaxCheckResultDetailBytes   = 240
+	MaxAgentCheckBytes          = 240
+	MaxAgentChecksPerAttempt    = 64
+	MaxImplementationFileBytes  = 1024
+	MaxImplementationLinesBytes = 128
+	MaxImplementationNoteBytes  = 2048
+	MaxAttemptFeedbackBytes     = 4096
+	MaxOverrideReasonBytes      = 1024
+	MaxActivityBytes            = 1024
+	MaxSkipReasonBytes          = 240
 )
 
 var (
@@ -27,6 +36,19 @@ var validTransitions = map[NodeState][]NodeState{
 	NodePending: {NodeActive, NodeSkipped},
 	NodeActive:  {NodeReview, NodeDone, NodeSkipped},
 	NodeReview:  {NodeDone, NodeActive, NodeSkipped}, // active = rejected, redo
+}
+
+// ValidateSessionText bounds persisted text that may later be rendered in a
+// terminal or returned as an agent command response. Control characters are
+// rejected at the mutation boundary rather than trusted to every presenter.
+func ValidateSessionText(label, value string, maxBytes int) error {
+	if maxBytes > 0 && len(value) > maxBytes {
+		return fmt.Errorf("%s exceeds %d bytes", label, maxBytes)
+	}
+	if strings.IndexFunc(value, unicode.IsControl) >= 0 {
+		return fmt.Errorf("%s contains control characters", label)
+	}
+	return nil
 }
 
 // CurrentAttempt returns the latest open attempt, or nil when the node has no
@@ -68,6 +90,10 @@ func (node *SessionNode) StartAttempt(now time.Time, feedback string) (*NodeAtte
 	if now.IsZero() {
 		return nil, errors.New("attempt start time is required")
 	}
+	feedback = strings.TrimSpace(feedback)
+	if err := ValidateSessionText("attempt feedback", feedback, MaxAttemptFeedbackBytes); err != nil {
+		return nil, err
+	}
 	number := 1
 	if len(node.Attempts) > 0 {
 		number = node.Attempts[len(node.Attempts)-1].Number + 1
@@ -75,7 +101,7 @@ func (node *SessionNode) StartAttempt(now time.Time, feedback string) (*NodeAtte
 	node.Attempts = append(node.Attempts, NodeAttempt{
 		Number:    number,
 		StartedAt: now.UTC(),
-		Feedback:  strings.TrimSpace(feedback),
+		Feedback:  feedback,
 	})
 	return &node.Attempts[len(node.Attempts)-1], nil
 }
@@ -174,14 +200,53 @@ func (node *SessionNode) ReconcileAutomaticResults(number int, snapshotAt time.T
 			return fmt.Errorf("automatic result snapshot contains duplicate result %q", result.ID)
 		}
 		seen[key] = true
-		if previous, ok := existing[key]; ok && sameCheckResult(previous, result) {
-			result.UpdatedAt = previous.UpdatedAt
+		if previous, ok := existing[key]; ok {
+			if sameCheckResult(previous, result) {
+				result.UpdatedAt = previous.UpdatedAt
+			}
 		}
 		next = append(next, result)
 	}
 	attempt.Results = next
+	// This ordering watermark must advance even when the durable findings are
+	// identical. Otherwise an older, slower read with different findings can
+	// land after a later-started identical read. Scheduling bounds these writes
+	// to genuinely open pending checks and one post-open UI sample.
 	attempt.AutomaticResultsAt = &snapshotAt
 	return nil
+}
+
+// BeginAutomaticCheck records the newest authoritative read before any network
+// work starts. Confirmation compares this marker with AutomaticResultsAt, so a
+// human decision cannot close an attempt while a newer read is still in flight.
+// The returned timestamp is monotonic for this attempt across CLI processes.
+func (node *SessionNode) BeginAutomaticCheck(number int, requestedAt time.Time) (time.Time, error) {
+	attempt, err := node.currentAttemptNumber(number)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if requestedAt.IsZero() {
+		return time.Time{}, errors.New("automatic check start time is required")
+	}
+	startedAt := requestedAt.UTC()
+	for _, previous := range []*time.Time{attempt.AutomaticCheckStartedAt, attempt.AutomaticResultsAt} {
+		if previous != nil && !startedAt.After(*previous) {
+			startedAt = previous.Add(time.Nanosecond)
+		}
+	}
+	attempt.AutomaticCheckStartedAt = &startedAt
+	return startedAt, nil
+}
+
+// AutomaticCheckPending reports whether the latest started authoritative read
+// has not yet committed its snapshot. A later completed read supersedes any
+// older read that is still running because older snapshots cannot land.
+func (attempt *NodeAttempt) AutomaticCheckPending() bool {
+	if attempt == nil || attempt.AutomaticCheckStartedAt == nil {
+		return false
+	}
+	return attempt.AutomaticResultsAt == nil ||
+		attempt.AutomaticResultsAt.Before(*attempt.AutomaticCheckStartedAt)
 }
 
 func isAutomaticResult(result CheckResult) bool {
@@ -244,6 +309,9 @@ func (node *SessionNode) SetAppSurface(number int, surface AppSurface) error {
 	}
 	copy := surface
 	copy.URL = strings.TrimSpace(copy.URL)
+	if err := ValidateSessionText("app surface URL", copy.URL, 0); err != nil {
+		return err
+	}
 	if copy.OpenedAt != nil {
 		openedAt := copy.OpenedAt.UTC()
 		copy.OpenedAt = &openedAt
@@ -263,18 +331,36 @@ func (node *SessionNode) ReportAttempt(number int, now time.Time, implementation
 	if now.IsZero() {
 		return errors.New("attempt report time is required")
 	}
-	reportedAt := now.UTC()
-	attempt.ReportedAt = &reportedAt
 	if implementation == nil {
+		reportedAt := now.UTC()
+		attempt.ReportedAt = &reportedAt
 		attempt.Implementation = nil
 		return nil
 	}
 	copy := *implementation
+	copy.File = strings.TrimSpace(copy.File)
+	copy.Lines = strings.TrimSpace(copy.Lines)
+	copy.Note = strings.TrimSpace(copy.Note)
+	for _, field := range []struct {
+		label string
+		value string
+		max   int
+	}{
+		{label: "implementation file", value: copy.File, max: MaxImplementationFileBytes},
+		{label: "implementation line range", value: copy.Lines, max: MaxImplementationLinesBytes},
+		{label: "implementation note", value: copy.Note, max: MaxImplementationNoteBytes},
+	} {
+		if err := ValidateSessionText(field.label, field.value, field.max); err != nil {
+			return err
+		}
+	}
+	reportedAt := now.UTC()
+	attempt.ReportedAt = &reportedAt
 	attempt.Implementation = &copy
 	return nil
 }
 
-// AddAgentCheck appends an agent-reported check to the current attempt.
+// AddAgentCheck records the latest agent report for one bounded label.
 func (node *SessionNode) AddAgentCheck(number int, verification Verification) error {
 	attempt, err := node.currentAttemptNumber(number)
 	if err != nil {
@@ -284,8 +370,17 @@ func (node *SessionNode) AddAgentCheck(number int, verification Verification) er
 		return errors.New("agent check label is required")
 	}
 	verification.Check = strings.TrimSpace(verification.Check)
-	if len(verification.Check) > MaxAgentCheckBytes {
-		return fmt.Errorf("agent check label exceeds %d bytes", MaxAgentCheckBytes)
+	if err := ValidateSessionText("agent check label", verification.Check, MaxAgentCheckBytes); err != nil {
+		return err
+	}
+	for index := range attempt.AgentChecks {
+		if attempt.AgentChecks[index].Check == verification.Check {
+			attempt.AgentChecks[index] = verification
+			return nil
+		}
+	}
+	if len(attempt.AgentChecks) >= MaxAgentChecksPerAttempt {
+		return fmt.Errorf("agent checks exceed %d entries", MaxAgentChecksPerAttempt)
 	}
 	attempt.AgentChecks = append(attempt.AgentChecks, verification)
 	return nil
@@ -321,7 +416,14 @@ func (node *SessionNode) RecordVerificationOverride(number int, now time.Time, r
 	if now.IsZero() {
 		return errors.New("verification override time is required")
 	}
-	attempt.Override = &VerificationOverride{At: now.UTC(), Reason: strings.TrimSpace(reason)}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return errors.New("verification override reason is required")
+	}
+	if err := ValidateSessionText("verification override reason", reason, MaxOverrideReasonBytes); err != nil {
+		return err
+	}
+	attempt.Override = &VerificationOverride{At: now.UTC(), Reason: reason}
 	return nil
 }
 
@@ -343,8 +445,8 @@ func validateCheckResult(result CheckResult) error {
 	if strings.TrimSpace(result.ID) == "" {
 		return errors.New("check result ID is required")
 	}
-	if len(result.ID) > MaxCheckResultIDBytes {
-		return fmt.Errorf("check result ID exceeds %d bytes", MaxCheckResultIDBytes)
+	if err := ValidateSessionText("check result ID", result.ID, MaxCheckResultIDBytes); err != nil {
+		return err
 	}
 	switch result.Kind {
 	case CheckResource, CheckState, CheckRequest, CheckEvent, CheckApp, CheckCoverage:
@@ -363,8 +465,8 @@ func validateCheckResult(result CheckResult) error {
 		"detail": result.Detail, "expected": result.Expected,
 		"observed": result.Observed, "repair": result.Repair,
 	} {
-		if len(value) > MaxCheckResultDetailBytes {
-			return fmt.Errorf("check result %s exceeds %d bytes", label, MaxCheckResultDetailBytes)
+		if err := ValidateSessionText("check result "+label, value, MaxCheckResultDetailBytes); err != nil {
+			return err
 		}
 	}
 	if result.UpdatedAt.IsZero() {
@@ -378,9 +480,8 @@ func validateResourceBinding(binding ResourceBinding) error {
 	if role == "" || resourceType == "" || id == "" {
 		return errors.New("resource binding role, type, and ID are required")
 	}
-	if len(role) > 64 || len(resourceType) > 64 || strings.IndexFunc(role+resourceType, func(character rune) bool {
-		return character < 0x20 || character == 0x7f
-	}) >= 0 {
+	if ValidateSessionText("resource binding role", role, 64) != nil ||
+		ValidateSessionText("resource binding type", resourceType, 64) != nil {
 		return errors.New("resource binding exceeds its safety bounds")
 	}
 	if !IsSafeStripeObjectID(id) {

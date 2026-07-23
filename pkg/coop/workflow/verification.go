@@ -144,8 +144,12 @@ func isHumanReviewNode(node *coop.SessionNode) bool {
 }
 
 func resultFeedback(results []coop.CheckResult) string {
+	return strings.Join(resultFeedbackLines(results), "\n")
+}
+
+func resultFeedbackLines(results []coop.CheckResult) []string {
 	if len(results) == 0 {
-		return "Automatic verification found a contradiction."
+		return []string{"Automatic verification found a contradiction."}
 	}
 	copy := append([]coop.CheckResult(nil), results...)
 	sort.Slice(copy, func(i, j int) bool { return copy[i].ID < copy[j].ID })
@@ -163,7 +167,24 @@ func resultFeedback(results []coop.CheckResult) string {
 		}
 		lines = append(lines, line)
 	}
-	return strings.Join(lines, "\n")
+	return lines
+}
+
+func boundedResultFeedback(results []coop.CheckResult) string {
+	lines := resultFeedbackLines(results)
+	const separator = "; "
+	joined := strings.Join(lines, separator)
+	if len(joined) <= coop.MaxAttemptFeedbackBytes {
+		return joined
+	}
+	for included := len(lines) - 1; included > 0; included-- {
+		suffix := fmt.Sprintf("... and %d more verification finding(s).", len(lines)-included)
+		candidate := strings.Join(lines[:included], separator) + separator + suffix
+		if len(candidate) <= coop.MaxAttemptFeedbackBytes {
+			return candidate
+		}
+	}
+	return "Automatic verification found multiple contradictions. Review the typed findings from the prior attempt."
 }
 
 func fallback(value, other string) string {
@@ -196,20 +217,29 @@ func (s *Service) requirements(session *coop.Session, nodeNumber int) ([]coop.Re
 }
 
 func implementationFromInput(input ReportWorkInput) *coop.Implementation {
-	if input.File == "" && input.Lines == "" && input.Snippet == "" && input.Note == "" {
+	if input.File == "" && input.Lines == "" && input.Note == "" {
 		return nil
 	}
 	return &coop.Implementation{
-		File: input.File, Lines: input.Lines, Snippet: input.Snippet, Note: input.Note,
+		File: input.File, Lines: input.Lines, Note: input.Note,
 	}
 }
 
-func reportWorkCommand(sessionID string, nodeNumber, attempt int, requirements []coop.ResourceRequirement) string {
-	command := fmt.Sprintf("stripe coop agent report-work --session=%s --step=%d --attempt=%d --file=<path> --note=\"<what you did>\"", sessionID, nodeNumber, attempt)
+func reportWorkAction(sessionID string, nodeNumber, attempt int, requirements []coop.ResourceRequirement, nodeType coop.NodeType) (string, []string) {
+	command := fmt.Sprintf("stripe coop agent report-work --session=%s --node=%d --attempt=%d --note=\"<implementation-summary>\"", sessionID, nodeNumber, attempt)
+	required := []string{"note"}
 	for _, requirement := range requirements {
+		if !requirement.Required {
+			continue
+		}
 		command += fmt.Sprintf(" --stripe-resource=%s=<%s-id>", requirement.Role, requirement.Type)
+		required = append(required, "stripe-resource:"+requirement.Role)
 	}
-	return command
+	if nodeType == coop.NodeUIComponent {
+		command += " --app-url=<absolute-app-url>"
+		required = append(required, "app-url")
+	}
+	return command, required
 }
 
 // Reevaluate reruns the same direct checks for an observation or poll. Stale
@@ -242,23 +272,54 @@ func (s *Service) reevaluate(ctx context.Context, sessionID string, nodeNumber, 
 	if attempt == nil || attempt.Number != attemptNumber {
 		return responseForChangedAttempt(session, nodeNumber), nil
 	}
-	return s.evaluateAndApplyObservation(ctx, session, nodeNumber, attemptNumber, trigger, eventType, resourceID, true)
+	return s.evaluateAndApplyObservation(ctx, sessionID, session, nodeNumber, attemptNumber, trigger, eventType, resourceID, true)
 }
 
-func (s *Service) evaluateAndApply(ctx context.Context, frozen *coop.Session, nodeNumber, attemptNumber int, trigger EvaluationTrigger, ignoreStale bool) (coop.CommandResponse, error) {
-	return s.evaluateAndApplyObservation(ctx, frozen, nodeNumber, attemptNumber, trigger, "", "", ignoreStale)
+func (s *Service) evaluateAndApply(ctx context.Context, sessionID string, frozen *coop.Session, nodeNumber, attemptNumber int, trigger EvaluationTrigger, ignoreStale bool) (coop.CommandResponse, error) {
+	return s.evaluateAndApplyObservation(ctx, sessionID, frozen, nodeNumber, attemptNumber, trigger, "", "", ignoreStale)
 }
 
-func (s *Service) evaluateAndApplyObservation(ctx context.Context, frozen *coop.Session, nodeNumber, attemptNumber int, trigger EvaluationTrigger, eventType, resourceID string, ignoreStale bool) (coop.CommandResponse, error) {
-	basis, err := evaluationBasisFor(frozen, nodeNumber, attemptNumber)
+func (s *Service) evaluateAndApplyObservation(ctx context.Context, sessionID string, frozen *coop.Session, nodeNumber, attemptNumber int, trigger EvaluationTrigger, eventType, resourceID string, ignoreStale bool) (coop.CommandResponse, error) {
+	_ = frozen
+	started := evaluationBegin{}
+	session, err := s.store.Update(sessionID, func(session *coop.Session) error {
+		if err := requireActiveSession(session); err != nil {
+			return err
+		}
+		node, err := session.NodeByNumber(nodeNumber)
+		if err != nil {
+			return err
+		}
+		attempt, err := node.AttemptByNumber(attemptNumber)
+		if err != nil || node.CurrentAttempt() != attempt {
+			if ignoreStale {
+				started.stale = true
+				return nil
+			}
+			return fmt.Errorf("%w: node %d attempt %d", coop.ErrAttemptNotCurrent, nodeNumber, attemptNumber)
+		}
+		started.snapshotAt, err = node.BeginAutomaticCheck(attemptNumber, s.nextEvaluationTime())
+		if err != nil {
+			return err
+		}
+		started.basis = captureEvaluationBasis(attempt)
+		return nil
+	})
 	if err != nil {
 		return coop.CommandResponse{}, err
 	}
-	// The watermark represents when the read began. A slower, older read must
-	// never replace a newer read merely because it completed later.
-	snapshotAt := s.nextEvaluationTime()
+	if started.stale {
+		node, nodeErr := session.NodeByNumber(nodeNumber)
+		if nodeErr != nil {
+			return coop.CommandResponse{}, nodeErr
+		}
+		if node.CurrentAttempt() != nil {
+			return responseForChangedAttempt(session, nodeNumber), nil
+		}
+		return alreadyMovedResponse(session, nodeNumber, node.State), nil
+	}
 	evaluation, evalErr := s.evaluator.Evaluate(ctx, EvaluationInput{
-		Session: frozen, NodeNumber: nodeNumber, Attempt: attemptNumber, Trigger: trigger,
+		Session: session, NodeNumber: nodeNumber, Attempt: attemptNumber, Trigger: trigger,
 		EventType: eventType, ResourceID: resourceID,
 	})
 	if evalErr != nil {
@@ -270,17 +331,17 @@ func (s *Service) evaluateAndApplyObservation(ctx context.Context, frozen *coop.
 		}}
 	}
 	applied := evaluationApply{responseAttempt: attemptNumber}
-	session, err := s.store.Update(frozen.ID, func(session *coop.Session) error {
-		return s.applyEvaluation(session, nodeNumber, attemptNumber, basis, snapshotAt, evaluation, ignoreStale, &applied)
+	session, err = s.store.Update(sessionID, func(session *coop.Session) error {
+		return s.applyEvaluation(session, nodeNumber, attemptNumber, started.basis, started.snapshotAt, evaluation, ignoreStale, &applied)
 	})
 	if err != nil {
-		return errorResponse(err, fmt.Sprintf("stripe coop agent start-work --session=%s --step=%d", frozen.ID, nodeNumber)), nil
+		return errorResponse(err, fmt.Sprintf("stripe coop agent start-work --session=%s --node=%d", sessionID, nodeNumber)), nil
 	}
 	if applied.basisChanged {
 		return evaluationBasisChangedResponse(session, nodeNumber, attemptNumber), nil
 	}
 	if applied.stale {
-		latest, readErr := s.store.Read(frozen.ID)
+		latest, readErr := s.store.Read(sessionID)
 		if readErr != nil {
 			return coop.CommandResponse{}, readErr
 		}
@@ -296,6 +357,12 @@ func (s *Service) evaluateAndApplyObservation(ctx context.Context, frozen *coop.
 	return s.evaluationResponse(session, nodeNumber, applied.responseAttempt, applied.policy, applied.results), nil
 }
 
+type evaluationBegin struct {
+	basis      evaluationBasis
+	snapshotAt time.Time
+	stale      bool
+}
+
 type evaluationApply struct {
 	policy          resultPolicy
 	responseAttempt int
@@ -309,18 +376,6 @@ type evaluationBasis struct {
 	openedAt    *time.Time
 	resources   []coop.ResourceBinding
 	agentChecks []coop.Verification
-}
-
-func evaluationBasisFor(session *coop.Session, nodeNumber, attemptNumber int) (evaluationBasis, error) {
-	node, err := session.NodeByNumber(nodeNumber)
-	if err != nil {
-		return evaluationBasis{}, err
-	}
-	attempt, err := node.AttemptByNumber(attemptNumber)
-	if err != nil {
-		return evaluationBasis{}, err
-	}
-	return captureEvaluationBasis(attempt), nil
 }
 
 func captureEvaluationBasis(attempt *coop.NodeAttempt) evaluationBasis {
@@ -394,10 +449,16 @@ func (s *Service) applyEvaluation(session *coop.Session, nodeNumber, attemptNumb
 		return err
 	}
 	if !merged {
-		// Bindings and results are one evaluator snapshot. If the results are
-		// stale, none of the snapshot may alter the attempt.
+		// Stale findings never land. mergeEvaluation may retain only a
+		// one-shot, explicitly untrusted event candidate for a role that was
+		// still unbound; current results continue to decide policy until a
+		// fresh read evaluates that candidate.
 		applied.results = append([]coop.CheckResult(nil), attempt.Results...)
 		applied.policy = decideResults(attempt.Results, attempt.AgentChecks, isHumanReviewNode(node))
+		if attempt.AutomaticCheckPending() {
+			applied.policy.decision = decisionPending
+			return nil
+		}
 		normalizeEvaluationPolicy(session, node, nodeNumber, attempt, &applied.policy)
 		return nil
 	}
@@ -409,6 +470,10 @@ func (s *Service) applyEvaluation(session *coop.Session, nodeNumber, attemptNumb
 		return nil
 	}
 	applied.policy = decideResults(attempt.Results, attempt.AgentChecks, isHumanReviewNode(node))
+	if attempt.AutomaticCheckPending() {
+		applied.policy.decision = decisionPending
+		return nil
+	}
 	normalizeEvaluationPolicy(session, node, nodeNumber, attempt, &applied.policy)
 	return s.applyEvaluationPolicy(session, node, nodeNumber, attemptNumber, applied)
 }
@@ -426,7 +491,7 @@ func evaluationBasisChangedResponse(session *coop.Session, nodeNumber, attemptNu
 		OK: true, SessionID: session.ID, Node: nodeNumber, Attempt: attemptNumber,
 		State: string(node.State), Decision: string(decisionPending),
 		Message:      "Verification inputs changed while Co-op was checking. Re-run verification against the latest attempt state.",
-		Next:         fmt.Sprintf("stripe coop agent await-review --session=%s --step=%d --attempt=%d", session.ID, nodeNumber, attemptNumber),
+		Next:         fmt.Sprintf("stripe coop agent await-review --session=%s --node=%d --attempt=%d", session.ID, nodeNumber, attemptNumber),
 		Verification: append([]coop.CheckResult(nil), attempt.Results...),
 	}
 }
@@ -491,6 +556,13 @@ func normalizeEvaluationPolicy(session *coop.Session, node *coop.SessionNode, no
 func (s *Service) mergeEvaluation(node *coop.SessionNode, attemptNumber int, snapshotAt time.Time, evaluation Evaluation) (bool, error) {
 	if err := node.ReconcileAutomaticResults(attemptNumber, snapshotAt, evaluation.Results); err != nil {
 		if errors.Is(err, coop.ErrStaleResultSnapshot) {
+			// Findings from an older read must not land, but an event-carried
+			// candidate may be one-shot evidence that polling cannot rediscover.
+			// Preserve only an untrusted candidate for a role that remains
+			// entirely unbound; a fresh evaluation will validate or reject it.
+			if err := salvageObservedCandidates(node, attemptNumber, evaluation.Bindings); err != nil {
+				return false, err
+			}
 			return false, nil
 		}
 		return false, err
@@ -503,10 +575,31 @@ func (s *Service) mergeEvaluation(node *coop.SessionNode, attemptNumber int, sna
 	return true, nil
 }
 
+func salvageObservedCandidates(node *coop.SessionNode, attemptNumber int, bindings []coop.ResourceBinding) error {
+	attempt, err := node.AttemptByNumber(attemptNumber)
+	if err != nil || node.CurrentAttempt() != attempt {
+		return fmt.Errorf("%w: attempt %d", coop.ErrAttemptNotCurrent, attemptNumber)
+	}
+	boundRoles := make(map[string]bool, len(attempt.Resources))
+	for _, binding := range attempt.Resources {
+		boundRoles[binding.Role] = true
+	}
+	for _, binding := range bindings {
+		if binding.Source != coop.BindingObservedCandidate || boundRoles[binding.Role] {
+			continue
+		}
+		if err := node.UpsertResource(attemptNumber, binding); err != nil {
+			return err
+		}
+		boundRoles[binding.Role] = true
+	}
+	return nil
+}
+
 func (s *Service) applyEvaluationPolicy(session *coop.Session, node *coop.SessionNode, nodeNumber, attemptNumber int, applied *evaluationApply) error {
 	switch applied.policy.decision {
 	case decisionNeedsAgent:
-		feedback := resultFeedback(applied.policy.failed)
+		feedback := boundedResultFeedback(applied.policy.failed)
 		if err := node.CloseAttempt(attemptNumber, s.now(), coop.AttemptVerificationChanges); err != nil {
 			return err
 		}
@@ -557,11 +650,11 @@ func (s *Service) evaluationResponse(session *coop.Session, nodeNumber, attemptN
 	case decisionNeedsAgent:
 		response.State = string(coop.NodeActive)
 		response.Message = "Verification found work that needs correction.\n" + resultFeedback(policy.failed)
-		response.Next = fmt.Sprintf("stripe coop agent start-work --session=%s --step=%d --note=%s", session.ID, nodeNumber, quoteArg("Fixing automatic verification findings"))
+		response.Next = fmt.Sprintf("stripe coop agent start-work --session=%s --node=%d --note=%s", session.ID, nodeNumber, quoteArg("Fixing automatic verification findings"))
 	case decisionPending:
 		response.State = string(node.State)
 		response.Message = "Implementation recorded. Exercise the required Stripe flow while Co-op waits for the resulting state."
-		response.Next = fmt.Sprintf("stripe coop agent await-review --session=%s --step=%d --attempt=%d", session.ID, nodeNumber, attemptNumber)
+		response.Next = fmt.Sprintf("stripe coop agent await-review --session=%s --node=%d --attempt=%d", session.ID, nodeNumber, attemptNumber)
 	case decisionNeedsHuman:
 		response.State = string(coop.NodeReview)
 		if _, stepIndex, _, err := session.StepByNodeNumber(nodeNumber); err == nil && !session.StepReadyForReview(stepIndex) {
@@ -573,7 +666,7 @@ func (s *Service) evaluationResponse(session *coop.Session, nodeNumber, attemptN
 		if len(policy.pending) > 0 {
 			response.Message += " State checks will continue while the developer exercises the app."
 		}
-		response.Next = fmt.Sprintf("stripe coop agent await-review --session=%s --step=%d --attempt=%d", session.ID, nodeNumber, attemptNumber)
+		response.Next = fmt.Sprintf("stripe coop agent await-review --session=%s --node=%d --attempt=%d", session.ID, nodeNumber, attemptNumber)
 	case decisionConfirmed:
 		response.State = "confirmed"
 		response.Message = fmt.Sprintf("Co-op confirmed node %d. Continue.", nodeNumber)

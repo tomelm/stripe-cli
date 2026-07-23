@@ -51,7 +51,6 @@
           "predicates": [
             {"op": "equals_binding", "field": "data.0.price", "input": "line_items.0.price"}
           ],
-          "correlates_attempt": true,
           "repair": "Use the Price returned by the referenced step for the Checkout line item."
         },
         {
@@ -62,16 +61,9 @@
           "when_input": "subscription_data.trial_period_days",
           "eventual": true,
           "predicates": [
-            {
-              "op": "difference_equals_input",
-              "field": "trial_end",
-              "base_field": "trial_start",
-              "input": "subscription_data.trial_period_days",
-              "multiplier": 86400
-            },
             {"op": "equals_binding", "field": "items.data.0.price", "input": "line_items.0.price"}
           ],
-          "repair": "Create and complete a new Checkout Session whose trial duration and subscription Price match the blueprint."
+          "repair": "Create and complete a new Checkout Session whose subscription Price matches the blueprint."
         }
       ]
     },

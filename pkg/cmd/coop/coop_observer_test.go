@@ -11,7 +11,6 @@ import (
 
 	"github.com/stripe/stripe-cli/pkg/coop"
 	"github.com/stripe/stripe-cli/pkg/coop/checkrun"
-	"github.com/stripe/stripe-cli/pkg/coop/checks"
 	"github.com/stripe/stripe-cli/pkg/coop/workflow"
 	"github.com/stripe/stripe-cli/pkg/logtailing"
 	"github.com/stripe/stripe-cli/pkg/proxy"
@@ -242,38 +241,7 @@ func TestObserverProposesUniqueEventBindingDuringOpenAppReview(t *testing.T) {
 	}, call)
 }
 
-func TestObserverCompilesUIProjectionsOnceOutsideRequestHotPath(t *testing.T) {
-	store := writeObserverSession(t, []coop.SessionNode{observerRequestNode("/v1/customers", 1)})
-	stream := make(chan websocket.IElement, 2)
-	started := make(chan struct{}, 1)
-	compiled := make(chan struct{}, 2)
-	service := newRecordingObserverWorkflow()
-	controller := testObserverController(store, service, func(context.Context, observerStreamConfig) ([]<-chan websocket.IElement, error) {
-		started <- struct{}{}
-		return []<-chan websocket.IElement{stream}, nil
-	}, true, 0)
-	controller.compileProjections = func(*coop.Session) ([]checks.UIEventProjection, error) {
-		compiled <- struct{}{}
-		return nil, nil
-	}
-	controller.Start("observer_session")
-	defer controller.Close()
-
-	receive(t, compiled)
-	receive(t, started)
-	for index := 0; index < 2; index++ {
-		stream <- websocket.DataElement{Data: logtailing.EventPayload{
-			Method: "POST", URL: "/v1/customers", Status: 200,
-		}}
-		assert.Equal(t, workflow.TriggerRequest, receive(t, service.calls).trigger)
-		receive(t, service.evidence)
-	}
-	assertNoValue(t, compiled)
-}
-
-func TestObserverRoutesCompiledCheckoutProjectionToOpenSubscriptionUI(t *testing.T) {
-	catalog, err := checks.LoadCatalog()
-	require.NoError(t, err)
+func TestObserverRoutesDeclaredCheckoutEventToOpenSubscriptionUI(t *testing.T) {
 	blueprint, err := coop.LoadBlueprint("subscription-with-trial")
 	require.NoError(t, err)
 	session := coop.NewSessionFromBlueprint(blueprint, "observer-subscription", nil, nil)
@@ -295,9 +263,6 @@ func TestObserverRoutesCompiledCheckoutProjectionToOpenSubscriptionUI(t *testing
 	controller := testObserverController(store, service, func(context.Context, observerStreamConfig) ([]<-chan websocket.IElement, error) {
 		return []<-chan websocket.IElement{stream}, nil
 	}, true, 0)
-	controller.compileProjections = func(current *coop.Session) ([]checks.UIEventProjection, error) {
-		return checks.CompileUIEventProjections(catalog, current)
-	}
 	controller.Start(session.ID)
 	defer controller.Close()
 
@@ -327,75 +292,6 @@ func TestObserverRoutesCompiledCheckoutProjectionToOpenSubscriptionUI(t *testing
 			}
 		}
 	}
-}
-
-func TestObserverProjectionFailureIsReportedOnceAndFailsClosed(t *testing.T) {
-	opened := time.Now().UTC()
-	reported := opened.Add(-time.Second)
-	store, err := coop.NewStoreAt(t.TempDir())
-	require.NoError(t, err)
-	require.NoError(t, store.Write(&coop.Session{
-		ID: "observer_session", StripeAccountID: "acct_123", Status: coop.SessionActive,
-		Steps: []coop.SessionStep{
-			{
-				StepDefinition: coop.StepDefinition{Key: "checkout"},
-				Nodes: []coop.SessionNode{
-					observerRequestNode("/v1/checkout/sessions", 1),
-					{
-						NodeDefinition: coop.NodeDefinition{Key: "checkout-ui", Type: coop.NodeUIComponent},
-						State:          coop.NodeReview,
-						Attempts: []coop.NodeAttempt{{
-							Number: 2, ReportedAt: &reported,
-							AppSurface: &coop.AppSurface{URL: "http://localhost:3000/checkout", OpenedAt: &opened},
-						}},
-					},
-				},
-			},
-			{
-				StepDefinition: coop.StepDefinition{Key: "webhook"},
-				Nodes: []coop.SessionNode{{NodeDefinition: coop.NodeDefinition{
-					Key: "checkout-completed", Type: coop.NodeAsyncHandler,
-					Events: []string{"checkout.session.completed"},
-				}}},
-			},
-		},
-	}))
-
-	stream := make(chan websocket.IElement, 2)
-	started := make(chan struct{}, 1)
-	compileCalls := make(chan struct{}, 2)
-	reportedErrors := make(chan error, 2)
-	service := newRecordingObserverWorkflow()
-	controller := testObserverController(store, service, func(context.Context, observerStreamConfig) ([]<-chan websocket.IElement, error) {
-		started <- struct{}{}
-		return []<-chan websocket.IElement{stream}, nil
-	}, true, 0)
-	projectionErr := errors.New("invalid immutable projection")
-	controller.compileProjections = func(*coop.Session) ([]checks.UIEventProjection, error) {
-		compileCalls <- struct{}{}
-		return nil, projectionErr
-	}
-	controller.reportProjectionError = func(err error) { reportedErrors <- err }
-	controller.Start("observer_session")
-	defer controller.Close()
-
-	receive(t, compileCalls)
-	assert.ErrorIs(t, receive(t, reportedErrors), projectionErr)
-	receive(t, started)
-	stream <- websocket.DataElement{Data: proxy.StripeEvent{
-		ID: "evt_unattributed", Type: "checkout.session.completed",
-		Data: map[string]interface{}{"object": map[string]interface{}{"object": "checkout.session", "id": "cs_unattributed"}},
-	}}
-	assertNoValue(t, service.calls)
-	assertNoValue(t, service.evidence)
-
-	stream <- websocket.DataElement{Data: logtailing.EventPayload{
-		Method: "POST", URL: "/v1/checkout/sessions", Status: 200,
-	}}
-	assert.Equal(t, workflow.TriggerRequest, receive(t, service.calls).trigger)
-	receive(t, service.evidence)
-	assertNoValue(t, compileCalls)
-	assertNoValue(t, reportedErrors)
 }
 
 func TestObserverPollsWithoutCredentialsAndStandbyTakesOverLease(t *testing.T) {
@@ -433,7 +329,7 @@ func TestObserverPollsWithoutCredentialsAndStandbyTakesOverLease(t *testing.T) {
 	second.Close()
 }
 
-func TestObserverHeartbeatSuppressesDuplicateFallbackPolling(t *testing.T) {
+func TestObserverDoesNotPollSettledUnavailableResult(t *testing.T) {
 	store := writeObserverSession(t, []coop.SessionNode{observerRequestNode("/v1/customers", 1)})
 	reported := time.Now().UTC()
 	_, err := store.Update("observer_session", func(session *coop.Session) error {
@@ -456,8 +352,7 @@ func TestObserverHeartbeatSuppressesDuplicateFallbackPolling(t *testing.T) {
 
 	assertNoValue(t, service.calls)
 	require.NoError(t, store.RemoveHeartbeat("observer_session"))
-	call := receive(t, service.calls)
-	assert.Equal(t, workflow.TriggerPoll, call.trigger)
+	assertNoValue(t, service.calls)
 }
 
 func TestAttemptNeedsPollingAfterAppOpen(t *testing.T) {
@@ -511,11 +406,47 @@ func TestAttemptNeedsPollingAfterAppOpen(t *testing.T) {
 			},
 			want: false,
 		},
+		{
+			name: "required pending state remains open",
+			attempt: &coop.NodeAttempt{Results: []coop.CheckResult{{
+				ID: "state.pending", Importance: coop.CheckRequired, Status: coop.CheckPending,
+			}}},
+			want: true,
+		},
+		{
+			name: "required unavailable result is settled",
+			attempt: &coop.NodeAttempt{Results: []coop.CheckResult{{
+				ID: "state.unavailable", Importance: coop.CheckRequired, Status: coop.CheckUnavailable,
+			}}},
+			want: false,
+		},
+		{
+			name: "event newer than the direct snapshot is retried",
+			attempt: &coop.NodeAttempt{
+				AutomaticResultsAt: &atOpen,
+				Results: []coop.CheckResult{{
+					ID: "passive.event", Kind: coop.CheckEvent, Importance: coop.CheckAdvisory,
+					Status: coop.CheckObserved, UpdatedAt: afterOpen,
+				}},
+			},
+			want: true,
+		},
+		{
+			name: "account-wide request evidence does not starve review",
+			attempt: &coop.NodeAttempt{
+				AutomaticResultsAt: &atOpen,
+				Results: []coop.CheckResult{{
+					ID: "passive.request", Kind: coop.CheckRequest, Importance: coop.CheckAdvisory,
+					Status: coop.CheckObserved, UpdatedAt: afterOpen,
+				}},
+			},
+			want: false,
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			assert.Equal(t, test.want, attemptNeedsPolling(test.attempt))
+			assert.Equal(t, test.want, workflow.AttemptNeedsReevaluation(test.attempt))
 		})
 	}
 }

@@ -185,7 +185,7 @@ func (e *coopEvaluator) plan(session *coop.Session, nodeNumber int) (checks.Step
 	if e == nil || session == nil {
 		return checks.StepPlan{}, nil, fmt.Errorf("verification session is required")
 	}
-	step, stepIndex, _, err := session.StepByNodeNumber(nodeNumber)
+	step, _, _, err := session.StepByNodeNumber(nodeNumber)
 	if err != nil {
 		return checks.StepPlan{}, nil, err
 	}
@@ -193,12 +193,7 @@ func (e *coopEvaluator) plan(session *coop.Session, nodeNumber int) (checks.Step
 	if err != nil {
 		return checks.StepPlan{}, nil, err
 	}
-	var plan checks.StepPlan
-	if node.Type == coop.NodeUIComponent {
-		plan, err = checks.CompileUIReviewStep(e.catalog, session, stepIndex, node.Key)
-	} else {
-		plan, err = checks.CompileStep(e.catalog, *step)
-	}
+	plan, err := checks.CompileStep(e.catalog, *step)
 	return plan, node, err
 }
 

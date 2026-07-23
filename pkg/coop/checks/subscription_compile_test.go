@@ -1,6 +1,7 @@
 package checks
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -35,28 +36,31 @@ func TestCompileSubscriptionWithTrialRelationships(t *testing.T) {
 	checkoutSession := compiledResource(t, checkout, "checkout_session")
 	require.Len(t, checkoutSession.Evidence, 2)
 	lineItems := compiledEvidence(t, checkoutSession, "line_items")
-	assert.True(t, lineItems.CorrelatesAttempt)
 	price := findPredicate(t, lineItems.Predicates, PredicateEqualsBinding, "data.0.price")
 	require.NotNil(t, price.Binding)
 	assert.Equal(t, BindingRef{Step: "setup-chapter", Node: "create-product", Field: "default_price"}, *price.Binding)
 
 	subscription := compiledEvidence(t, checkoutSession, "subscription")
 	assert.True(t, subscription.Eventual)
-	trial := findPredicate(t, subscription.Predicates, PredicateDifferenceEqualsInput, "trial_end")
-	assert.Equal(t, "trial_start", trial.BaseField)
-	assert.EqualValues(t, 86400, trial.Multiplier)
 	subscriptionPrice := findPredicate(t, subscription.Predicates, PredicateEqualsBinding, "items.data.0.price")
 	require.NotNil(t, subscriptionPrice.Binding)
 	assert.Equal(t, *price.Binding, *subscriptionPrice.Binding)
-	assert.Empty(t, checkout.States, "derived subscription evidence must not become a pre-UI state check")
+	checkoutState := compiledState(t, checkout, "checkout.session.completed")
+	assert.Equal(t, Source{Step: "checkout-chapter", Node: "complete-checkout"}, checkoutState.Source,
+		"the app surface must declare the event it exercises explicitly")
+	var trialGap bool
 	for _, gap := range checkout.CoverageGaps {
 		assert.NotContains(t, gap.Reason, "line_items.0.price", "the cataloged relationship must not remain a coverage gap")
+		if strings.Contains(gap.Reason, "subscription_data.trial_period_days") {
+			trialGap = true
+		}
 	}
+	assert.True(t, trialGap, "unsupported trial-duration comparison must remain an explicit coverage gap")
 
 	webhook, err := CompileStep(catalog, session.Steps[3])
 	require.NoError(t, err)
 	subscriptionState := compiledState(t, webhook, "customer.subscription.created")
-	assertNoPredicate(t, subscriptionState.Predicates, PredicateDifferenceEqualsInput, "subscription_data.trial_period_days")
+	assert.NotEmpty(t, subscriptionState.Predicates)
 }
 
 func TestCompileOneTimePaymentOmitsTrialSubscriptionEvidence(t *testing.T) {

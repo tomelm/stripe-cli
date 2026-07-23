@@ -308,7 +308,7 @@ func TestRenderSummaryDetailDoesNotRepeatLabels(t *testing.T) {
 	assert.NotContains(t, ansi.Strip(detail), "Summary")
 	assertNotContainsPlain(t, detail, "Files  Checks  Reference")
 	assertContainsPlain(t, detail, "Confirm the saved price ID is reused")
-	assertContainsPlain(t, detail, "Confirmation steps")
+	assertContainsPlain(t, detail, "What to try")
 	assertNotContainsPlain(t, detail, "POST /v1/products")
 	assertNotContainsPlain(t, detail, "You check")
 }
@@ -337,7 +337,7 @@ func TestRenderStepDetailUsesStepOverview(t *testing.T) {
 
 	assertContainsPlain(t, detail, "✓ Create product")
 	assertContainsPlain(t, detail, "● Create checkout")
-	assertContainsPlain(t, detail, "Confirmation steps")
+	assertContainsPlain(t, detail, "What to try")
 	assertContainsPlain(t, detail, "Agent help")
 	assertNotContainsPlain(t, detail, "SDK example")
 }
@@ -350,10 +350,9 @@ func TestRenderDetailWebhook(t *testing.T) {
 	detail := m.renderDetail()
 
 	assertContainsPlain(t, detail, "Checks")
-	assertContainsPlain(t, detail, "Review command")
 	assertContainsPlain(t, detail, "How to verify")
-	assertContainsPlain(t, detail, "stripe listen")
-	assertContainsPlain(t, detail, "stripe trigger checkout.session.completed")
+	assertContainsPlain(t, detail, "checkout.session.completed")
+	assertNotContainsPlain(t, detail, "stripe trigger")
 }
 
 func TestRenderDetailWithSDKSnippet(t *testing.T) {
@@ -377,7 +376,7 @@ func TestRenderDetailFitsPaneWithIndent(t *testing.T) {
 	m.detailTab = 1
 	m.session.Steps[0].Nodes[0].State = coop.NodeReview
 	m.session.Steps[0].Nodes[1].State = coop.NodeDone
-	testPresentationAttempt(&m.session.Steps[0].Nodes[0]).Implementation.Snippet = strings.Repeat("const createdCheckoutSessionWithLongIdentifier = await stripe.checkout.sessions.create({ mode: 'payment' })\n", 5)
+	testPresentationAttempt(&m.session.Steps[0].Nodes[0]).Implementation.Note = strings.Repeat("Created and verified the Checkout Session endpoint. ", 5)
 
 	detail := m.renderDetail()
 
@@ -432,7 +431,7 @@ func TestRenderFooterReviewStep(t *testing.T) {
 	assertContainsPlain(t, footer, "changes")
 	assertContainsPlain(t, footer, "Review")
 	assertContainsPlain(t, footer, "Agent changed")
-	assertContainsPlain(t, footer, "Confirmation steps")
+	assertContainsPlain(t, footer, "What to try")
 }
 
 func TestRenderReviewCardEvidence(t *testing.T) {
@@ -454,12 +453,12 @@ func TestRenderReviewCardEvidence(t *testing.T) {
 	assertContainsPlain(t, card, "server.js:5-20")
 	assertContainsPlain(t, card, "Agent reported:")
 	assertContainsPlain(t, card, "1/2 check(s) passed")
-	assertContainsPlain(t, card, "Confirmation steps")
-	assertContainsPlain(t, card, "Visit http://localhost:3000/checkout")
-	assertNotContainsPlain(t, card, "Confirm Checkout uses the saved price ID.")
+	assertContainsPlain(t, card, "What to try")
+	assertContainsPlain(t, card, "Confirm Checkout uses the saved price ID.")
+	assertNotContainsPlain(t, card, "Visit http://localhost:3000/checkout")
 	assertNotContainsPlain(t, card, "declined cards")
 	plain := ansi.Strip(card)
-	assert.Less(t, strings.Index(plain, "Confirmation steps"), strings.Index(plain, "Agent changed:"))
+	assert.Less(t, strings.Index(plain, "What to try"), strings.Index(plain, "Agent changed:"))
 }
 
 func TestCorrectedReviewShowsWhatTheAgentAddressed(t *testing.T) {
@@ -485,12 +484,19 @@ func TestCorrectedReviewShowsWhatTheAgentAddressed(t *testing.T) {
 			}
 			m.selectionCursor = 0
 
-			assertContainsPlain(t, m.renderReviewCard(), "Correction addressed: "+tt.feedback)
-			assertContainsPlain(t, m.renderNodeLine(*node, 0, true, false), "Correction addressed: "+tt.feedback)
+			expected := "Agent resubmitted after feedback: " + tt.feedback
+			for _, rendered := range []string{m.renderReviewCard(), m.renderNodeLine(*node, 0, true, false)} {
+				plain := strings.Join(strings.Fields(ansi.Strip(rendered)), " ")
+				assert.Contains(t, plain, "Agent resubmitted after feedback:")
+				assert.Contains(t, plain, strings.Fields(tt.feedback)[0])
+				assert.Contains(t, plain, strings.Fields(tt.feedback)[len(strings.Fields(tt.feedback))-1])
+			}
 
 			m.expanded = true
 			m.detailTab = 0
-			assertContainsPlain(t, m.renderDetail(), "Correction addressed: "+tt.feedback)
+			plain := strings.Join(strings.Fields(ansi.Strip(m.renderDetail())), " ")
+			assert.Contains(t, plain, "Agent resubmitted after feedback:")
+			assert.Contains(t, plain, strings.Fields(expected)[len(strings.Fields(expected))-1])
 		})
 	}
 }
@@ -531,8 +537,26 @@ func TestRenderReviewCardFallsBackToBlueprintConfirmation(t *testing.T) {
 
 	card := m.renderReviewCard()
 
-	assertContainsPlain(t, card, "Confirmation steps")
+	assertContainsPlain(t, card, "What to try")
 	assertContainsPlain(t, card, "Confirm Checkout uses the saved price ID.")
+}
+
+func TestRenderReviewCardDerivesHumanPromptFromDescription(t *testing.T) {
+	m := testModel()
+	node := &m.session.Steps[0].Nodes[0]
+	node.Type = coop.NodeUIComponent
+	node.State = coop.NodeReview
+	node.ReviewPrompt = ""
+	node.Description = "Let a signed-in customer start Checkout from the pricing page."
+	m.session.Steps[0].Nodes[1].State = coop.NodeDone
+	m.selectionCursor = 0
+
+	card := m.renderReviewCard()
+
+	assertContainsPlain(t, card, "What to try")
+	assertContainsPlain(t, card, "Open the submitted app surface")
+	assertContainsPlain(t, card, "Create product")
+	assertContainsPlain(t, card, "signed-in customer")
 }
 
 func TestRenderStepReviewCardNamesCoveredSteps(t *testing.T) {
@@ -564,12 +588,23 @@ func TestRenderReviewCardFallbackCheck(t *testing.T) {
 func TestRenderFooterReviewCommand(t *testing.T) {
 	m := testModel()
 	m.session.Steps[1].Nodes[0].State = coop.NodeReview
+	m.session.Steps[1].Nodes[0].ReviewCommand = "stripe trigger checkout.session.completed"
 	m.selectionCursor = 2
 	footer := m.renderFooter()
 
 	assertContainsPlain(t, footer, "Run:")
 	assertContainsPlain(t, footer, "stripe trigger checkout.session.completed")
 	assertContainsPlain(t, footer, "y copy")
+}
+
+func TestReviewCommandRequiresExplicitBlueprintMetadata(t *testing.T) {
+	node := &coop.SessionNode{NodeDefinition: coop.NodeDefinition{
+		Type: coop.NodeAsyncHandler, Events: []string{"v2.billing.meter.error_report_triggered"},
+	}}
+
+	assert.Empty(t, reviewCommandForNode(node))
+	node.ReviewCommand = "stripe trigger explicitly-supported-event"
+	assert.Equal(t, "stripe trigger explicitly-supported-event", reviewCommandForNode(node))
 }
 
 func TestRenderFooterReviewNotice(t *testing.T) {
@@ -585,17 +620,21 @@ func TestRenderFooterReviewNotice(t *testing.T) {
 func TestRenderCompletionView(t *testing.T) {
 	m := withCompletionSuggestions(testModel())
 	m.session.Steps[0].Nodes[0].State = coop.NodeDone
+	m.session.Steps[0].Nodes[0].Type = coop.NodeDashboard
 	m.session.Steps[0].Nodes[1].State = coop.NodeDone
 	m.session.Steps[1].Nodes[0].State = coop.NodeDone
 
 	view := m.renderCompletionView()
 
-	assertContainsPlain(t, view, "Integration complete")
+	assertContainsPlain(t, view, "Blueprint workflow finished")
 	assertContainsPlain(t, view, "Built")
 	assertContainsPlain(t, view, "Set up product")
 	assertContainsPlain(t, view, "Handle webhooks")
-	assertContainsPlain(t, view, "Important checks")
+	assertContainsPlain(t, view, "Verification report")
+	assertContainsPlain(t, view, "What you reviewed")
 	assertContainsPlain(t, view, "Confirm the saved price ID is reused by Checkout.")
+	assertContainsPlain(t, view, "not production")
+	assertContainsPlain(t, view, "readiness")
 	assertContainsPlain(t, view, "Next steps")
 	assertContainsPlain(t, view, "STRIPE.md")
 	assertContainsPlain(t, view, "Add another Stripe feature")
@@ -614,8 +653,32 @@ func TestCompletionAndOutlineDiscloseUnverifiedWork(t *testing.T) {
 	node := &m.session.Steps[0].Nodes[0]
 	node.Attempts[0].EndReason = coop.AttemptCompletedUnverified
 
-	assertContainsPlain(t, m.renderCompletionView(), "1 completed from agent reports without direct automatic checks")
+	assertContainsPlain(t, m.renderCompletionView(), "Agent reported; no direct automatic check")
 	assertContainsPlain(t, m.renderNodeLine(*node, 0, false, false), "Complete · agent reported")
+}
+
+func TestCompletionVerificationReportDisclosesCoverageGapAndOverride(t *testing.T) {
+	m := withCompletionSuggestions(testModel())
+	for stepIndex := range m.session.Steps {
+		for nodeIndex := range m.session.Steps[stepIndex].Nodes {
+			node := &m.session.Steps[stepIndex].Nodes[nodeIndex]
+			node.State = coop.NodeDone
+			node.Attempts = []coop.NodeAttempt{{Number: 1, EndReason: coop.AttemptConfirmed}}
+		}
+	}
+	node := &m.session.Steps[0].Nodes[0]
+	node.Type = coop.NodeDashboard
+	node.Attempts[0].Results = []coop.CheckResult{
+		{ID: "resource.exists", Kind: coop.CheckResource, Importance: coop.CheckRequired, Status: coop.CheckPassed},
+		{ID: "coverage.path", Kind: coop.CheckCoverage, Importance: coop.CheckAdvisory, Status: coop.CheckUnavailable},
+	}
+	node.Attempts[0].Override = &coop.VerificationOverride{At: time.Now().UTC(), Reason: "Reviewed manually"}
+
+	report := m.renderCompletionBody()
+	plain := strings.Join(strings.Fields(ansi.Strip(report)), " ")
+
+	assert.Contains(t, plain, "Create product — Co-op checked · You reviewed · Coverage gap · Human override recorded")
+	assert.Contains(t, plain, "application persistence, access control, and webhook")
 }
 
 func TestAsyncHandlerCompletionDisclosesStateWithoutClaimingProcessing(t *testing.T) {
@@ -645,8 +708,8 @@ func TestAsyncHandlerCompletionDisclosesStateWithoutClaimingProcessing(t *testin
 
 	completion := m.renderCompletionView()
 	plainCompletion := strings.Join(strings.Fields(strings.ReplaceAll(ansi.Strip(completion), "│", " ")), " ")
-	assert.Contains(t, plainCompletion, "1 webhook step: "+coop.AsyncHandlerStateVerifiedSummary)
-	assertNotContainsPlain(t, completion, "completed from agent reports without direct automatic checks")
+	assert.Contains(t, plainCompletion, "Handle event — Co-op checked · "+coop.AsyncHandlerStateVerifiedSummary)
+	assertNotContainsPlain(t, completion, "Agent reported; no direct automatic check")
 }
 
 func TestOutlineAndDetailDiscloseHumanVerificationOverride(t *testing.T) {
@@ -689,8 +752,8 @@ func TestCompletionSummaryBoxUsesSinglePaddingSpace(t *testing.T) {
 	m := completionLayoutModel()
 	body := m.renderCompletionBody()
 
-	assertContainsPlain(t, body, "│ ✓ Integration complete")
-	assertNotContainsPlain(t, body, "│  ✓ Integration complete")
+	assertContainsPlain(t, body, "│ ✓ Blueprint workflow finished")
+	assertNotContainsPlain(t, body, "│  ✓ Blueprint workflow finished")
 }
 
 func TestCompletionBuiltItemsFiltersContextSkippedAndIncomplete(t *testing.T) {
@@ -727,22 +790,29 @@ func TestCompletionImportantChecksDedupesDoneOnlyAndCaps(t *testing.T) {
 		{
 			StepDefinition: coop.StepDefinition{Key: "checks", Title: "Checks"},
 			Nodes: []coop.SessionNode{
-				{NodeDefinition: coop.NodeDefinition{Title: "First", ReviewPrompt: "Check one"}, State: coop.NodeDone},
-				{NodeDefinition: coop.NodeDefinition{Title: "Duplicate", ReviewPrompt: "Check one"}, State: coop.NodeDone},
+				{NodeDefinition: coop.NodeDefinition{Title: "First", Type: coop.NodeDashboard, ReviewPrompt: "Check one"}, State: coop.NodeDone},
+				{NodeDefinition: coop.NodeDefinition{Title: "Duplicate", Type: coop.NodeDashboard, ReviewPrompt: "Check one"}, State: coop.NodeDone},
 				{NodeDefinition: coop.NodeDefinition{Title: "Active", ReviewPrompt: "Do not include active"}, State: coop.NodeActive},
-				{NodeDefinition: coop.NodeDefinition{Title: "Second", ReviewPrompt: "Check two"}, State: coop.NodeDone},
-				{NodeDefinition: coop.NodeDefinition{Title: "Third", ReviewPrompt: "Check three"}, State: coop.NodeDone},
-				{NodeDefinition: coop.NodeDefinition{Title: "Fourth", ReviewPrompt: "Check four"}, State: coop.NodeDone},
-				{NodeDefinition: coop.NodeDefinition{Title: "Fifth", ReviewPrompt: "Do not include after cap"}, State: coop.NodeDone},
+				{NodeDefinition: coop.NodeDefinition{Title: "Second", Type: coop.NodeDashboard, ReviewPrompt: "Check two"}, State: coop.NodeDone},
+				{NodeDefinition: coop.NodeDefinition{Title: "Third", Type: coop.NodeDashboard, ReviewPrompt: "Check three"}, State: coop.NodeDone},
+				{NodeDefinition: coop.NodeDefinition{Title: "Fourth", Type: coop.NodeDashboard, ReviewPrompt: "Check four"}, State: coop.NodeDone},
+				{NodeDefinition: coop.NodeDefinition{Title: "Fifth", Type: coop.NodeDashboard, ReviewPrompt: "Do not include after cap"}, State: coop.NodeDone},
 			},
 		},
 	}
+	for nodeIndex := range m.session.Steps[0].Nodes {
+		node := &m.session.Steps[0].Nodes[nodeIndex]
+		if node.State == coop.NodeDone {
+			testPresentationAttempt(node)
+		}
+	}
 
-	assert.Equal(t, []string{"Check one", "Check two"}, m.completionImportantChecks())
+	assert.Equal(t, []string{"Check one", "Check two"}, m.completionHumanReviewPrompts())
 }
 
 func TestCompletionImportantChecksWrapOnWordBoundaries(t *testing.T) {
 	m := completionLayoutModel()
+	m.session.Steps[0].Nodes[0].Type = coop.NodeUIComponent
 	m.session.Steps[0].Nodes[0].ReviewPrompt = "Open the app and confirm the user-facing flow works as described."
 
 	receipt := m.renderCompletionReceipt(65)
@@ -915,7 +985,7 @@ func TestRenderFooterRejectionPlaceholder(t *testing.T) {
 
 	footer := m.renderFooter()
 
-	assertContainsPlain(t, footer, "Describe what should change in this step")
+	assertContainsPlain(t, footer, "Describe what should change in signature verification")
 }
 
 func TestReviewCardFitsWithinShortViewport(t *testing.T) {

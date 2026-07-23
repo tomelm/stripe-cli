@@ -39,10 +39,9 @@ const (
 
 // Implementation captures what the agent did for a node.
 type Implementation struct {
-	File    string `json:"file,omitempty"`
-	Lines   string `json:"lines,omitempty"`
-	Snippet string `json:"snippet,omitempty"`
-	Note    string `json:"note,omitempty"`
+	File  string `json:"file,omitempty"`
+	Lines string `json:"lines,omitempty"`
+	Note  string `json:"note,omitempty"`
 }
 
 // Verification is a single check the agent ran.
@@ -158,19 +157,20 @@ type VerificationOverride struct {
 // An attempt remains open through review and becomes immutable once EndedAt
 // is set. SessionNode helpers are the supported mutation boundary.
 type NodeAttempt struct {
-	Number             int                   `json:"number"`
-	StartedAt          time.Time             `json:"started_at"`
-	ReportedAt         *time.Time            `json:"reported_at,omitempty"`
-	EndedAt            *time.Time            `json:"ended_at,omitempty"`
-	EndReason          AttemptEndReason      `json:"end_reason,omitempty"`
-	Feedback           string                `json:"feedback,omitempty"`
-	Implementation     *Implementation       `json:"implementation,omitempty"`
-	AgentChecks        []Verification        `json:"agent_checks,omitempty"`
-	Resources          []ResourceBinding     `json:"resources,omitempty"`
-	Results            []CheckResult         `json:"results,omitempty"`
-	AutomaticResultsAt *time.Time            `json:"automatic_results_at,omitempty"`
-	AppSurface         *AppSurface           `json:"app_surface,omitempty"`
-	Override           *VerificationOverride `json:"verification_override,omitempty"`
+	Number                  int                   `json:"number"`
+	StartedAt               time.Time             `json:"started_at"`
+	ReportedAt              *time.Time            `json:"reported_at,omitempty"`
+	EndedAt                 *time.Time            `json:"ended_at,omitempty"`
+	EndReason               AttemptEndReason      `json:"end_reason,omitempty"`
+	Feedback                string                `json:"feedback,omitempty"`
+	Implementation          *Implementation       `json:"implementation,omitempty"`
+	AgentChecks             []Verification        `json:"agent_checks,omitempty"`
+	Resources               []ResourceBinding     `json:"resources,omitempty"`
+	Results                 []CheckResult         `json:"results,omitempty"`
+	AutomaticCheckStartedAt *time.Time            `json:"automatic_check_started_at,omitempty"`
+	AutomaticResultsAt      *time.Time            `json:"automatic_results_at,omitempty"`
+	AppSurface              *AppSurface           `json:"app_surface,omitempty"`
+	Override                *VerificationOverride `json:"verification_override,omitempty"`
 }
 
 // APIRequest describes the expected API call for a node.
@@ -205,6 +205,11 @@ type NodeDefinition struct {
 type StepDefinition struct {
 	Key   string `json:"key"`
 	Title string `json:"title"`
+	// Skippable is an explicit agent capability, not the inverse of missing
+	// blueprint metadata. Old development sessions and blueprints that omit
+	// required therefore fail closed: only an upstream required:false grants
+	// the agent permission to skip the step.
+	Skippable bool `json:"skippable,omitempty"`
 }
 
 // SessionNode is a single action within a session step.
@@ -259,19 +264,24 @@ type NextStepSuggestion struct {
 
 // CommandResponse is the JSON output format for agent-facing commands.
 type CommandResponse struct {
-	OK            bool                  `json:"ok"`
-	SessionID     string                `json:"session_id,omitempty"`
-	Node          int                   `json:"node,omitempty"`
-	Attempt       int                   `json:"attempt,omitempty"`
-	State         string                `json:"state,omitempty"`
-	Decision      string                `json:"decision,omitempty"`
-	Message       string                `json:"message,omitempty"`
-	Next          string                `json:"next,omitempty"`
-	AgentPrompt   string                `json:"agent_prompt,omitempty"`
-	APIRequest    *APIRequest           `json:"api_request,omitempty"`
-	SDKExample    string                `json:"sdk_example,omitempty"`
-	ResourceRoles []ResourceRequirement `json:"stripe_resource_roles,omitempty"`
-	Verification  []CheckResult         `json:"verification_results,omitempty"`
-	Error         string                `json:"error,omitempty"`
-	Hint          string                `json:"hint,omitempty"`
+	OK        bool   `json:"ok"`
+	SessionID string `json:"session_id,omitempty"`
+	Node      int    `json:"node,omitempty"`
+	Attempt   int    `json:"attempt,omitempty"`
+	State     string `json:"state,omitempty"`
+	Decision  string `json:"decision,omitempty"`
+	Message   string `json:"message,omitempty"`
+	// Next is directly executable. NextTemplate requires the agent to fill
+	// every named RequiredInput before execution; shell-shaped placeholders
+	// must never be presented as an exact next command.
+	Next           string                `json:"next,omitempty"`
+	NextTemplate   string                `json:"next_template,omitempty"`
+	RequiredInputs []string              `json:"required_inputs,omitempty"`
+	AgentPrompt    string                `json:"agent_prompt,omitempty"`
+	APIRequest     *APIRequest           `json:"api_request,omitempty"`
+	SDKExample     string                `json:"sdk_example,omitempty"`
+	ResourceRoles  []ResourceRequirement `json:"stripe_resource_roles,omitempty"`
+	Verification   []CheckResult         `json:"verification_results,omitempty"`
+	Error          string                `json:"error,omitempty"`
+	Hint           string                `json:"hint,omitempty"`
 }

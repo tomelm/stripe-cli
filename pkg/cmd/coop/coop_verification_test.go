@@ -151,18 +151,19 @@ func TestCheckoutVerificationEndToEndHumanAndAgentFlow(t *testing.T) {
 	require.NoError(t, err)
 	currentTime = currentTime.Add(10 * time.Second)
 	createdResult, err := service.ReportWorkAttempt(context.Background(), session.ID, checkoutNodeNumber, created.Attempt, workflow.ReportWorkInput{
-		File: "server/checkout.go", StripeResources: map[string]string{"checkout_session": "cs_created"},
+		File: "server/checkout.go", Note: "Created Checkout Session",
+		StripeResources: map[string]string{"checkout_session": "cs_created"},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "confirmed", createdResult.Decision)
-	assert.Contains(t, createdResult.Next, "--step=3")
+	assert.Contains(t, createdResult.Next, "--node=3")
 
 	currentTime = currentTime.Add(10 * time.Second)
 	ui, err := service.StartWork(session.ID, uiNodeNumber, "Building the app surface")
 	require.NoError(t, err)
 	currentTime = currentTime.Add(10 * time.Second)
 	uiResult, err := service.ReportWorkAttempt(context.Background(), session.ID, uiNodeNumber, ui.Attempt, workflow.ReportWorkInput{
-		File: "web/checkout.tsx", AppURL: "http://127.0.0.1:0/checkout",
+		File: "web/checkout.tsx", Note: "Built checkout UI", AppURL: "http://127.0.0.1:0/checkout",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "needs_human", uiResult.Decision)
@@ -181,15 +182,15 @@ func TestCheckoutVerificationEndToEndHumanAndAgentFlow(t *testing.T) {
 	}
 	assert.NotZero(t, uiResourceResults, "the UI review persists its containing step's resource checks")
 	assert.NotZero(t, uiStateResults, "the UI review persists its containing step's pending state checks")
-	projected, err := store.Read(session.ID)
+	updatedSession, err := store.Read(session.ID)
 	require.NoError(t, err)
-	createNode, err := projected.NodeByNumber(checkoutNodeNumber)
+	createNode, err := updatedSession.NodeByNumber(checkoutNodeNumber)
 	require.NoError(t, err)
-	uiNode, err := projected.NodeByNumber(uiNodeNumber)
+	uiNode, err := updatedSession.NodeByNumber(uiNodeNumber)
 	require.NoError(t, err)
 	require.NotNil(t, createNode.Attempts[0].EndedAt)
 	assert.Equal(t, "cs_created", createNode.Attempts[0].Resources[0].ID)
-	assert.Empty(t, uiNode.Attempts[0].Resources, "projection must not copy a sibling's binding")
+	assert.Empty(t, uiNode.Attempts[0].Resources, "UI verification must not copy a sibling's binding")
 	assert.NotEmpty(t, uiNode.Attempts[0].Results)
 
 	currentTime = currentTime.Add(10 * time.Second)
@@ -229,8 +230,7 @@ func TestCheckoutVerificationEndToEndHumanAndAgentFlow(t *testing.T) {
 	stateResult, err := service.ReevaluateState(context.Background(), session.ID, trigger.NodeNumber, trigger.AttemptNumber, "checkout.session.completed", "cs_human")
 	require.NoError(t, err)
 	assert.Equal(t, "needs_human", stateResult.Decision)
-	assertResultKindsHaveStatus(t, stateResult.Verification, coop.CheckResource, coop.CheckPassed)
-	assertResultKindsHaveStatus(t, stateResult.Verification, coop.CheckState, coop.CheckPassed)
+	assertCandidateUIResults(t, stateResult.Verification)
 	assert.Equal(t, []string{
 		"/v1/checkout/sessions/cs_human",
 		"/v1/checkout/sessions/cs_human/line_items",
@@ -252,8 +252,7 @@ func TestCheckoutVerificationEndToEndHumanAndAgentFlow(t *testing.T) {
 	polled, err := service.Reevaluate(context.Background(), session.ID, uiNodeNumber, ui.Attempt, workflow.TriggerPoll)
 	require.NoError(t, err)
 	assert.Equal(t, "needs_human", polled.Decision)
-	assertResultKindsHaveStatus(t, polled.Verification, coop.CheckResource, coop.CheckPassed)
-	assertResultKindsHaveStatus(t, polled.Verification, coop.CheckState, coop.CheckPassed)
+	assertCandidateUIResults(t, polled.Verification)
 	assert.Equal(t, []string{
 		"/v1/checkout/sessions/cs_human",
 		"/v1/checkout/sessions/cs_human/line_items",
@@ -266,13 +265,25 @@ func TestCheckoutVerificationEndToEndHumanAndAgentFlow(t *testing.T) {
 		}
 	}
 
-	confirmed, err := service.ConfirmReviewAttempts(session.ID, []workflow.AttemptRef{{Node: uiNodeNumber, Attempt: ui.Attempt}}, false, "")
+	_, err = service.ConfirmReviewAttempts(session.ID, []workflow.AttemptRef{{Node: uiNodeNumber, Attempt: ui.Attempt}}, nil)
+	require.ErrorIs(t, err, workflow.ErrVerificationOverrideRequired)
+	overrideRefs := []workflow.AttemptRef{{Node: uiNodeNumber, Attempt: ui.Attempt}}
+	overrideSession, err := store.Read(session.ID)
+	require.NoError(t, err)
+	confirmed, err := service.ConfirmReviewAttempts(
+		session.ID,
+		overrideRefs,
+		&workflow.ReviewOverride{
+			EvidenceDigest: workflow.ReviewEvidenceDigest(overrideSession, overrideRefs),
+			Reason:         "I exercised this app surface and confirmed this was my Checkout flow.",
+		},
+	)
 	require.NoError(t, err)
 	assert.Equal(t, coop.SessionActive, confirmed.Status, "the separate future handler remains to be implemented")
 	woken, err := service.AwaitReviewAttempt(context.Background(), session.ID, uiNodeNumber, ui.Attempt)
 	require.NoError(t, err)
 	assert.Equal(t, "confirmed", woken.Decision)
-	assert.Contains(t, woken.Next, "--step=4")
+	assert.Contains(t, woken.Next, "--node=4")
 	futureHandler, err = confirmed.NodeByNumber(handlerNodeNumber)
 	require.NoError(t, err)
 	assert.Equal(t, coop.NodePending, futureHandler.State)
@@ -289,6 +300,29 @@ func assertResultKindsHaveStatus(t *testing.T, results []coop.CheckResult, kind 
 		}
 	}
 	assert.NotZero(t, count, "expected at least one %s result", kind)
+}
+
+func assertCandidateUIResults(t *testing.T, results []coop.CheckResult) {
+	t.Helper()
+	passedResource := false
+	passedState := false
+	attributionUnavailable := false
+	for _, result := range results {
+		assert.NotEqual(t, coop.CheckFailed, result.Status, result.ID)
+		switch {
+		case result.ID == "checkrun.attribution.checkout_session.checkout_session":
+			attributionUnavailable = true
+			assert.Equal(t, coop.CheckRequired, result.Importance)
+			assert.Equal(t, coop.CheckUnavailable, result.Status)
+		case result.Kind == coop.CheckResource && result.Status == coop.CheckPassed:
+			passedResource = true
+		case result.Kind == coop.CheckState && result.Status == coop.CheckPassed:
+			passedState = true
+		}
+	}
+	assert.True(t, passedResource, "authoritative resource facts should still be readable")
+	assert.True(t, passedState, "authoritative state facts should still be readable")
+	assert.True(t, attributionUnavailable, "account-wide activity must require explicit human attribution")
 }
 
 type acceptanceReader struct {

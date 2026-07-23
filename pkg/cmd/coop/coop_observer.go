@@ -14,7 +14,6 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
-	"github.com/stripe/stripe-cli/pkg/coop/checks"
 	"github.com/stripe/stripe-cli/pkg/coop/observe"
 	"github.com/stripe/stripe-cli/pkg/coop/tui"
 	"github.com/stripe/stripe-cli/pkg/coop/workflow"
@@ -70,27 +69,19 @@ const (
 	observerStreamRetry
 )
 
-type observerProjectionCache struct {
-	compiled    bool
-	projections []checks.UIEventProjection
-}
-
 type observerStreamFactory func(context.Context, observerStreamConfig) ([]<-chan websocket.IElement, error)
 type observerAuthorizer func(context.Context, observerCredentials) error
-type observerProjectionCompiler func(*coop.Session) ([]checks.UIEventProjection, error)
 
 type coopObserverController struct {
-	store                 observerStore
-	workflow              func() observerWorkflow
-	credentials           func() (observerCredentials, bool)
-	authorize             observerAuthorizer
-	streams               observerStreamFactory
-	compileProjections    observerProjectionCompiler
-	reportProjectionError func(error)
-	pollEvery             time.Duration
-	standbyEvery          time.Duration
-	now                   func() time.Time
-	sandboxClaimURL       func() string
+	store           observerStore
+	workflow        func() observerWorkflow
+	credentials     func() (observerCredentials, bool)
+	authorize       observerAuthorizer
+	streams         observerStreamFactory
+	pollEvery       time.Duration
+	standbyEvery    time.Duration
+	now             func() time.Time
+	sandboxClaimURL func() string
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -98,7 +89,6 @@ type coopObserverController struct {
 }
 
 func newCoopObserver(store *coop.Store) *coopObserverController {
-	catalog, catalogErr := checks.LoadCatalog()
 	return &coopObserverController{
 		store: store,
 		workflow: func() observerWorkflow {
@@ -108,18 +98,9 @@ func newCoopObserver(store *coop.Store) *coopObserverController {
 			}
 			return workflow.NewService(store, workflow.WithEvaluator(evaluator))
 		},
-		credentials: configuredObserverCredentials,
-		authorize:   authorizeObserverCredentials,
-		streams:     startStockObserverStreams,
-		compileProjections: func(session *coop.Session) ([]checks.UIEventProjection, error) {
-			if catalogErr != nil {
-				return nil, fmt.Errorf("loading Co-op verification catalog: %w", catalogErr)
-			}
-			return checks.CompileUIEventProjections(catalog, session)
-		},
-		reportProjectionError: func(err error) {
-			log.WithError(err).Warn("Co-op observer UI event matching is unavailable")
-		},
+		credentials:     configuredObserverCredentials,
+		authorize:       authorizeObserverCredentials,
+		streams:         startStockObserverStreams,
 		pollEvery:       coopObserverPollInterval,
 		standbyEvery:    coopObserverStandbyRetry,
 		now:             time.Now,
@@ -270,7 +251,6 @@ func (controller *coopObserverController) stream(ctx context.Context, sessionID 
 	if retryEvery <= 0 {
 		retryEvery = coopObserverStandbyRetry
 	}
-	projectionCache := observerProjectionCache{}
 	for ctx.Err() == nil {
 		session, credentials, ok := controller.prepareStream(ctx, sessionID)
 		if !ok {
@@ -279,7 +259,6 @@ func (controller *coopObserverController) stream(ctx context.Context, sessionID 
 			}
 			continue
 		}
-		projections := projectionCache.load(controller, session)
 		service := controller.workflow()
 		if service == nil {
 			if !waitObserverRetry(ctx, retryEvery) {
@@ -287,7 +266,7 @@ func (controller *coopObserverController) stream(ctx context.Context, sessionID 
 			}
 			continue
 		}
-		if controller.runStreamAttempt(ctx, sessionID, session, credentials, service, projections) == observerStreamStop {
+		if controller.runStreamAttempt(ctx, sessionID, session, credentials, service) == observerStreamStop {
 			return
 		}
 		if !waitObserverRetry(ctx, retryEvery) {
@@ -323,35 +302,12 @@ func (controller *coopObserverController) prepareStream(
 	return session, credentials, true
 }
 
-func (cache *observerProjectionCache) load(
-	controller *coopObserverController,
-	session *coop.Session,
-) []checks.UIEventProjection {
-	if cache.compiled {
-		return cache.projections
-	}
-	cache.compiled = true
-	if controller.compileProjections == nil {
-		return nil
-	}
-	projections, err := controller.compileProjections(session)
-	if err == nil {
-		cache.projections = projections
-		return cache.projections
-	}
-	if controller.reportProjectionError != nil {
-		controller.reportProjectionError(err)
-	}
-	return nil
-}
-
 func (controller *coopObserverController) runStreamAttempt(
 	ctx context.Context,
 	sessionID string,
 	session *coop.Session,
 	credentials observerCredentials,
 	service observerWorkflow,
-	projections []checks.UIEventProjection,
 ) observerStreamOutcome {
 	config := observerStreamConfig{observerCredentials: credentials, observerPlan: planObservation(session)}
 	streamCtx, stopStreams := context.WithCancel(ctx)
@@ -364,7 +320,7 @@ func (controller *coopObserverController) runStreamAttempt(
 		stopStreams()
 		return observerStreamStop
 	}
-	return controller.consumeStreams(ctx, streamCtx, stopStreams, service, sessionID, projections, streams)
+	return controller.consumeStreams(ctx, streamCtx, stopStreams, service, sessionID, streams)
 }
 
 func (controller *coopObserverController) consumeStreams(
@@ -373,7 +329,6 @@ func (controller *coopObserverController) consumeStreams(
 	stopStreams context.CancelFunc,
 	service observerWorkflow,
 	sessionID string,
-	projections []checks.UIEventProjection,
 	streams []<-chan websocket.IElement,
 ) observerStreamOutcome {
 	var consumers sync.WaitGroup
@@ -382,7 +337,7 @@ func (controller *coopObserverController) consumeStreams(
 		consumers.Add(1)
 		go func(stream <-chan websocket.IElement) {
 			defer consumers.Done()
-			controller.consume(streamCtx, service, sessionID, projections, stream)
+			controller.consume(streamCtx, service, sessionID, stream)
 			closed <- struct{}{}
 		}(source)
 	}
@@ -413,7 +368,6 @@ func (controller *coopObserverController) consume(
 	ctx context.Context,
 	service observerWorkflow,
 	sessionID string,
-	projections []checks.UIEventProjection,
 	stream <-chan websocket.IElement,
 ) {
 	for {
@@ -426,10 +380,10 @@ func (controller *coopObserverController) consume(
 			}
 			switch data := element.(type) {
 			case websocket.DataElement:
-				controller.observe(ctx, service, sessionID, projections, data)
+				controller.observe(ctx, service, sessionID, data)
 			case *websocket.DataElement:
 				if data != nil {
-					controller.observe(ctx, service, sessionID, projections, *data)
+					controller.observe(ctx, service, sessionID, *data)
 				}
 			}
 		}
@@ -440,7 +394,6 @@ func (controller *coopObserverController) observe(
 	ctx context.Context,
 	service observerWorkflow,
 	sessionID string,
-	projections []checks.UIEventProjection,
 	data websocket.DataElement,
 ) {
 	fact, ok := observe.Normalize(data)
@@ -451,7 +404,7 @@ func (controller *coopObserverController) observe(
 	if err != nil {
 		return
 	}
-	match := observe.MatchSession(session, fact, projections...)
+	match := observe.MatchSession(session, fact)
 	if result, ok := supportingResult(match.Attribution, controller.now()); ok {
 		_ = service.RecordSupportingResult(sessionID, match.Attribution.Target.NodeNumber, match.Attribution.Target.AttemptNumber, result)
 	}
@@ -499,7 +452,7 @@ func (controller *coopObserverController) poll(ctx context.Context, sessionID st
 				for nodeIndex := range session.Steps[stepIndex].Nodes {
 					nodeNumber++
 					attempt := session.Steps[stepIndex].Nodes[nodeIndex].CurrentAttempt()
-					if attempt != nil && attempt.Number > 0 && attempt.ReportedAt != nil && attemptNeedsPolling(attempt) {
+					if attempt != nil && attempt.Number > 0 && attempt.ReportedAt != nil && workflow.AttemptNeedsReevaluation(attempt) {
 						_, _ = service.Reevaluate(ctx, sessionID, nodeNumber, attempt.Number, workflow.TriggerPoll)
 					}
 				}
@@ -508,35 +461,19 @@ func (controller *coopObserverController) poll(ctx context.Context, sessionID st
 	}
 }
 
-func attemptNeedsPolling(attempt *coop.NodeAttempt) bool {
-	if attempt == nil {
-		return false
-	}
-	if attempt.AppSurface != nil && attempt.AppSurface.OpenedAt != nil &&
-		(attempt.AutomaticResultsAt == nil || !attempt.AutomaticResultsAt.After(*attempt.AppSurface.OpenedAt)) {
-		return true
-	}
-	for _, result := range attempt.Results {
-		if result.Importance != coop.CheckRequired {
-			continue
-		}
-		switch result.Status {
-		case coop.CheckPending, coop.CheckUnavailable:
-			return true
-		}
-	}
-	return false
-}
-
 func supportingResult(attribution *observe.Attribution, observedAt time.Time) (coop.CheckResult, bool) {
 	if attribution == nil {
 		return coop.CheckResult{}, false
 	}
 	if event := attribution.Fact.Event; event != nil {
+		observed := event.Type
+		if len(event.Discoveries) == 1 && coop.IsSafeStripeObjectID(event.Discoveries[0].ID) {
+			observed += " " + event.Discoveries[0].ID
+		}
 		return coop.CheckResult{
 			ID: "passive.event", Kind: coop.CheckEvent, Importance: coop.CheckAdvisory, Status: coop.CheckObserved,
 			Detail:   boundedVerificationText("Stripe observed event " + event.Type + "; direct state checks decide completion."),
-			Observed: event.Type, UpdatedAt: observedAt.UTC(),
+			Observed: boundedVerificationText(observed), UpdatedAt: observedAt.UTC(),
 		}, true
 	}
 	request := attribution.Fact.Request
@@ -544,10 +481,13 @@ func supportingResult(attribution *observe.Attribution, observedAt time.Time) (c
 		return coop.CheckResult{}, false
 	}
 	observed := fmt.Sprintf("HTTP %d", request.Status)
+	if request.RequestID != "" {
+		observed += " " + request.RequestID
+	}
 	result := coop.CheckResult{
 		ID: "passive.request", Kind: coop.CheckRequest, Importance: coop.CheckAdvisory, Status: coop.CheckObserved,
 		Detail:   boundedVerificationText(fmt.Sprintf("Stripe observed %s %s return %s; direct checks decide completion.", request.Method, request.Path, observed)),
-		Observed: observed, UpdatedAt: observedAt.UTC(),
+		Observed: boundedVerificationText(observed), UpdatedAt: observedAt.UTC(),
 	}
 	if failure := attribution.Failure; failure != nil {
 		code := failure.DeclineCode

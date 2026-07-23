@@ -2,6 +2,7 @@ package coop
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,91 @@ func TestNodeAttemptLifecycleRetainsHistory(t *testing.T) {
 	assert.Len(t, node.Attempts, 2)
 	assert.Equal(t, "initial work", node.Attempts[0].Feedback)
 	assert.Equal(t, "fixing feedback", node.Attempts[1].Feedback)
+}
+
+func TestAttemptMutationRejectsTerminalControlsWithoutPartialWrites(t *testing.T) {
+	now := time.Now().UTC()
+	unsafe := "visible\x1b[31mhidden"
+
+	t.Run("start feedback", func(t *testing.T) {
+		node := testSessionNode("node", "Node", NodeActive)
+		_, err := node.StartAttempt(now, unsafe)
+		require.ErrorContains(t, err, "control characters")
+		assert.Empty(t, node.Attempts)
+	})
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*SessionNode, int) error
+		check  func(*testing.T, *NodeAttempt)
+	}{
+		{
+			name: "implementation",
+			mutate: func(node *SessionNode, attempt int) error {
+				return node.ReportAttempt(attempt, now.Add(time.Second), &Implementation{File: unsafe})
+			},
+			check: func(t *testing.T, attempt *NodeAttempt) {
+				assert.Nil(t, attempt.ReportedAt)
+				assert.Nil(t, attempt.Implementation)
+			},
+		},
+		{
+			name: "agent check",
+			mutate: func(node *SessionNode, attempt int) error {
+				return node.AddAgentCheck(attempt, Verification{Check: unsafe, Passed: true})
+			},
+			check: func(t *testing.T, attempt *NodeAttempt) { assert.Empty(t, attempt.AgentChecks) },
+		},
+		{
+			name: "app surface",
+			mutate: func(node *SessionNode, attempt int) error {
+				return node.SetAppSurface(attempt, AppSurface{URL: "https://example.com/" + unsafe})
+			},
+			check: func(t *testing.T, attempt *NodeAttempt) { assert.Nil(t, attempt.AppSurface) },
+		},
+		{
+			name: "override",
+			mutate: func(node *SessionNode, attempt int) error {
+				return node.RecordVerificationOverride(attempt, now.Add(time.Second), unsafe)
+			},
+			check: func(t *testing.T, attempt *NodeAttempt) { assert.Nil(t, attempt.Override) },
+		},
+		{
+			name: "check result",
+			mutate: func(node *SessionNode, attempt int) error {
+				return node.UpsertResult(attempt, CheckResult{
+					ID: "unsafe", Kind: CheckResource, Importance: CheckRequired,
+					Status: CheckFailed, Detail: unsafe, UpdatedAt: now.Add(time.Second),
+				})
+			},
+			check: func(t *testing.T, attempt *NodeAttempt) { assert.Empty(t, attempt.Results) },
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			node := testSessionNode("node", "Node", NodeActive)
+			attempt, err := node.StartAttempt(now, "")
+			require.NoError(t, err)
+			err = test.mutate(&node, attempt.Number)
+			require.ErrorContains(t, err, "control characters")
+			test.check(t, attempt)
+		})
+	}
+}
+
+func TestAutomaticCheckMarkerIsMonotonicAndTracksPendingRead(t *testing.T) {
+	now := time.Now().UTC()
+	node := testSessionNode("node", "Node", NodeActive)
+	attempt, err := node.StartAttempt(now, "")
+	require.NoError(t, err)
+	require.NoError(t, node.ReconcileAutomaticResults(attempt.Number, now.Add(time.Second), nil))
+
+	startedAt, err := node.BeginAutomaticCheck(attempt.Number, now)
+	require.NoError(t, err)
+	assert.True(t, startedAt.After(*attempt.AutomaticResultsAt))
+	assert.True(t, attempt.AutomaticCheckPending())
+
+	require.NoError(t, node.ReconcileAutomaticResults(attempt.Number, startedAt, nil))
+	assert.False(t, attempt.AutomaticCheckPending())
 }
 
 func TestEndedAttemptRejectsMutationHelpers(t *testing.T) {
@@ -159,6 +245,27 @@ func TestReconcileAutomaticResultsRejectsWholeOlderOrEqualSnapshot(t *testing.T)
 	assert.Equal(t, newerAt, *attempt.AutomaticResultsAt)
 }
 
+func TestReconcileAutomaticResultsAdvancesOrderingWatermarkForIdenticalSnapshot(t *testing.T) {
+	now := time.Now().UTC()
+	node := testSessionNode("node", "Node", NodeActive)
+	attempt, err := node.StartAttempt(now, "")
+	require.NoError(t, err)
+	result := CheckResult{
+		ID: "state.checkout", Kind: CheckState, Importance: CheckRequired,
+		Status: CheckPending, Detail: "still processing",
+	}
+	firstSnapshot := now.Add(time.Second)
+	require.NoError(t, node.ReconcileAutomaticResults(attempt.Number, firstSnapshot, []CheckResult{result}))
+	firstResultAt := attempt.Results[0].UpdatedAt
+
+	secondSnapshot := now.Add(2 * time.Second)
+	require.NoError(t, node.ReconcileAutomaticResults(attempt.Number, secondSnapshot, []CheckResult{result}))
+
+	require.NotNil(t, attempt.AutomaticResultsAt)
+	assert.Equal(t, secondSnapshot, *attempt.AutomaticResultsAt)
+	assert.Equal(t, firstResultAt, attempt.Results[0].UpdatedAt)
+}
+
 func TestAttemptResourceAndAppSurfaceUpserts(t *testing.T) {
 	node := testSessionNode("node", "Node", NodeActive)
 	now := time.Now().UTC()
@@ -214,6 +321,49 @@ func TestAttemptResourceAndAppSurfaceUpserts(t *testing.T) {
 
 	_, err = node.AttemptByNumber(99)
 	assert.True(t, errors.Is(err, ErrAttemptNotFound))
+}
+
+func TestAttemptInputsAreBoundedAndInvalidReportsAreAtomic(t *testing.T) {
+	now := time.Now().UTC()
+	node := testSessionNode("node", "Node", NodeActive)
+	attempt, err := node.StartAttempt(now, "")
+	require.NoError(t, err)
+
+	err = node.ReportAttempt(attempt.Number, now.Add(time.Second), &Implementation{
+		File: strings.Repeat("x", MaxImplementationFileBytes+1),
+	})
+	require.ErrorContains(t, err, "implementation file exceeds")
+	assert.Nil(t, attempt.ReportedAt)
+	assert.Nil(t, attempt.Implementation)
+
+	for index := 0; index < MaxAgentChecksPerAttempt; index++ {
+		require.NoError(t, node.AddAgentCheck(attempt.Number, Verification{
+			Check:  fmt.Sprintf("check-%d", index),
+			Passed: true,
+		}))
+	}
+	require.NoError(t, node.AddAgentCheck(attempt.Number, Verification{
+		Check:  "check-0",
+		Passed: false,
+	}))
+	require.Len(t, attempt.AgentChecks, MaxAgentChecksPerAttempt)
+	assert.False(t, attempt.AgentChecks[0].Passed, "the latest value for one label replaces its prior report")
+	require.ErrorContains(t, node.AddAgentCheck(attempt.Number, Verification{
+		Check: "one-too-many",
+	}), "agent checks exceed")
+
+	require.ErrorContains(t,
+		node.RecordVerificationOverride(attempt.Number, now, strings.Repeat("x", MaxOverrideReasonBytes+1)),
+		"verification override reason exceeds",
+	)
+	assert.Nil(t, attempt.Override)
+}
+
+func TestStartAttemptRejectsOversizedFeedbackWithoutAppending(t *testing.T) {
+	node := testSessionNode("node", "Node", NodeActive)
+	_, err := node.StartAttempt(time.Now().UTC(), strings.Repeat("x", MaxAttemptFeedbackBytes+1))
+	require.ErrorContains(t, err, "attempt feedback exceeds")
+	assert.Empty(t, node.Attempts)
 }
 
 func testSessionNode(key, title string, state NodeState) SessionNode {

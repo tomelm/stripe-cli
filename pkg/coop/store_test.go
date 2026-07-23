@@ -1,6 +1,7 @@
 package coop
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -102,6 +103,31 @@ func TestObserverLeaseIsExclusiveAndOwnerSafe(t *testing.T) {
 	secondRelease()
 }
 
+func TestObserverLeaseRenewsItsFallbackLivenessTimestamp(t *testing.T) {
+	originalInterval := observerLeaseHeartbeatInterval
+	observerLeaseHeartbeatInterval = 5 * time.Millisecond
+	t.Cleanup(func() { observerLeaseHeartbeatInterval = originalInterval })
+
+	dir := t.TempDir()
+	store, err := NewStoreAt(dir)
+	require.NoError(t, err)
+	release, err := store.AcquireObserverLease("session")
+	require.NoError(t, err)
+	t.Cleanup(release)
+	leasePath := filepath.Join(dir, "session.json.observer")
+	initial, err := os.Stat(leasePath)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		current, statErr := os.Stat(leasePath)
+		return statErr == nil && current.ModTime().After(initial.ModTime())
+	}, time.Second, 5*time.Millisecond,
+		"the observer must renew mtime so Windows/unknown-liveness fallback cannot reclaim a healthy lease")
+
+	_, err = store.AcquireObserverLease("session")
+	require.ErrorIs(t, err, ErrObserverLeaseHeld)
+}
+
 func TestStorePersistsCompleteAttemptHistory(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewStoreAt(dir)
@@ -194,6 +220,79 @@ func TestStoreUpdateDoesNotVersionAnUnchangedSession(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, before.Version, updated.Version)
 	assert.Equal(t, before.UpdatedAt, updated.UpdatedAt)
+}
+
+func TestStoreRejectsSessionIdentityMismatch(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStoreAt(dir)
+	require.NoError(t, err)
+	session := &Session{ID: "requested", Status: SessionActive}
+	require.NoError(t, store.Write(session))
+
+	corrupt := *session
+	corrupt.ID = "different"
+	data, err := json.Marshal(&corrupt)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "requested.json"), data, 0o600))
+
+	_, err = store.Read("requested")
+	require.ErrorIs(t, err, ErrCorruptSession)
+	assert.Contains(t, err.Error(), `file "requested" contains identity "different"`)
+
+	err = store.Write(session)
+	require.ErrorIs(t, err, ErrCorruptSession)
+}
+
+func TestStoreUpdateForbidsSessionIdentityMutation(t *testing.T) {
+	store, err := NewStoreAt(t.TempDir())
+	require.NoError(t, err)
+	session := &Session{ID: "immutable_id", Status: SessionActive}
+	require.NoError(t, store.Write(session))
+	before, err := store.Read(session.ID)
+	require.NoError(t, err)
+
+	_, err = store.Update(session.ID, func(session *Session) error {
+		session.ID = "redirected"
+		return nil
+	})
+
+	require.ErrorIs(t, err, ErrCorruptSession)
+	after, err := store.Read("immutable_id")
+	require.NoError(t, err)
+	assert.Equal(t, "immutable_id", after.ID)
+	assert.Equal(t, before.Version, after.Version)
+	_, err = store.Read("redirected")
+	require.ErrorIs(t, err, ErrSessionNotFound)
+}
+
+func TestStoreRejectsOversizedSessionFilesAndWrites(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStoreAt(dir)
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "oversized_read.json"),
+		[]byte(strings.Repeat("x", MaxSessionFileBytes+1)),
+		0o600,
+	))
+	_, err = store.Read("oversized_read")
+	require.ErrorIs(t, err, ErrCorruptSession)
+
+	session := &Session{
+		ID:     "oversized_write",
+		Status: SessionActive,
+		Steps: []SessionStep{{
+			Nodes: []SessionNode{{
+				NodeDefinition: NodeDefinition{Key: "large"},
+				Activity:       strings.Repeat("x", MaxSessionFileBytes),
+			}},
+		}},
+	}
+	err = store.Write(session)
+	require.ErrorContains(t, err, "session exceeds")
+	assert.Zero(t, session.Version, "a rejected write must not advance the caller's optimistic-lock version")
+	_, err = store.Read(session.ID)
+	require.ErrorIs(t, err, ErrSessionNotFound)
 }
 
 func TestStoreDoesNotInjectSchemaMetadata(t *testing.T) {

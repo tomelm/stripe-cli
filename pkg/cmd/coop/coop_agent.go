@@ -21,13 +21,12 @@ type coopAgentCmd struct {
 type coopAgentActionCmd struct {
 	cmd     *cobra.Command
 	session string
-	step    int
+	node    int
 	attempt int
 	note    string
 
 	file            string
 	lines           string
-	snippet         string
 	check           string
 	passed          bool
 	appURL          string
@@ -65,11 +64,11 @@ func newCoopAgentStartWorkCmd() *coopAgentActionCmd {
 			if err != nil {
 				return outputAgentError(err)
 			}
-			resp, err := service.StartWork(c.session, c.step, c.note)
+			resp, err := service.StartWork(c.session, c.node, c.note)
 			return outputAgentResponse(resp, err)
 		},
 	}
-	c.addSessionStepFlags()
+	c.addSessionNodeFlags()
 	c.cmd.Flags().StringVar(&c.note, "note", "", "Activity note")
 	return c
 }
@@ -88,18 +87,17 @@ func newCoopAgentReportWorkCmd() *coopAgentActionCmd {
 			if err != nil {
 				return outputAgentError(err)
 			}
-			resp, err := service.ReportWorkAttempt(cmd.Context(), c.session, c.step, c.attempt, workflow.ReportWorkInput{
-				File: c.file, Lines: c.lines, Snippet: c.snippet, Note: c.note,
+			resp, err := service.ReportWorkAttempt(cmd.Context(), c.session, c.node, c.attempt, workflow.ReportWorkInput{
+				File: c.file, Lines: c.lines, Note: c.note,
 				AppURL: c.appURL, StripeResources: resources,
 			})
 			return outputAgentResponse(resp, err)
 		},
 	}
-	c.addSessionStepFlags()
+	c.addSessionNodeFlags()
 	c.addAttemptFlag()
 	c.cmd.Flags().StringVar(&c.file, "file", "", "File path for implementation")
 	c.cmd.Flags().StringVar(&c.lines, "lines", "", "Line range, e.g. 1-15")
-	c.cmd.Flags().StringVar(&c.snippet, "snippet", "", "Code snippet")
 	c.cmd.Flags().StringVar(&c.note, "note", "", "Implementation summary")
 	c.cmd.Flags().StringVar(&c.appURL, "app-url", "", "Absolute URL in the developer's app for UI review")
 	c.cmd.Flags().StringArrayVar(&c.stripeResources, "stripe-resource", nil, "Stripe resource as <role>=<id> (repeatable)")
@@ -112,15 +110,18 @@ func newCoopAgentReportCheckCmd() *coopAgentActionCmd {
 		Use:   "report-check",
 		Short: "Report a verification check",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if !cmd.Flags().Changed("passed") {
+				return outputAgentError(errors.New("--passed must be explicit; use --passed or --passed=false"))
+			}
 			service, err := newWorkflowService(c.session)
 			if err != nil {
 				return outputAgentError(err)
 			}
-			resp, err := service.ReportCheckAttempt(c.session, c.step, c.attempt, c.check, c.passed)
+			resp, err := service.ReportCheckAttempt(c.session, c.node, c.attempt, c.check, c.passed)
 			return outputAgentResponse(resp, err)
 		},
 	}
-	c.addSessionStepFlags()
+	c.addSessionNodeFlags()
 	c.addAttemptFlag()
 	c.cmd.Flags().StringVar(&c.check, "check", "", "Verification check label")
 	c.cmd.Flags().BoolVar(&c.passed, "passed", false, "Whether the verification passed")
@@ -137,11 +138,11 @@ func newCoopAgentSkipCmd() *coopAgentActionCmd {
 			if err != nil {
 				return outputAgentError(err)
 			}
-			resp, err := service.SkipAttempt(c.session, c.step, c.attempt, c.note)
+			resp, err := service.SkipAttempt(c.session, c.node, c.attempt, c.note)
 			return outputAgentResponse(resp, err)
 		},
 	}
-	c.addSessionStepFlags()
+	c.addSessionNodeFlags()
 	c.addAttemptFlag()
 	c.cmd.Flags().StringVar(&c.note, "note", "", "Skip reason")
 	return c
@@ -157,11 +158,11 @@ func newCoopAgentAwaitReviewCmd() *coopAgentActionCmd {
 			if err != nil {
 				return outputAgentError(err)
 			}
-			resp, err := service.AwaitReviewAttempt(cmd.Context(), c.session, c.step, c.attempt)
+			resp, err := service.AwaitReviewAttempt(cmd.Context(), c.session, c.node, c.attempt)
 			return outputAgentResponse(resp, err)
 		},
 	}
-	c.addSessionStepFlags()
+	c.addSessionNodeFlags()
 	c.addAttemptFlag()
 	return c
 }
@@ -198,11 +199,11 @@ func newCoopAgentStartFollowupCmd() *coopAgentActionCmd {
 	return c
 }
 
-func (c *coopAgentActionCmd) addSessionStepFlags() {
+func (c *coopAgentActionCmd) addSessionNodeFlags() {
 	c.cmd.Flags().StringVar(&c.session, "session", "", "Session ID")
-	c.cmd.Flags().IntVar(&c.step, "step", 0, "1-based node number")
+	c.cmd.Flags().IntVar(&c.node, "node", 0, "1-based node number")
 	mustMarkFlagRequired(c.cmd, "session")
-	mustMarkFlagRequired(c.cmd, "step")
+	mustMarkFlagRequired(c.cmd, "node")
 }
 
 func (c *coopAgentActionCmd) addAttemptFlag() {
@@ -354,13 +355,13 @@ func outputAgentError(err error) error {
 func outputAgentResponse(resp coop.CommandResponse, err error) error {
 	if err != nil {
 		// Emit a structured ok:false response (on stdout, like every other agent
-		// command) so an agent parsing JSON always gets an error + recovery hint,
-		// even on infra failures (e.g. a heartbeat/store write error mid-await).
+		// command) so an agent parsing JSON always gets an error + recovery hint.
+		// There is deliberately no "next": diagnostics are not a continuation
+		// and the agent should correct the error, then retry the same command.
 		resp = coop.CommandResponse{
 			OK:    false,
 			Error: err.Error(),
-			Hint:  "stripe coop status",
-			Next:  "stripe coop status",
+			Hint:  "Correct the error and retry the same agent command. Use `stripe coop status --json` only for diagnostics.",
 		}
 	}
 	if outErr := outputJSON(resp); outErr != nil {

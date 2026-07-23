@@ -117,20 +117,24 @@ func (m Model) ShortHelp() []key.Binding {
 		bindings = append(bindings, m.keys.Follow)
 	}
 
-	if target, ok := m.selectedReviewTarget(); ok {
+	target, canConfirm := m.selectedReviewTarget()
+	_, canReject := m.selectedRejectionTarget()
+	if canConfirm {
 		if m.selectedReviewCommand() != "" {
 			bindings = append(bindings, m.keys.Copy)
 		}
 		confirm := m.keys.Confirm
-		reject := m.keys.Reject
 		if m.width > 0 && m.width < 56 {
 			confirm.SetHelp("c", "confirm")
-			reject.SetHelp("r", "changes")
 		} else if target.kind == "step" {
 			confirm.SetHelp("c", "confirm all")
-			reject.SetHelp("r", "changes")
 		}
-		bindings = append(bindings, confirm, reject)
+		bindings = append(bindings, confirm)
+	}
+	if canReject {
+		reject := m.keys.Reject
+		reject.SetHelp("r", "changes")
+		bindings = append(bindings, reject)
 	}
 	_, hasApp := m.selectedAppSurface()
 	if hasApp {

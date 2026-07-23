@@ -82,37 +82,42 @@ func TestSubscriptionUIEventEvaluatesCausalResourceGraph(t *testing.T) {
 	}, reader.TakePaths(), "one event should evaluate the complete bounded causal graph")
 	require.Len(t, report.Bindings, 1)
 	assert.Equal(t, coop.ResourceBinding{
-		Role: "checkout_session", Type: "checkout_session", ID: "cs_exercised", Source: coop.BindingObserved,
+		Role: "checkout_session", Type: "checkout_session", ID: "cs_exercised", Source: coop.BindingObservedCandidate,
 	}, report.Bindings[0])
 	statePassed := false
 	relationshipPassed := false
-	trialPassed := false
+	attributionUnavailable := false
 	for _, result := range report.Results {
 		if result.Kind == coop.CheckState && strings.Contains(result.ID, "checkout.session.completed") {
 			statePassed = true
 			assert.Equal(t, coop.CheckPassed, result.Status)
+			assert.Equal(t, coop.CheckAdvisory, result.Importance)
 		}
 		if strings.HasSuffix(result.ID, ".evidence-line_items-field-data-0-price") ||
 			strings.HasSuffix(result.ID, ".evidence-subscription-field-items-data-0-price") {
 			relationshipPassed = true
 			assert.Equal(t, coop.CheckPassed, result.Status)
+			assert.Equal(t, coop.CheckAdvisory, result.Importance)
 		}
-		if strings.HasSuffix(result.ID, ".evidence-subscription-field-trial-end") {
-			trialPassed = true
-			assert.Equal(t, coop.CheckPassed, result.Status)
+		if strings.HasSuffix(result.ID, ".attribution.checkout_session.checkout_session") {
+			attributionUnavailable = true
+			assert.Equal(t, coop.CheckUnavailable, result.Status)
+			assert.Equal(t, coop.CheckRequired, result.Importance)
 		}
+		assert.NotEqual(t, coop.CheckFailed, result.Status,
+			"an account-wide event candidate must not produce an agent-attributed failure")
 	}
-	assert.True(t, statePassed, "the projected Checkout state rule should run on the UI attempt")
+	assert.True(t, statePassed, "the UI node's declared Checkout state rule should run on its attempt")
 	assert.True(t, relationshipPassed, "the Product Price relationship should be verified")
-	assert.True(t, trialPassed, "the derived Subscription trial should be verified")
+	assert.True(t, attributionUnavailable, "a reusable relationship must not attribute an account-wide event")
 }
 
-func TestSubscriptionUIWrongTrialReturnsWorkToAgent(t *testing.T) {
+func TestSubscriptionUICandidateContradictionDoesNotReturnWorkToAgent(t *testing.T) {
 	catalog, err := checks.LoadCatalog()
 	require.NoError(t, err)
 	blueprint, err := coop.LoadBlueprint("subscription-with-trial")
 	require.NoError(t, err)
-	session := coop.NewSessionFromBlueprint(blueprint, "subscription-ui-wrong-trial", nil, nil)
+	session := coop.NewSessionFromBlueprint(blueprint, "subscription-ui-candidate-contradiction", nil, nil)
 	session.StripeAccountID = "acct_subscription123"
 	started := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
 	reported := started.Add(5 * time.Second)
@@ -129,21 +134,20 @@ func TestSubscriptionUIWrongTrialReturnsWorkToAgent(t *testing.T) {
 		Number: 1, StartedAt: started, ReportedAt: &reported,
 		AppSurface: &coop.AppSurface{URL: "http://localhost:3000/checkout", OpenedAt: &opened},
 	}}
-	trialStart := int64(1_800_000_000)
 	reader := &acceptanceReader{objects: map[string]map[string]any{}}
-	reader.Put("/v1/checkout/sessions/cs_wrong_trial", map[string]any{
-		"id": "cs_wrong_trial", "livemode": false, "created": json.Number(strconv.FormatInt(observed.Unix(), 10)),
-		"mode": "subscription", "status": "complete", "payment_status": "no_payment_required", "subscription": "sub_wrong_trial",
+	reader.Put("/v1/checkout/sessions/cs_wrong_price", map[string]any{
+		"id": "cs_wrong_price", "livemode": false, "created": json.Number(strconv.FormatInt(observed.Unix(), 10)),
+		"mode": "subscription", "status": "complete", "payment_status": "no_payment_required", "subscription": "sub_wrong_price",
 	})
-	reader.Put("/v1/checkout/sessions/cs_wrong_trial/line_items", map[string]any{
-		"data": []any{map[string]any{"price": "price_default"}},
+	reader.Put("/v1/checkout/sessions/cs_wrong_price/line_items", map[string]any{
+		"data": []any{map[string]any{"price": "price_other"}},
 	})
 	reader.Put("/v1/products/prod_subscription", map[string]any{"id": "prod_subscription", "default_price": "price_default"})
-	reader.Put("/v1/subscriptions/sub_wrong_trial", map[string]any{
-		"id": "sub_wrong_trial", "livemode": false,
-		"trial_start": json.Number(strconv.FormatInt(trialStart, 10)),
-		"trial_end":   json.Number(strconv.FormatInt(trialStart+14*86400, 10)),
-		"items":       map[string]any{"data": []any{map[string]any{"price": "price_default"}}},
+	reader.Put("/v1/subscriptions/sub_wrong_price", map[string]any{
+		"id": "sub_wrong_price", "livemode": false,
+		"items": map[string]any{"data": []any{map[string]any{
+			"price": "price_other",
+		}}},
 	})
 	evaluator := &coopEvaluator{
 		catalog: catalog, runner: checkrun.NewEvaluator(reader, catalog),
@@ -157,26 +161,28 @@ func TestSubscriptionUIWrongTrialReturnsWorkToAgent(t *testing.T) {
 	))
 
 	response, err := service.ReevaluateState(context.Background(), session.ID, nodeNumber, 1,
-		"checkout.session.completed", "cs_wrong_trial")
+		"checkout.session.completed", "cs_wrong_price")
 	require.NoError(t, err)
-	assert.Equal(t, "needs_agent", response.Decision)
-	assert.Equal(t, 2, response.Attempt)
-	failed := false
+	assert.Equal(t, "needs_human", response.Decision)
+	assert.Equal(t, 1, response.Attempt)
+	unavailable := false
 	for _, result := range response.Verification {
-		if strings.HasSuffix(result.ID, ".evidence-subscription-field-trial-end") {
-			failed = true
-			assert.Equal(t, coop.CheckFailed, result.Status)
-			assert.Contains(t, result.Expected, "604800 seconds")
-			assert.Contains(t, result.Observed, "1209600 seconds")
+		if strings.HasSuffix(result.ID, ".evidence-line_items-field-data-0-price") {
+			unavailable = true
+			assert.Equal(t, coop.CheckUnavailable, result.Status)
+			assert.Equal(t, coop.CheckAdvisory, result.Importance)
+			assert.Equal(t, "price_default", result.Expected)
+			assert.Equal(t, "price_other", result.Observed)
 		}
+		assert.NotEqual(t, coop.CheckFailed, result.Status)
 	}
-	assert.True(t, failed)
+	assert.True(t, unavailable)
 	updated, err := store.Read(session.ID)
 	require.NoError(t, err)
 	updatedUI, err := updated.NodeByNumber(nodeNumber)
 	require.NoError(t, err)
-	require.Len(t, updatedUI.Attempts, 2)
-	assert.Equal(t, coop.AttemptVerificationChanges, updatedUI.Attempts[0].EndReason)
+	require.Len(t, updatedUI.Attempts, 1)
+	assert.Nil(t, updatedUI.Attempts[0].EndedAt)
 }
 
 func findSubscriptionUINode(t *testing.T, session *coop.Session) (int, *coop.SessionNode) {

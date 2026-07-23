@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -199,23 +200,18 @@ func TestEvaluateSubscriptionEvidenceDuringAppReview(t *testing.T) {
 
 	for _, test := range []struct {
 		name              string
-		trialEnd          any
 		lineItemPrice     string
 		subscriptionPrice string
 		omitSubscription  bool
 		wrongSubscription bool
-		omitTrialEnd      bool
 		wantSuffix        string
 		want              coop.CheckStatus
 	}{
-		{name: "matches", trialEnd: json.Number(strconv.FormatInt(trialStart+7*86400, 10)), subscriptionPrice: "price_default", wantSuffix: ".evidence-subscription-field-trial-end", want: coop.CheckPassed},
-		{name: "wrong duration", trialEnd: json.Number(strconv.FormatInt(trialStart+14*86400, 10)), subscriptionPrice: "price_default", wantSuffix: ".evidence-subscription-field-trial-end", want: coop.CheckFailed},
-		{name: "noninteger trial end", trialEnd: "tomorrow", subscriptionPrice: "price_default", wantSuffix: ".evidence-subscription-field-trial-end", want: coop.CheckFailed},
-		{name: "wrong Price", trialEnd: json.Number(strconv.FormatInt(trialStart+7*86400, 10)), subscriptionPrice: "price_other", wantSuffix: ".evidence-subscription-field-items-data-0-price", want: coop.CheckFailed},
-		{name: "uncorrelated Price graph", trialEnd: json.Number(strconv.FormatInt(trialStart+7*86400, 10)), lineItemPrice: "price_other", subscriptionPrice: "price_other", wantSuffix: ".evidence-line_items-field-data-0-price", want: coop.CheckPending},
-		{name: "missing trial end", subscriptionPrice: "price_default", omitTrialEnd: true, wantSuffix: ".evidence-subscription-field-trial-end", want: coop.CheckFailed},
-		{name: "subscription still pending", omitSubscription: true, wantSuffix: ".evidence-subscription-exists", want: coop.CheckPending},
-		{name: "wrong related object type", wrongSubscription: true, wantSuffix: ".evidence-subscription-exists", want: coop.CheckFailed},
+		{name: "reusable Prices match while duration remains unsupported", subscriptionPrice: "price_default", wantSuffix: ".evidence-subscription-field-items-data-0-price", want: coop.CheckPassed},
+		{name: "wrong Price", subscriptionPrice: "price_other", wantSuffix: ".evidence-subscription-field-items-data-0-price", want: coop.CheckUnavailable},
+		{name: "different line item Price", lineItemPrice: "price_other", subscriptionPrice: "price_other", wantSuffix: ".evidence-line_items-field-data-0-price", want: coop.CheckUnavailable},
+		{name: "subscription still pending", omitSubscription: true, wantSuffix: ".evidence-subscription-exists", want: coop.CheckUnavailable},
+		{name: "wrong related object type", wrongSubscription: true, wantSuffix: ".evidence-subscription-exists", want: coop.CheckUnavailable},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			catalog, session := subscriptionFixture(t)
@@ -229,8 +225,13 @@ func TestEvaluateSubscriptionEvidenceDuringAppReview(t *testing.T) {
 				Number: 1, StartedAt: started, ReportedAt: &reported,
 				AppSurface: &coop.AppSurface{URL: "http://localhost:3000/checkout", OpenedAt: &opened},
 			}}
-			plan, err := checks.CompileUIReviewStep(catalog, session, 2, "complete-checkout")
+			plan, err := checks.CompileStep(catalog, session.Steps[2])
 			require.NoError(t, err)
+			var trialGap bool
+			for _, gap := range plan.CoverageGaps {
+				trialGap = trialGap || strings.Contains(gap.Reason, "subscription_data.trial_period_days")
+			}
+			assert.True(t, trialGap, "trial duration must be represented as an explicit unsupported check")
 			checkoutObject := map[string]any{
 				"id": "cs_subscription", "livemode": false, "mode": "subscription",
 				"status": "complete", "payment_status": "no_payment_required",
@@ -256,12 +257,10 @@ func TestEvaluateSubscriptionEvidenceDuringAppReview(t *testing.T) {
 				subscription := map[string]any{
 					"id": "sub_trial", "livemode": false,
 					"trial_start": json.Number(strconv.FormatInt(trialStart, 10)),
+					"trial_end":   json.Number(strconv.FormatInt(trialStart+14*86400, 10)),
 					"items": map[string]any{"data": []any{map[string]any{
 						"price": map[string]any{"id": test.subscriptionPrice},
 					}}},
-				}
-				if !test.omitTrialEnd {
-					subscription["trial_end"] = test.trialEnd
 				}
 				objects["/v1/subscriptions/sub_trial"] = subscription
 			}
@@ -273,28 +272,24 @@ func TestEvaluateSubscriptionEvidenceDuringAppReview(t *testing.T) {
 			require.NoError(t, evaluateErr)
 			result := resultWithSuffix(t, report, test.wantSuffix)
 			assert.Equal(t, test.want, result.Status)
-			if test.name == "matches" {
-				require.Len(t, report.Bindings, 1)
-				assert.Equal(t, coop.BindingObserved, report.Bindings[0].Source,
-					"the exact Product Price relationship makes the exercised Checkout attributable")
-				for _, finding := range report.Results {
-					assert.NotContains(t, finding.ID, ".attribution.")
-				}
-				lateCandidate := report.Bindings[0]
-				lateCandidate.Source = coop.BindingObservedCandidate
-				ui.Attempts[0].Resources = []coop.ResourceBinding{lateCandidate}
-				late, lateErr := NewEvaluator(&memoryReader{objects: objects}, catalog).Evaluate(context.Background(), Input{
-					Plan: plan, Session: session, NodeNumber: uiNumber, AttemptNumber: 1,
-					ObservedAt: opened.Add(eventDiscoveryWindow + time.Second),
-				})
-				require.NoError(t, lateErr)
-				require.Len(t, late.Bindings, 1)
-				assert.Equal(t, coop.BindingObservedCandidate, late.Bindings[0].Source,
-					"relationship evidence cannot promote a candidate after the bounded attribution window")
-				assert.Equal(t, coop.CheckUnavailable,
-					resultWithSuffix(t, late, ".attribution.checkout_session.checkout_session").Status)
+			require.Len(t, report.Bindings, 1)
+			assert.Equal(t, coop.BindingObservedCandidate, report.Bindings[0].Source,
+				"a reusable Price relationship verifies facts but cannot identify this human interaction")
+			assert.Equal(t, coop.CheckUnavailable,
+				resultWithSuffix(t, report, ".attribution.checkout_session.checkout_session").Status)
+			assert.Equal(t, coop.CheckAdvisory, result.Importance,
+				"facts about an unattributed candidate must remain supporting evidence")
+			for _, finding := range report.Results {
+				assert.NotEqual(t, coop.CheckFailed, finding.Status,
+					"an unattributed account-wide event must never blame the agent")
+				assert.NotContains(t, finding.ID, "trial-end",
+					"unsupported duration logic must not be fabricated in the evaluator")
 			}
-			if test.name == "uncorrelated Price graph" {
+			if test.want == coop.CheckPassed {
+				assert.NotEmpty(t, result.Expected)
+				assert.NotEmpty(t, result.Observed)
+			}
+			if test.name == "different line item Price" {
 				require.Len(t, report.Bindings, 1)
 				assert.Equal(t, coop.BindingObservedCandidate, report.Bindings[0].Source,
 					"an account-wide event must remain replaceable when its blueprint relationship does not match")
@@ -316,11 +311,10 @@ func TestEvaluateSubscriptionEvidenceDuringAppReview(t *testing.T) {
 				"/v1/products/prod_subscription",
 			}, reader.paths[:3], "the matching event must drive resource and state checks in one snapshot")
 			assert.Equal(t, 1, pathCount(reader.paths, "/v1/checkout/sessions/cs_subscription"),
-				"the projected state must share the authoritative Checkout read")
-			if test.want == coop.CheckFailed {
+				"the declared state must share the authoritative Checkout read")
+			if test.want == coop.CheckUnavailable {
 				assert.NotEmpty(t, result.Expected)
 				assert.NotEmpty(t, result.Observed)
-				assert.Contains(t, result.Repair, "trial duration")
 			}
 			if test.omitSubscription {
 				require.Len(t, report.Bindings, 1)
@@ -337,7 +331,7 @@ func TestEvaluateSubscriptionEvidenceDuringAppReview(t *testing.T) {
 	}
 }
 
-func TestEvaluateEventReturnsCompleteProjectedStateSnapshot(t *testing.T) {
+func TestEvaluateEventReturnsCompleteStateSnapshot(t *testing.T) {
 	started := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
 	reported := started.Add(time.Minute)
 	opened := reported.Add(time.Minute)

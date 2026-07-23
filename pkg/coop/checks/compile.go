@@ -252,11 +252,15 @@ type predicateCoverageGap struct {
 	discriminator string
 	input         string
 	interpolated  bool
+	unsupported   bool
 }
 
 func (gap predicateCoverageGap) reason(resourceType string) string {
 	if gap.interpolated {
 		return fmt.Sprintf("request input %q is resolved at runtime, so %s cannot be compared with its blueprint template", gap.input, resourceType)
+	}
+	if gap.unsupported {
+		return fmt.Sprintf("request input %q selects %s evidence, but has no supported direct comparison", gap.input, resourceType)
 	}
 	return fmt.Sprintf("request input %q references another node, but %s has no supported resource-field mapping for it", gap.input, resourceType)
 }
@@ -267,7 +271,7 @@ func compileResourcePredicates(templates []PredicateTemplate, inputs map[string]
 	var gaps []predicateCoverageGap
 	for _, template := range templates {
 		switch template.Kind {
-		case PredicateEqualsInput, PredicateDifferenceEqualsInput:
+		case PredicateEqualsInput:
 			values := inputs[template.Input]
 			if len(values) != 1 {
 				continue
@@ -358,23 +362,23 @@ func compileEvidence(rules []EvidenceRule, request coop.APIRequest) ([]EvidenceC
 		if err != nil {
 			return nil, nil, err
 		}
+		if rule.WhenInput != "" && !templatesMapInput(rule.Predicates, rule.WhenInput) {
+			gaps = append(gaps, predicateCoverageGap{
+				discriminator: "unsupported:" + rule.WhenInput,
+				input:         rule.WhenInput,
+				unsupported:   true,
+			})
+		}
 		for _, gap := range gaps {
 			// Each evidence rule sees the whole request. Unmapped references
 			// belong to some other rule and are reported once by the parent
 			// resource compiler; only a selected-but-interpolated input is an
 			// evidence-specific coverage gap.
-			if !gap.interpolated {
+			if !gap.interpolated && !gap.unsupported {
 				continue
 			}
 			gap.discriminator = "evidence:" + rule.ID + ":" + gap.discriminator
 			allGaps = append(allGaps, gap)
-		}
-		// Correlation is an attribution boundary, so it must not silently
-		// degrade to a subset of the catalog-declared relationships. If any
-		// binding comparison is inapplicable to this request, omit the entire
-		// correlation read rather than treating a weaker match as ownership.
-		if rule.CorrelatesAttempt && len(predicates) != len(rule.Predicates) {
-			continue
 		}
 		// Evidence exists to support predicates selected by this exact request.
 		// If none apply, omit the read instead of fetching unrelated objects.
@@ -382,14 +386,13 @@ func compileEvidence(rules []EvidenceRule, request coop.APIRequest) ([]EvidenceC
 			continue
 		}
 		compiled = append(compiled, EvidenceCheck{
-			ID:                rule.ID,
-			RetrievePath:      rule.Retrieve,
-			FromField:         rule.FromField,
-			IDPrefixes:        append([]string(nil), rule.IDPrefixes...),
-			Eventual:          rule.Eventual,
-			CorrelatesAttempt: rule.CorrelatesAttempt,
-			Predicates:        predicates,
-			Repair:            rule.Repair,
+			ID:           rule.ID,
+			RetrievePath: rule.Retrieve,
+			FromField:    rule.FromField,
+			IDPrefixes:   append([]string(nil), rule.IDPrefixes...),
+			Eventual:     rule.Eventual,
+			Predicates:   predicates,
+			Repair:       rule.Repair,
 		})
 	}
 	return compiled, allGaps, nil
@@ -416,14 +419,21 @@ func compileTerminalFailures(templates []TerminalFailTemplate) []TerminalFail {
 
 func predicateFromTemplate(template PredicateTemplate) Predicate {
 	return Predicate{
-		Kind:       template.Kind,
-		Field:      template.Field,
-		BaseField:  template.BaseField,
-		Input:      template.Input,
-		Multiplier: template.Multiplier,
-		Value:      template.Value,
-		Values:     append([]string(nil), template.Values...),
+		Kind:   template.Kind,
+		Field:  template.Field,
+		Input:  template.Input,
+		Value:  template.Value,
+		Values: append([]string(nil), template.Values...),
 	}
+}
+
+func templatesMapInput(templates []PredicateTemplate, input string) bool {
+	for _, template := range templates {
+		if template.Input == input {
+			return true
+		}
+	}
+	return false
 }
 
 func requestInput(request coop.APIRequest, path string) (any, bool) {

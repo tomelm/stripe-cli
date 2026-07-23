@@ -148,7 +148,7 @@ func TestNewWorkflowServicePinsFirstUsableTestAccount(t *testing.T) {
 func TestCoopAgentStartWorkCommand(t *testing.T) {
 	store, session := setupAgentCommandTest(t)
 	cmd := newCoopAgentStartWorkCmd().cmd
-	cmd.SetArgs([]string{"--session", session.ID, "--step", "1", "--note", "Starting"})
+	cmd.SetArgs([]string{"--session", session.ID, "--node", "1", "--note", "Starting"})
 
 	output := captureStdout(t, func() {
 		require.NoError(t, cmd.Execute())
@@ -157,7 +157,9 @@ func TestCoopAgentStartWorkCommand(t *testing.T) {
 	var resp coop.CommandResponse
 	require.NoError(t, json.Unmarshal([]byte(output), &resp))
 	require.True(t, resp.OK)
-	assert.Contains(t, resp.Next, "stripe coop agent report-work")
+	assert.Empty(t, resp.Next)
+	assert.Contains(t, resp.NextTemplate, "stripe coop agent report-work")
+	assert.Equal(t, []string{"note"}, resp.RequiredInputs)
 
 	loaded, err := store.Read(session.ID)
 	require.NoError(t, err)
@@ -179,7 +181,7 @@ func TestCoopAgentReportCheckCommand(t *testing.T) {
 	require.NoError(t, err)
 
 	cmd := newCoopAgentReportCheckCmd().cmd
-	cmd.SetArgs([]string{"--session", session.ID, "--step", "1", "--attempt", "1", "--check", "Manual checkout passed", "--passed"})
+	cmd.SetArgs([]string{"--session", session.ID, "--node", "1", "--attempt", "1", "--check", "Manual checkout passed", "--passed"})
 
 	output := captureStdout(t, func() {
 		require.NoError(t, cmd.Execute())
@@ -198,6 +200,43 @@ func TestCoopAgentReportCheckCommand(t *testing.T) {
 	require.Len(t, attempt.AgentChecks, 1)
 	assert.Equal(t, "Manual checkout passed", attempt.AgentChecks[0].Check)
 	assert.True(t, attempt.AgentChecks[0].Passed)
+}
+
+func TestCoopAgentReportCheckRequiresExplicitOutcome(t *testing.T) {
+	store, session := setupAgentCommandTest(t)
+	_, err := store.Update(session.ID, func(session *coop.Session) error {
+		if err := session.TransitionNode(1, coop.NodeActive); err != nil {
+			return err
+		}
+		node, _ := session.NodeByNumber(1)
+		_, err := node.StartAttempt(time.Now().UTC(), "")
+		return err
+	})
+	require.NoError(t, err)
+
+	cmd := newCoopAgentReportCheckCmd().cmd
+	cmd.SetArgs([]string{
+		"--session", session.ID,
+		"--node", "1",
+		"--attempt", "1",
+		"--check", "Manual checkout",
+	})
+
+	output := captureStdout(t, func() {
+		err := cmd.Execute()
+		require.Error(t, err)
+	})
+	var response coop.CommandResponse
+	require.NoError(t, json.Unmarshal([]byte(output), &response))
+	assert.False(t, response.OK)
+	assert.Contains(t, response.Error, "--passed must be explicit")
+	assert.Empty(t, response.Next)
+
+	loaded, err := store.Read(session.ID)
+	require.NoError(t, err)
+	node, err := loaded.NodeByNumber(1)
+	require.NoError(t, err)
+	assert.Empty(t, node.CurrentAttempt().AgentChecks)
 }
 
 func TestCoopAgentNextActionReturnsStructuredErrorForHelperFailure(t *testing.T) {
@@ -433,5 +472,6 @@ func TestOutputAgentErrorEmitsStructuredJSON(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(output), &resp))
 	assert.False(t, resp.OK)
 	assert.Contains(t, resp.Error, "creating store: disk full")
-	assert.NotEmpty(t, resp.Next)
+	assert.Empty(t, resp.Next)
+	assert.Contains(t, resp.Hint, "retry the same agent command")
 }

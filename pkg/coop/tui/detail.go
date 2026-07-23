@@ -169,7 +169,7 @@ func (m Model) writeSummaryDetail(md *strings.Builder, node *coop.SessionNode) {
 	if attempt := presentationAttempt(node); attempt != nil && (node.State == coop.NodeActive || node.State == coop.NodeReview) && attempt.Feedback != "" {
 		label := "Correction requested"
 		if node.State == coop.NodeReview {
-			label = "Correction addressed"
+			label = "Agent resubmitted after feedback"
 		}
 		md.WriteString("**" + label + ":** " + safeEvidenceText(attempt.Feedback) + "\n\n")
 	}
@@ -191,8 +191,8 @@ func (m Model) writeSummaryDetail(md *strings.Builder, node *coop.SessionNode) {
 	if node.Description != "" {
 		md.WriteString(node.Description + "\n\n")
 	}
-	if node.ReviewPrompt != "" {
-		md.WriteString("**Confirmation steps:** " + node.ReviewPrompt + "\n\n")
+	if prompt := humanReviewPrompt(node); prompt != "" {
+		md.WriteString("**What to try:** " + prompt + "\n\n")
 	}
 	if node.Description == "" && node.ReviewPrompt == "" {
 		md.WriteString("*No summary available for this step.*\n\n")
@@ -233,7 +233,14 @@ func (m Model) writeStepSummaryDetail(md *strings.Builder, ch *coop.SessionStep,
 		md.WriteString("\n")
 	}
 	if checks := stepConfirmationNodes(ch); checks != "" {
-		md.WriteString("Confirmation steps\n")
+		md.WriteString("What to try\n")
+		for _, line := range strings.Split(wordWrap(checks, wrapWidth), "\n") {
+			md.WriteString("  " + line + "\n")
+		}
+		md.WriteString("\n")
+	}
+	if checks := stepAgentReportedChecks(ch); checks != "" {
+		md.WriteString("Agent reported\n")
 		for _, line := range strings.Split(wordWrap(checks, wrapWidth), "\n") {
 			md.WriteString("  " + line + "\n")
 		}
@@ -266,8 +273,8 @@ func (m Model) writeStepFilesDetail(md *strings.Builder, ch *coop.SessionStep) {
 func (m Model) writeStepChecksDetail(md *strings.Builder, ch *coop.SessionStep) {
 	wrote := false
 	for _, node := range ch.Nodes {
-		if node.ReviewPrompt != "" {
-			md.WriteString("- " + node.Title + ": " + node.ReviewPrompt + "\n")
+		if prompt := humanReviewPrompt(&node); prompt != "" {
+			md.WriteString("- " + node.Title + ": " + prompt + "\n")
 			wrote = true
 		}
 		if attempt := presentationAttempt(&node); attempt != nil {
@@ -353,8 +360,18 @@ func stepChangedFiles(ch *coop.SessionStep) string {
 }
 
 func stepConfirmationNodes(ch *coop.SessionStep) string {
-	var agentChecks []string
-	seenAgentCheck := map[string]bool{}
+	var checks []string
+	for _, node := range ch.Nodes {
+		if prompt := humanReviewPrompt(&node); prompt != "" {
+			checks = append(checks, node.Title+": "+prompt)
+		}
+	}
+	return strings.Join(checks, " ")
+}
+
+func stepAgentReportedChecks(ch *coop.SessionStep) string {
+	var checks []string
+	seen := map[string]bool{}
 	for _, node := range ch.Nodes {
 		attempt := presentationAttempt(&node)
 		if attempt == nil {
@@ -362,24 +379,18 @@ func stepConfirmationNodes(ch *coop.SessionStep) string {
 		}
 		for _, verification := range attempt.AgentChecks {
 			check := strings.TrimSpace(verification.Check)
-			if !verification.Passed || check == "" || seenAgentCheck[check] {
+			if check == "" || seen[check] {
 				continue
 			}
-			seenAgentCheck[check] = true
+			seen[check] = true
+			status := "failed"
+			if verification.Passed {
+				status = "passed"
+			}
 			if node.Title != "" {
 				check = node.Title + ": " + check
 			}
-			agentChecks = append(agentChecks, check)
-		}
-	}
-	if len(agentChecks) > 0 {
-		return strings.Join(agentChecks, " ")
-	}
-
-	var checks []string
-	for _, node := range ch.Nodes {
-		if node.ReviewPrompt != "" {
-			checks = append(checks, node.Title+": "+node.ReviewPrompt)
+			checks = append(checks, check+" ("+status+")")
 		}
 	}
 	return strings.Join(checks, " ")
@@ -390,17 +401,15 @@ func (m Model) writeAsyncHandlerCheckDetail(md *strings.Builder, node *coop.Sess
 		return
 	}
 	md.WriteString("**How to verify:**\n\n")
-	md.WriteString("1. `stripe listen --forward-to localhost:<port>/webhook`\n")
-	md.WriteString("2. `stripe trigger " + node.Events[0] + "`\n")
-	md.WriteString("3. Confirm your handler processes the event\n\n")
+	md.WriteString("Exercise the application flow that emits `" + node.Events[0] + "`, then confirm the handler processes it. Co-op does not assume a matching CLI fixture exists.\n\n")
 }
 
 func (m Model) writeAsyncHandlerReferenceDetail(md *strings.Builder, node *coop.SessionNode) {
 	if node.Type != coop.NodeAsyncHandler || len(node.Events) == 0 {
 		return
 	}
-	md.WriteString("**Webhook trigger:**\n\n")
-	md.WriteString("`stripe trigger " + node.Events[0] + "`\n\n")
+	md.WriteString("**Expected webhook event:**\n\n")
+	md.WriteString("`" + node.Events[0] + "`\n\n")
 }
 
 func (m Model) writeReviewCommandDetail(md *strings.Builder, node *coop.SessionNode) {
@@ -437,14 +446,13 @@ func (m Model) writeImplementationDetail(md *strings.Builder, node *coop.Session
 		md.WriteString("---\n\n")
 	}
 	imp := attempt.Implementation
-	md.WriteString("**Agent wrote:** `" + implementationFileLabel(imp) + "`\n\n")
-	if imp.Snippet != "" {
-		md.WriteString("```" + m.detailLanguage() + "\n")
-		md.WriteString(imp.Snippet + "\n")
-		md.WriteString("```\n\n")
+	if file := implementationFileLabel(imp); file != "" {
+		md.WriteString("**Agent wrote:** `" + file + "`\n\n")
+	} else {
+		md.WriteString("**Agent report**\n\n")
 	}
 	if imp.Note != "" {
-		md.WriteString("> " + imp.Note + "\n\n")
+		md.WriteString("> " + safeEvidenceText(imp.Note) + "\n\n")
 	}
 }
 
@@ -537,9 +545,13 @@ func (m Model) writeVerificationOverrideDetail(md *strings.Builder, node *coop.S
 }
 
 func safeEvidenceText(value string) string {
-	value = strings.ReplaceAll(value, "`", "'")
-	value = strings.ReplaceAll(value, "\r", " ")
-	return strings.ReplaceAll(value, "\n", " ")
+	value = strings.Map(func(character rune) rune {
+		if character < 0x20 || (character >= 0x7f && character <= 0x9f) {
+			return ' '
+		}
+		return character
+	}, value)
+	return strings.ReplaceAll(value, "`", "'")
 }
 
 func (m Model) renderDetailSuffix(node *coop.SessionNode, width int) string {

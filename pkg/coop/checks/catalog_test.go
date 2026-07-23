@@ -47,7 +47,6 @@ func TestLoadCatalogIncludesEveryFixedPredicateAndRule(t *testing.T) {
 		PredicatePositive,
 		PredicateEqualsInput,
 		PredicateEqualsBinding,
-		PredicateDifferenceEqualsInput,
 	} {
 		assert.Truef(t, kinds[kind], "catalog does not exercise %s", kind)
 	}
@@ -64,6 +63,13 @@ func TestDecodeCatalogIsStrict(t *testing.T) {
 	badOperator := strings.Replace(string(embeddedCatalog), `"op": "equals_input"`, `"op": "contains"`, 1)
 	_, err = decodeCatalog([]byte(badOperator))
 	require.ErrorContains(t, err, "is invalid")
+
+	legacyCorrelation := strings.Replace(string(embeddedCatalog),
+		`"repair": "Use the Price returned`,
+		`"correlates_attempt": true, "repair": "Use the Price returned`, 1)
+	_, err = decodeCatalog([]byte(legacyCorrelation))
+	require.ErrorContains(t, err, `unknown field "correlates_attempt"`,
+		"reusable resource relationships must not become an attribution mechanism")
 }
 
 func TestCatalogValidateRejectsAmbiguousOrInvalidDefinitions(t *testing.T) {
@@ -165,21 +171,6 @@ func TestCatalogValidateRejectsAmbiguousOrInvalidDefinitions(t *testing.T) {
 		}
 		catalog.Resources[0].Predicates = predicates
 		require.ErrorContains(t, catalog.Validate(), "exceeds 8 entries")
-	})
-
-	t.Run("attempt correlation requires only binding predicates", func(t *testing.T) {
-		catalog := testCatalog(t)
-		for resourceIndex := range catalog.Resources {
-			if len(catalog.Resources[resourceIndex].Evidence) == 0 {
-				continue
-			}
-			evidence := &catalog.Resources[resourceIndex].Evidence[0]
-			evidence.CorrelatesAttempt = true
-			evidence.Predicates = []PredicateTemplate{{Kind: PredicatePresent, Field: "id"}}
-			require.ErrorContains(t, catalog.Validate(), "correlates_attempt")
-			return
-		}
-		t.Fatal("catalog has no evidence rule")
 	})
 
 	t.Run("eventual evidence requires a related field", func(t *testing.T) {

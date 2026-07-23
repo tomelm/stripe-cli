@@ -2,7 +2,10 @@ package workflow
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,7 +23,9 @@ func TestStartWorkTransitionsNodeAndReturnsTypedNextCommand(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, resp.OK)
 	assert.Equal(t, "active", resp.State)
-	assert.Contains(t, resp.Next, "stripe coop agent report-work")
+	assert.Empty(t, resp.Next)
+	assert.Contains(t, resp.NextTemplate, "stripe coop agent report-work")
+	assert.Equal(t, []string{"note"}, resp.RequiredInputs)
 
 	loaded, err := store.Read(session.ID)
 	require.NoError(t, err)
@@ -41,7 +46,7 @@ func TestReportWorkContinuesStepBeforeReview(t *testing.T) {
 	require.True(t, resp.OK)
 	assert.Equal(t, "review", resp.State)
 	assert.Contains(t, resp.Message, "Continue the remaining work")
-	assert.Contains(t, resp.Next, "--step=2")
+	assert.Contains(t, resp.Next, "--node=2")
 }
 
 func TestReportWorkRoutesToAwaitReviewWhenStepReady(t *testing.T) {
@@ -50,11 +55,11 @@ func TestReportWorkRoutesToAwaitReviewWhenStepReady(t *testing.T) {
 
 	first, err := service.StartWork(session.ID, 1, "First")
 	require.NoError(t, err)
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, first.Attempt, ReportWorkInput{File: "server.go"})
+	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, first.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented first node"})
 	require.NoError(t, err)
 	second, err := service.StartWork(session.ID, 2, "Second")
 	require.NoError(t, err)
-	resp, err := service.ReportWorkAttempt(context.Background(), session.ID, 2, second.Attempt, ReportWorkInput{File: "client.go"})
+	resp, err := service.ReportWorkAttempt(context.Background(), session.ID, 2, second.Attempt, ReportWorkInput{File: "client.go", Note: "Implemented second node"})
 	require.NoError(t, err)
 	require.True(t, resp.OK)
 	assert.Contains(t, resp.Message, "ready for developer review")
@@ -75,7 +80,7 @@ func TestAutomaticWorkflowRequiresEvaluatorWithoutMutatingWork(t *testing.T) {
 	require.NoError(t, err)
 	for _, run := range []func() (coop.CommandResponse, error){
 		func() (coop.CommandResponse, error) {
-			return service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go"})
+			return service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
 		},
 		func() (coop.CommandResponse, error) {
 			return service.AwaitReviewAttempt(context.Background(), session.ID, 1, started.Attempt)
@@ -95,16 +100,79 @@ func TestAutomaticWorkflowRequiresEvaluatorWithoutMutatingWork(t *testing.T) {
 	assert.Nil(t, node.CurrentAttempt().ReportedAt)
 }
 
+func TestReportWorkRequiresEveryDeclaredResourceBeforeSubmission(t *testing.T) {
+	store, session := workflowTestStore(t)
+	service := NewService(store, WithEvaluator(requiredCustomerWorkflowEvaluator{}))
+
+	started, err := service.StartWork(session.ID, 1, "Building")
+	require.NoError(t, err)
+	assert.Contains(t, started.RequiredInputs, "stripe-resource:customer")
+
+	response, err := service.ReportWorkAttempt(
+		context.Background(),
+		session.ID,
+		1,
+		started.Attempt,
+		ReportWorkInput{File: "server.go", Note: "Implemented customer creation"},
+	)
+	require.NoError(t, err)
+	require.False(t, response.OK)
+	assert.Contains(t, response.Error, "--stripe-resource=customer=<customer-id> is required")
+
+	loaded, err := store.Read(session.ID)
+	require.NoError(t, err)
+	node, err := loaded.NodeByNumber(1)
+	require.NoError(t, err)
+	require.NotNil(t, node.CurrentAttempt())
+	assert.Nil(t, node.CurrentAttempt().ReportedAt)
+	assert.Nil(t, node.CurrentAttempt().Implementation)
+	assert.Empty(t, node.CurrentAttempt().Resources)
+	assert.Equal(t, coop.NodeActive, node.State)
+}
+
+func TestReportCheckRejectsAlreadySubmittedAttemptWithoutMutation(t *testing.T) {
+	store, session := workflowTestStore(t)
+	service := newPassingWorkflowService(store)
+	started, err := service.StartWork(session.ID, 1, "Building")
+	require.NoError(t, err)
+	_, err = service.ReportWorkAttempt(
+		context.Background(),
+		session.ID,
+		1,
+		started.Attempt,
+		ReportWorkInput{File: "server.go", Note: "Implemented node"},
+	)
+	require.NoError(t, err)
+
+	response, err := service.ReportCheckAttempt(
+		session.ID,
+		1,
+		started.Attempt,
+		"Late check",
+		true,
+	)
+	require.NoError(t, err)
+	require.False(t, response.OK)
+	assert.Contains(t, response.Error, "report-check is only valid before report-work")
+
+	loaded, err := store.Read(session.ID)
+	require.NoError(t, err)
+	node, err := loaded.NodeByNumber(1)
+	require.NoError(t, err)
+	assert.Equal(t, coop.NodeReview, node.State)
+	assert.Empty(t, node.CurrentAttempt().AgentChecks)
+}
+
 func TestConfirmAndRequestChangesUseCentralWorkflow(t *testing.T) {
 	store, session := workflowTestStore(t)
 	service := newPassingWorkflowService(store)
 
 	started, err := service.StartWork(session.ID, 1, "First")
 	require.NoError(t, err)
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go"})
+	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
 	require.NoError(t, err)
 
-	updated, err := service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, false, "")
+	updated, err := service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, nil)
 	require.NoError(t, err)
 	node, err := updated.NodeByNumber(1)
 	require.NoError(t, err)
@@ -114,17 +182,156 @@ func TestConfirmAndRequestChangesUseCentralWorkflow(t *testing.T) {
 func TestConfirmReviewTreatsSkippedNodesAsTerminal(t *testing.T) {
 	store, session := workflowTestStore(t)
 	service := newPassingWorkflowService(store)
+	_, err := store.Update(session.ID, func(session *coop.Session) error {
+		session.Steps[0].Skippable = true
+		return nil
+	})
+	require.NoError(t, err)
 
 	started, err := service.StartWork(session.ID, 1, "Skipping")
 	require.NoError(t, err)
-	_, err = service.SkipAttempt(session.ID, 1, started.Attempt, "Not needed")
+	response, err := service.SkipAttempt(session.ID, 1, started.Attempt, " Not needed ")
 	require.NoError(t, err)
+	require.True(t, response.OK)
 
-	updated, err := service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1}}, false, "")
+	updated, err := service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1}}, nil)
 	require.NoError(t, err)
 	node, err := updated.NodeByNumber(1)
 	require.NoError(t, err)
 	assert.Equal(t, coop.NodeSkipped, node.State)
+	assert.Equal(t, "Not needed", node.Activity)
+}
+
+func TestSkipAttemptRejectsRequiredStepAndInvalidReasonWithoutMutation(t *testing.T) {
+	tests := []struct {
+		name   string
+		reason string
+		error  string
+	}{
+		{name: "required step", reason: "No longer needed", error: "required step"},
+		{name: "empty reason", reason: " \t ", error: "skip reason is required"},
+		{name: "oversized reason", reason: strings.Repeat("x", coop.MaxSkipReasonBytes+1), error: "skip reason exceeds"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store, session := workflowTestStore(t)
+			service := newPassingWorkflowService(store)
+			if test.name != "required step" {
+				_, err := store.Update(session.ID, func(session *coop.Session) error {
+					session.Steps[0].Skippable = true
+					return nil
+				})
+				require.NoError(t, err)
+			}
+			started, err := service.StartWork(session.ID, 1, "Starting")
+			require.NoError(t, err)
+
+			response, err := service.SkipAttempt(session.ID, 1, started.Attempt, test.reason)
+
+			require.NoError(t, err)
+			assert.False(t, response.OK)
+			assert.Contains(t, response.Error, test.error)
+			loaded, err := store.Read(session.ID)
+			require.NoError(t, err)
+			node, err := loaded.NodeByNumber(1)
+			require.NoError(t, err)
+			assert.Equal(t, coop.NodeActive, node.State)
+			require.NotNil(t, node.CurrentAttempt())
+			assert.Equal(t, started.Attempt, node.CurrentAttempt().Number)
+			assert.Nil(t, node.CurrentAttempt().EndedAt)
+		})
+	}
+}
+
+func TestAttemptNeedsReevaluationOnlyForOpenState(t *testing.T) {
+	opened := time.Now().UTC()
+	beforeOpen := opened.Add(-time.Second)
+	afterOpen := opened.Add(time.Second)
+	tests := []struct {
+		name    string
+		attempt *coop.NodeAttempt
+		want    bool
+	}{
+		{name: "nil", attempt: nil},
+		{name: "pending", attempt: &coop.NodeAttempt{Results: []coop.CheckResult{{
+			Importance: coop.CheckRequired, Status: coop.CheckPending,
+		}}}, want: true},
+		{name: "unavailable is settled", attempt: &coop.NodeAttempt{Results: []coop.CheckResult{{
+			Importance: coop.CheckRequired, Status: coop.CheckUnavailable,
+		}}}},
+		{name: "passed is settled", attempt: &coop.NodeAttempt{Results: []coop.CheckResult{{
+			Importance: coop.CheckRequired, Status: coop.CheckPassed,
+		}}}},
+		{name: "newer automatic check is running", attempt: &coop.NodeAttempt{
+			AutomaticCheckStartedAt: &afterOpen, AutomaticResultsAt: &beforeOpen,
+		}, want: true},
+		{name: "needs post-open sample", attempt: &coop.NodeAttempt{
+			AppSurface: &coop.AppSurface{OpenedAt: &opened}, AutomaticResultsAt: &beforeOpen,
+		}, want: true},
+		{name: "post-open sample settled", attempt: &coop.NodeAttempt{
+			AppSurface: &coop.AppSurface{OpenedAt: &opened}, AutomaticResultsAt: &afterOpen,
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, AttemptNeedsReevaluation(test.attempt))
+		})
+	}
+}
+
+func TestQuoteArgPreventsShellExpansion(t *testing.T) {
+	assert.Equal(t, `'$(touch /tmp/should-not-run) `+"`whoami`"+` O'"'"'Brien'`, quoteArg("$(touch /tmp/should-not-run) `whoami` O'Brien"))
+}
+
+func TestBoundedResultFeedbackKeepsCorrectionAttemptWithinSessionLimit(t *testing.T) {
+	var failures []coop.CheckResult
+	for index := 0; index < 20; index++ {
+		failures = append(failures, coop.CheckResult{
+			ID:         fmt.Sprintf("failure.%02d", index),
+			Detail:     strings.Repeat("detail", 35),
+			Expected:   strings.Repeat("expected", 20),
+			Observed:   strings.Repeat("observed", 20),
+			Repair:     strings.Repeat("repair", 35),
+			Importance: coop.CheckRequired,
+			Status:     coop.CheckFailed,
+		})
+	}
+
+	feedback := boundedResultFeedback(failures)
+
+	assert.LessOrEqual(t, len(feedback), coop.MaxAttemptFeedbackBytes)
+	assert.Contains(t, feedback, "more verification finding")
+	assert.Contains(t, feedback, "detaildetail")
+	assert.NotContains(t, feedback, "\n")
+}
+
+func TestMultipleFailuresCreateBoundedCorrectionAttempt(t *testing.T) {
+	store, session := workflowTestStore(t)
+	service := NewService(store, WithEvaluator(multiFailureWorkflowEvaluator{}))
+	started, err := service.StartWork(session.ID, 1, "Building")
+	require.NoError(t, err)
+
+	response, err := service.ReportWorkAttempt(
+		context.Background(),
+		session.ID,
+		1,
+		started.Attempt,
+		ReportWorkInput{File: "server.go", Note: "Implemented node"},
+	)
+
+	require.NoError(t, err)
+	require.True(t, response.OK)
+	assert.Equal(t, string(decisionNeedsAgent), response.Decision)
+	loaded, err := store.Read(session.ID)
+	require.NoError(t, err)
+	node, err := loaded.NodeByNumber(1)
+	require.NoError(t, err)
+	require.Len(t, node.Attempts, 2)
+	require.Len(t, node.Attempts[0].Results, 2)
+	assert.Equal(t, coop.AttemptVerificationChanges, node.Attempts[0].EndReason)
+	require.NotNil(t, node.CurrentAttempt())
+	assert.NotEmpty(t, node.CurrentAttempt().Feedback)
+	assert.NotContains(t, node.CurrentAttempt().Feedback, "\n")
 }
 
 func TestRequestChangesMovesReviewNodeBackToActive(t *testing.T) {
@@ -133,7 +340,7 @@ func TestRequestChangesMovesReviewNodeBackToActive(t *testing.T) {
 
 	started, err := service.StartWork(session.ID, 1, "First")
 	require.NoError(t, err)
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go"})
+	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
 	require.NoError(t, err)
 	updated, err := service.RequestChangesAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, "Needs tests")
 	require.NoError(t, err)
@@ -176,13 +383,15 @@ func TestReportWorkRoutesToNextActiveCorrection(t *testing.T) {
 
 	first, err := service.StartWork(session.ID, 1, "Fixing one")
 	require.NoError(t, err)
-	response, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, first.Attempt, ReportWorkInput{File: "one.go"})
+	response, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, first.Attempt, ReportWorkInput{File: "one.go", Note: "Implemented first node"})
 	require.NoError(t, err)
 
-	assert.Equal(t, `stripe coop agent start-work --session=workflow_test --step=2 --note="Redoing: Two"`, response.Next)
+	assert.Equal(t, `stripe coop agent start-work --session=workflow_test --node=2 --note='Redoing: Two'`, response.Next)
 	second, err := service.StartWork(session.ID, 2, "Fixing two")
 	require.NoError(t, err)
-	assert.Equal(t, `stripe coop agent report-work --session=workflow_test --step=2 --attempt=2 --file=<path> --note="<what you did>"`, second.Next)
+	assert.Empty(t, second.Next)
+	assert.Equal(t, `stripe coop agent report-work --session=workflow_test --node=2 --attempt=2 --note="<implementation-summary>"`, second.NextTemplate)
+	assert.Equal(t, []string{"note"}, second.RequiredInputs)
 }
 
 func TestEvaluationRoutesToNextActiveCorrection(t *testing.T) {
@@ -200,11 +409,11 @@ func TestEvaluationRoutesToNextActiveCorrection(t *testing.T) {
 
 	first, err := service.StartWork(session.ID, 1, "Fixing one")
 	require.NoError(t, err)
-	response, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, first.Attempt, ReportWorkInput{File: "one.go"})
+	response, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, first.Attempt, ReportWorkInput{File: "one.go", Note: "Implemented first node"})
 	require.NoError(t, err)
 
 	assert.Equal(t, string(decisionConfirmed), response.Decision)
-	assert.Equal(t, `stripe coop agent start-work --session=workflow_test --step=2 --note="Redoing: Two"`, response.Next)
+	assert.Equal(t, `stripe coop agent start-work --session=workflow_test --node=2 --note='Redoing: Two'`, response.Next)
 }
 
 func TestAgentWorkflowRejectsInactiveSessions(t *testing.T) {
@@ -221,7 +430,7 @@ func TestAgentWorkflowRejectsInactiveSessions(t *testing.T) {
 		{
 			name: "report work",
 			run: func(service *Service, sessionID string) (coop.CommandResponse, error) {
-				return service.ReportWorkAttempt(context.Background(), sessionID, 1, 1, ReportWorkInput{File: "server.go"})
+				return service.ReportWorkAttempt(context.Background(), sessionID, 1, 1, ReportWorkInput{File: "server.go", Note: "Implemented node"})
 			},
 		},
 		{
@@ -280,7 +489,7 @@ func TestReviewWorkflowRejectsInactiveSessions(t *testing.T) {
 		{
 			name: "confirm review",
 			run: func(service *Service, sessionID string) error {
-				_, err := service.ConfirmReviewAttempts(sessionID, []AttemptRef{{Node: 1, Attempt: 1}}, false, "")
+				_, err := service.ConfirmReviewAttempts(sessionID, []AttemptRef{{Node: 1, Attempt: 1}}, nil)
 				return err
 			},
 		},
@@ -386,7 +595,7 @@ func requestChangesForBothNodes(t *testing.T, service *Service, sessionID string
 	for nodeNumber := 1; nodeNumber <= 2; nodeNumber++ {
 		started, err := service.StartWork(sessionID, nodeNumber, "Initial work")
 		require.NoError(t, err)
-		_, err = service.ReportWorkAttempt(context.Background(), sessionID, nodeNumber, started.Attempt, ReportWorkInput{File: "initial.go"})
+		_, err = service.ReportWorkAttempt(context.Background(), sessionID, nodeNumber, started.Attempt, ReportWorkInput{File: "initial.go", Note: "Implemented node"})
 		require.NoError(t, err)
 		refs = append(refs, AttemptRef{Node: nodeNumber, Attempt: started.Attempt})
 	}
@@ -408,4 +617,33 @@ func (passingWorkflowEvaluator) Evaluate(context.Context, EvaluationInput) (Eval
 	return Evaluation{Results: []coop.CheckResult{{
 		ID: "test.passed", Kind: coop.CheckResource, Importance: coop.CheckRequired, Status: coop.CheckPassed,
 	}}}, nil
+}
+
+type requiredCustomerWorkflowEvaluator struct{}
+
+func (requiredCustomerWorkflowEvaluator) Requirements(*coop.Session, int) ([]coop.ResourceRequirement, error) {
+	return []coop.ResourceRequirement{{Role: "customer", Type: "customer", Required: true}}, nil
+}
+
+func (requiredCustomerWorkflowEvaluator) Evaluate(context.Context, EvaluationInput) (Evaluation, error) {
+	return passingWorkflowEvaluator{}.Evaluate(context.Background(), EvaluationInput{})
+}
+
+type multiFailureWorkflowEvaluator struct{}
+
+func (multiFailureWorkflowEvaluator) Requirements(*coop.Session, int) ([]coop.ResourceRequirement, error) {
+	return nil, nil
+}
+
+func (multiFailureWorkflowEvaluator) Evaluate(context.Context, EvaluationInput) (Evaluation, error) {
+	return Evaluation{Results: []coop.CheckResult{
+		{
+			ID: "failure.one", Kind: coop.CheckResource, Importance: coop.CheckRequired,
+			Status: coop.CheckFailed, Detail: "First mismatch", Repair: "Fix the first value.",
+		},
+		{
+			ID: "failure.two", Kind: coop.CheckState, Importance: coop.CheckRequired,
+			Status: coop.CheckFailed, Detail: "Second mismatch", Repair: "Fix the second value.",
+		},
+	}}, nil
 }

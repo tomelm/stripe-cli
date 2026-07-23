@@ -13,7 +13,7 @@ import (
 	"github.com/stripe/stripe-cli/pkg/coop"
 )
 
-func TestVerificationAcceptanceStartReturnsAttemptRolesAndExactReportCommand(t *testing.T) {
+func TestVerificationAcceptanceStartReturnsAttemptRolesAndReportTemplate(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeCLICommand)
 	evaluator := &acceptanceEvaluator{requirements: []coop.ResourceRequirement{
 		{Role: "price", Type: "price", Required: false},
@@ -31,10 +31,12 @@ func TestVerificationAcceptanceStartReturnsAttemptRolesAndExactReportCommand(t *
 		{Role: "customer", Type: "customer", Required: true},
 		{Role: "price", Type: "price", Required: false},
 	}, response.ResourceRoles)
+	assert.Empty(t, response.Next)
 	assert.Equal(t,
-		`stripe coop agent report-work --session=verification_acceptance --step=1 --attempt=1 --file=<path> --note="<what you did>" --stripe-resource=customer=<customer-id> --stripe-resource=price=<price-id>`,
-		response.Next,
+		`stripe coop agent report-work --session=verification_acceptance --node=1 --attempt=1 --note="<implementation-summary>" --stripe-resource=customer=<customer-id>`,
+		response.NextTemplate,
 	)
+	assert.Equal(t, []string{"note", "stripe-resource:customer"}, response.RequiredInputs)
 }
 
 func TestVerificationAcceptanceRequiredPassAutoCompletesNonUI(t *testing.T) {
@@ -86,7 +88,7 @@ func TestVerificationAcceptanceCandidateCannotAutoCompleteNonUI(t *testing.T) {
 	started, err := service.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
 
-	response, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go"})
+	response, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
 
 	require.NoError(t, err)
 	assert.Equal(t, string(decisionPending), response.Decision)
@@ -109,7 +111,7 @@ func TestVerificationAcceptanceAsyncHandlerPassCompletesWithoutAutomaticConfirma
 	_, err = service.ReportCheckAttempt(session.ID, 1, started.Attempt, "Observed the handler side effect", true)
 	require.NoError(t, err)
 
-	response, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "webhook.go"})
+	response, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "webhook.go", Note: "Implemented webhook"})
 
 	require.NoError(t, err)
 	assert.Equal(t, string(decisionUnverified), response.Decision)
@@ -179,9 +181,10 @@ func TestVerificationAcceptanceAgentReportedFailureRequiresCorrection(t *testing
 	require.NoError(t, err)
 	reportedCheck, err := service.ReportCheckAttempt(session.ID, 1, started.Attempt, "Checkout smoke test", false)
 	require.NoError(t, err)
-	assert.Contains(t, reportedCheck.Next, "start-work")
+	assert.Empty(t, reportedCheck.Next)
+	assert.Contains(t, reportedCheck.NextTemplate, "report-work")
 
-	response, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go"})
+	response, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
 	require.NoError(t, err)
 	assert.Equal(t, string(decisionNeedsAgent), response.Decision)
 	assert.Contains(t, response.Message, "Checkout smoke test")
@@ -201,7 +204,7 @@ func TestVerificationAcceptanceNoDirectVerifierCompletesUnverified(t *testing.T)
 	started, err := service.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
 
-	response, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go"})
+	response, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
 	require.NoError(t, err)
 	assert.Equal(t, string(decisionUnverified), response.Decision)
 	assert.NotContains(t, response.Message, "confirmed")
@@ -226,7 +229,7 @@ func TestVerificationAcceptancePassiveFailureCannotBlameOrWakeAgent(t *testing.T
 	require.NoError(t, err)
 	require.NoError(t, service.RecordSupportingResult(session.ID, 1, started.Attempt, observedFailure))
 
-	response, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go"})
+	response, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
 
 	require.NoError(t, err)
 	assert.Equal(t, string(decisionUnverified), response.Decision)
@@ -247,7 +250,7 @@ func TestVerificationAcceptancePendingPollsSameEvaluatorUntilPass(t *testing.T) 
 	started, err := service.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
 
-	reported, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go"})
+	reported, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
 	require.NoError(t, err)
 	assert.Equal(t, string(decisionPending), reported.Decision)
 	assert.Equal(t, coop.NodeActive, acceptanceNode(t, readAcceptanceSession(t, store, session.ID)).State)
@@ -285,7 +288,7 @@ func TestVerificationAcceptanceLateFailureWakesAgentWithRepairEvidence(t *testin
 	service := newVerificationAcceptanceService(store, evaluator, newAcceptanceClock())
 	started, err := service.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
-	response, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go"})
+	response, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
 	require.NoError(t, err)
 	assert.Equal(t, string(decisionPending), response.Decision)
 
@@ -316,7 +319,7 @@ func TestVerificationAcceptanceStaleAsyncResultCannotLand(t *testing.T) {
 	setupService := newVerificationAcceptanceService(store, setupAcceptanceEvaluator(), clock)
 	started, err := setupService.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
-	_, err = setupService.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go"})
+	_, err = setupService.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
 	require.NoError(t, err)
 	assert.Equal(t, coop.NodeReview, acceptanceNode(t, readAcceptanceSession(t, store, session.ID)).State)
 
@@ -401,7 +404,7 @@ func TestVerificationAcceptanceHumanRejectionCannotRaceUnreviewedReport(t *testi
 	}
 	done := make(chan reportResult, 1)
 	go func() {
-		response, reportErr := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go"})
+		response, reportErr := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
 		done <- reportResult{response: response, err: reportErr}
 	}()
 	select {
@@ -451,7 +454,7 @@ func TestVerificationAcceptanceUIIsNotConfirmableBeforeInitialEvaluation(t *test
 	done := make(chan reportResult, 1)
 	go func() {
 		response, reportErr := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
-			File: "checkout.tsx", AppURL: "http://localhost:3000/checkout",
+			File: "checkout.tsx", Note: "Built checkout UI", AppURL: "http://localhost:3000/checkout",
 		})
 		done <- reportResult{response: response, err: reportErr}
 	}()
@@ -466,7 +469,7 @@ func TestVerificationAcceptanceUIIsNotConfirmableBeforeInitialEvaluation(t *test
 	assert.Equal(t, coop.NodeActive, node.State)
 	require.NotNil(t, node.CurrentAttempt())
 	require.NotNil(t, node.CurrentAttempt().ReportedAt)
-	_, err = service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, false, "")
+	_, err = service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, nil)
 	require.ErrorContains(t, err, "not ready for human confirmation")
 
 	close(release)
@@ -555,6 +558,287 @@ func TestVerificationAcceptanceOlderAutomaticSnapshotCannotResurrectUnavailable(
 	require.NotNil(t, node.CurrentAttempt().AutomaticResultsAt)
 	assert.Equal(t, clock.Now().Add(time.Nanosecond), *node.CurrentAttempt().AutomaticResultsAt)
 	assert.Empty(t, node.CurrentAttempt().Resources, "a rejected stale snapshot must not apply its bindings")
+}
+
+func TestVerificationAcceptanceLaterIdenticalSnapshotRejectsOlderChangedSnapshot(t *testing.T) {
+	store, session := newVerificationAcceptanceStore(t, coop.NodeUIComponent)
+	clock := newAcceptanceClock()
+	passed := requiredAcceptanceResult("resource.checkout.exists", coop.CheckResource, coop.CheckPassed)
+	setup := newVerificationAcceptanceService(store, &acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) (Evaluation, error) {
+		return Evaluation{Results: []coop.CheckResult{passed}}, nil
+	}}, clock)
+	started, err := setup.StartWork(session.ID, 1, "Building UI")
+	require.NoError(t, err)
+	_, err = setup.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
+		File: "checkout.tsx", Note: "Built checkout UI", AppURL: "http://localhost:4242/checkout",
+	})
+	require.NoError(t, err)
+
+	failed := passed
+	failed.Status = coop.CheckFailed
+	failed.Detail = "older contradiction"
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var callsMu sync.Mutex
+	calls := 0
+	evaluator := &acceptanceEvaluator{evaluate: func(ctx context.Context, _ EvaluationInput) (Evaluation, error) {
+		callsMu.Lock()
+		calls++
+		call := calls
+		callsMu.Unlock()
+		if call == 1 {
+			close(entered)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return Evaluation{}, ctx.Err()
+			}
+			return Evaluation{Results: []coop.CheckResult{failed}}, nil
+		}
+		return Evaluation{Results: []coop.CheckResult{passed}}, nil
+	}}
+	service := newVerificationAcceptanceService(store, evaluator, clock)
+	type evaluationResult struct {
+		response coop.CommandResponse
+		err      error
+	}
+	olderDone := make(chan evaluationResult, 1)
+	go func() {
+		response, evaluateErr := service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
+		olderDone <- evaluationResult{response: response, err: evaluateErr}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("older changed evaluation did not start")
+	}
+
+	newer, err := service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerEvent)
+	require.NoError(t, err)
+	assert.Equal(t, string(decisionNeedsHuman), newer.Decision)
+	close(release)
+	older := <-olderDone
+	require.NoError(t, older.err)
+	assert.Equal(t, string(decisionNeedsHuman), older.response.Decision)
+
+	node := acceptanceNode(t, readAcceptanceSession(t, store, session.ID))
+	assert.Equal(t, coop.NodeReview, node.State)
+	require.NotNil(t, node.CurrentAttempt())
+	require.Len(t, node.CurrentAttempt().Results, 1)
+	assert.Equal(t, coop.CheckPassed, node.CurrentAttempt().Results[0].Status)
+	require.Len(t, node.Attempts, 1, "the stale contradiction must not create a correction attempt")
+}
+
+func TestVerificationAcceptanceOlderPassCannotCloseWhileNewerFailureIsRunning(t *testing.T) {
+	store, session := newVerificationAcceptanceStore(t, coop.NodeCLICommand)
+	clock := newAcceptanceClock()
+	pending := requiredAcceptanceResult("resource.checkout.exists", coop.CheckResource, coop.CheckPending)
+	setup := newVerificationAcceptanceService(
+		store,
+		&acceptanceEvaluator{evaluations: []Evaluation{{Results: []coop.CheckResult{pending}}}},
+		clock,
+	)
+	started, err := setup.StartWork(session.ID, 1, "Building")
+	require.NoError(t, err)
+	reported, err := setup.ReportWorkAttempt(
+		context.Background(),
+		session.ID,
+		1,
+		started.Attempt,
+		ReportWorkInput{File: "server.go", Note: "Implemented checkout"},
+	)
+	require.NoError(t, err)
+	require.Equal(t, string(decisionPending), reported.Decision)
+
+	passed := pending
+	passed.Status = coop.CheckPassed
+	failed := pending
+	failed.Status = coop.CheckFailed
+	failed.Detail = "The Checkout Session has the wrong mode."
+	failed.Repair = "Create it with mode=subscription."
+
+	entered := make(chan int, 2)
+	releaseOlder := make(chan struct{})
+	releaseNewer := make(chan struct{})
+	var callsMu sync.Mutex
+	calls := 0
+	evaluator := &acceptanceEvaluator{evaluate: func(ctx context.Context, _ EvaluationInput) (Evaluation, error) {
+		callsMu.Lock()
+		calls++
+		call := calls
+		callsMu.Unlock()
+		entered <- call
+		release := releaseOlder
+		result := passed
+		if call == 2 {
+			release = releaseNewer
+			result = failed
+		}
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return Evaluation{}, ctx.Err()
+		}
+		return Evaluation{Results: []coop.CheckResult{result}}, nil
+	}}
+	service := newVerificationAcceptanceService(store, evaluator, clock)
+	type evaluationResult struct {
+		response coop.CommandResponse
+		err      error
+	}
+	olderDone := make(chan evaluationResult, 1)
+	newerDone := make(chan evaluationResult, 1)
+	go func() {
+		response, evaluateErr := service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
+		olderDone <- evaluationResult{response: response, err: evaluateErr}
+	}()
+	require.Equal(t, 1, <-entered)
+	go func() {
+		response, evaluateErr := service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerEvent)
+		newerDone <- evaluationResult{response: response, err: evaluateErr}
+	}()
+	require.Equal(t, 2, <-entered)
+
+	close(releaseOlder)
+	older := <-olderDone
+	require.NoError(t, older.err)
+	assert.Equal(t, string(decisionPending), older.response.Decision)
+	inFlight := acceptanceNode(t, readAcceptanceSession(t, store, session.ID))
+	require.NotNil(t, inFlight.CurrentAttempt())
+	assert.Equal(t, started.Attempt, inFlight.CurrentAttempt().Number)
+	assert.True(t, inFlight.CurrentAttempt().AutomaticCheckPending())
+	assert.Equal(t, coop.NodeActive, inFlight.State)
+
+	close(releaseNewer)
+	newer := <-newerDone
+	require.NoError(t, newer.err)
+	assert.Equal(t, string(decisionNeedsAgent), newer.response.Decision)
+	assert.Contains(t, newer.response.Message, failed.Repair)
+	correcting := acceptanceNode(t, readAcceptanceSession(t, store, session.ID))
+	require.Len(t, correcting.Attempts, 2)
+	assert.Equal(t, coop.AttemptVerificationChanges, correcting.Attempts[0].EndReason)
+	require.NotNil(t, correcting.CurrentAttempt())
+	assert.Equal(t, started.Attempt+1, correcting.CurrentAttempt().Number)
+}
+
+func TestVerificationAcceptanceStaleEventSalvagesOnlyAnUnboundCandidateRole(t *testing.T) {
+	eventCandidate := coop.ResourceBinding{
+		Role: "checkout_session", Type: "checkout_session", ID: "cs_event", Source: coop.BindingObservedCandidate,
+	}
+	for _, test := range []struct {
+		name         string
+		newerBinding *coop.ResourceBinding
+		want         coop.ResourceBinding
+		wantOlder    policyDecision
+	}{
+		{name: "unbound role preserves one-shot event candidate", want: eventCandidate, wantOlder: decisionNeedsHuman},
+		{
+			name: "newer candidate is not replaced",
+			newerBinding: &coop.ResourceBinding{
+				Role: "checkout_session", Type: "checkout_session", ID: "cs_newer", Source: coop.BindingObservedCandidate,
+			},
+			want: coop.ResourceBinding{
+				Role: "checkout_session", Type: "checkout_session", ID: "cs_newer", Source: coop.BindingObservedCandidate,
+			},
+			wantOlder: decisionPending,
+		},
+		{
+			name: "promoted binding is not replaced",
+			newerBinding: &coop.ResourceBinding{
+				Role: "checkout_session", Type: "checkout_session", ID: "cs_promoted", Source: coop.BindingObserved,
+			},
+			want: coop.ResourceBinding{
+				Role: "checkout_session", Type: "checkout_session", ID: "cs_promoted", Source: coop.BindingObserved,
+			},
+			wantOlder: decisionPending,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, session := newVerificationAcceptanceStore(t, coop.NodeUIComponent)
+			clock := newAcceptanceClock()
+			var attemptNumber int
+			_, err := store.Update(session.ID, func(current *coop.Session) error {
+				if transitionErr := current.TransitionNode(1, coop.NodeActive); transitionErr != nil {
+					return transitionErr
+				}
+				node, nodeErr := current.NodeByNumber(1)
+				if nodeErr != nil {
+					return nodeErr
+				}
+				attempt, startErr := node.StartAttempt(clock.Now(), "Building UI")
+				if startErr != nil {
+					return startErr
+				}
+				attemptNumber = attempt.Number
+				if reportErr := node.ReportAttempt(attempt.Number, clock.Now(), &coop.Implementation{File: "checkout.tsx"}); reportErr != nil {
+					return reportErr
+				}
+				return node.SetAppSurface(attempt.Number, coop.AppSurface{URL: "http://localhost:3000/checkout"})
+			})
+			require.NoError(t, err)
+
+			passed := requiredAcceptanceResult("resource.checkout.exists", coop.CheckResource, coop.CheckPassed)
+			unavailable := requiredAcceptanceResult("resource.checkout.attribution", coop.CheckResource, coop.CheckUnavailable)
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			var callsMu sync.Mutex
+			calls := 0
+			evaluator := &acceptanceEvaluator{evaluate: func(ctx context.Context, _ EvaluationInput) (Evaluation, error) {
+				callsMu.Lock()
+				calls++
+				call := calls
+				callsMu.Unlock()
+				if call == 1 {
+					close(entered)
+					select {
+					case <-release:
+					case <-ctx.Done():
+						return Evaluation{}, ctx.Err()
+					}
+					return Evaluation{
+						Results:  []coop.CheckResult{unavailable},
+						Bindings: []coop.ResourceBinding{eventCandidate},
+					}, nil
+				}
+				evaluation := Evaluation{Results: []coop.CheckResult{passed}}
+				if test.newerBinding != nil {
+					evaluation.Bindings = []coop.ResourceBinding{*test.newerBinding}
+				}
+				return evaluation, nil
+			}}
+			service := newVerificationAcceptanceService(store, evaluator, clock)
+
+			type result struct {
+				response coop.CommandResponse
+				err      error
+			}
+			eventDone := make(chan result, 1)
+			go func() {
+				response, evaluateErr := service.Reevaluate(context.Background(), session.ID, 1, attemptNumber, TriggerEvent)
+				eventDone <- result{response: response, err: evaluateErr}
+			}()
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				t.Fatal("event evaluation did not start")
+			}
+
+			newer, err := service.Reevaluate(context.Background(), session.ID, 1, attemptNumber, TriggerPoll)
+			require.NoError(t, err)
+			assert.Equal(t, string(decisionNeedsHuman), newer.Decision)
+			close(release)
+			older := <-eventDone
+			require.NoError(t, older.err)
+			assert.Equal(t, string(test.wantOlder), older.response.Decision)
+
+			node := acceptanceNode(t, readAcceptanceSession(t, store, session.ID))
+			require.Len(t, node.CurrentAttempt().Resources, 1)
+			assert.Equal(t, test.want, node.CurrentAttempt().Resources[0])
+			require.Len(t, node.CurrentAttempt().Results, 1)
+			assert.Equal(t, passed.ID, node.CurrentAttempt().Results[0].ID,
+				"stale event findings and policy must remain discarded")
+		})
+	}
 }
 
 func TestVerificationAcceptanceStaleBackendResponseCannotSkipContainingUIReview(t *testing.T) {
@@ -727,7 +1011,7 @@ func TestVerificationAcceptanceBasisChangesDiscardInflightEvaluationAndPreserveS
 			setup := newVerificationAcceptanceService(store, setupAcceptanceEvaluator(), clock)
 			started, err := setup.StartWork(session.ID, 1, "Building")
 			require.NoError(t, err)
-			input := ReportWorkInput{File: "implementation.go"}
+			input := ReportWorkInput{File: "implementation.go", Note: "Implemented node"}
 			if nodeType == coop.NodeUIComponent {
 				input.AppURL = "http://localhost:4242/checkout"
 			}
@@ -788,7 +1072,15 @@ func TestVerificationAcceptanceBasisChangesDiscardInflightEvaluationAndPreserveS
 					})
 				})
 			case "agent_checks":
-				_, err = setup.ReportCheckAttempt(session.ID, 1, started.Attempt, "Current handler check", true)
+				_, err = store.Update(session.ID, func(current *coop.Session) error {
+					node, nodeErr := current.NodeByNumber(1)
+					if nodeErr != nil {
+						return nodeErr
+					}
+					return node.AddAgentCheck(started.Attempt, coop.Verification{
+						Check: "Current handler check", Passed: true,
+					})
+				})
 			}
 			require.NoError(t, err)
 			require.NoError(t, service.RecordSupportingResult(session.ID, 1, started.Attempt, coop.CheckResult{
@@ -842,7 +1134,7 @@ func TestVerificationAcceptanceObservationCannotFinishUnreportedWork(t *testing.
 	require.Len(t, node.CurrentAttempt().Results, 1)
 	assert.Equal(t, coop.CheckPassed, node.CurrentAttempt().Results[0].Status)
 
-	reported, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go"})
+	reported, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
 	require.NoError(t, err)
 	assert.Equal(t, string(decisionConfirmed), reported.Decision)
 	assert.Equal(t, coop.NodeDone, acceptanceNode(t, readAcceptanceSession(t, store, session.ID)).State)
@@ -856,9 +1148,11 @@ func TestVerificationAcceptanceUIRequiresAppURL(t *testing.T) {
 	service := newVerificationAcceptanceService(store, evaluator, newAcceptanceClock())
 	started, err := service.StartWork(session.ID, 1, "Building UI")
 	require.NoError(t, err)
-	assert.Contains(t, started.Next, "--app-url=<absolute-app-url>")
+	assert.Empty(t, started.Next)
+	assert.Contains(t, started.NextTemplate, "--app-url=<absolute-app-url>")
+	assert.Contains(t, started.RequiredInputs, "app-url")
 
-	response, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "checkout.tsx"})
+	response, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "checkout.tsx", Note: "Built checkout UI"})
 
 	require.NoError(t, err)
 	assert.False(t, response.OK)
@@ -869,6 +1163,34 @@ func TestVerificationAcceptanceUIRequiresAppURL(t *testing.T) {
 	assert.Nil(t, attempt.ReportedAt)
 	assert.Nil(t, attempt.AppSurface)
 	assert.Empty(t, evaluator.Inputs())
+}
+
+func TestVerificationAcceptanceRevalidatesStoredAppURLAtOpenBoundary(t *testing.T) {
+	store, session := newVerificationAcceptanceStore(t, coop.NodeUIComponent)
+	service := newVerificationAcceptanceService(store, setupAcceptanceEvaluator(), newAcceptanceClock())
+	started, err := service.StartWork(session.ID, 1, "Building UI")
+	require.NoError(t, err)
+	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
+		File: "checkout.tsx", Note: "Built checkout UI", AppURL: "http://localhost:4242/checkout",
+	})
+	require.NoError(t, err)
+	_, err = store.Update(session.ID, func(session *coop.Session) error {
+		node, nodeErr := session.NodeByNumber(1)
+		if nodeErr != nil {
+			return nodeErr
+		}
+		node.CurrentAttempt().AppSurface.URL = "file:///etc/passwd"
+		return nil
+	})
+	require.NoError(t, err)
+
+	_, err = service.MarkAppOpened(session.ID, 1, started.Attempt)
+
+	require.ErrorContains(t, err, "stored app surface URL is invalid")
+	attempt := acceptanceNode(t, readAcceptanceSession(t, store, session.ID)).CurrentAttempt()
+	require.NotNil(t, attempt)
+	require.NotNil(t, attempt.AppSurface)
+	assert.Nil(t, attempt.AppSurface.OpenedAt)
 }
 
 func TestVerificationAcceptanceUIOpenIsStableAndRequiredBeforeConfirm(t *testing.T) {
@@ -883,12 +1205,12 @@ func TestVerificationAcceptanceUIOpenIsStableAndRequiredBeforeConfirm(t *testing
 	require.NoError(t, err)
 	clock.Set(time.Date(2026, 7, 21, 18, 1, 0, 0, time.UTC))
 	reported, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
-		File: "checkout.tsx", AppURL: "http://localhost:4242/checkout",
+		File: "checkout.tsx", Note: "Built checkout UI", AppURL: "http://localhost:4242/checkout",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, string(decisionNeedsHuman), reported.Decision)
 
-	_, err = service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, false, "")
+	_, err = service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, nil)
 	require.ErrorContains(t, err, "open the app")
 
 	// Equality is not fresh enough: the read must begin strictly after the
@@ -909,7 +1231,7 @@ func TestVerificationAcceptanceUIOpenIsStableAndRequiredBeforeConfirm(t *testing
 	require.NotNil(t, opened.AutomaticResultsAt)
 	assert.Equal(t, *opened.AppSurface.OpenedAt, *opened.AutomaticResultsAt)
 
-	_, err = service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, false, "")
+	_, err = service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, nil)
 	require.ErrorContains(t, err, "automatic verification has not run since the app was opened")
 	fresh, err := service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
 	require.NoError(t, err)
@@ -918,7 +1240,7 @@ func TestVerificationAcceptanceUIOpenIsStableAndRequiredBeforeConfirm(t *testing
 	require.NotNil(t, opened.AutomaticResultsAt)
 	assert.True(t, opened.AutomaticResultsAt.After(*opened.AppSurface.OpenedAt))
 
-	confirmed, err := service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, false, "")
+	confirmed, err := service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, nil)
 	require.NoError(t, err)
 	node := acceptanceNode(t, confirmed)
 	assert.Equal(t, coop.NodeDone, node.State)
@@ -946,7 +1268,7 @@ func TestVerificationAcceptanceProjectedStatesRequireCompleteEventSnapshots(t *t
 	started, err := service.StartWork(session.ID, 1, "Building subscription checkout")
 	require.NoError(t, err)
 	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
-		File: "checkout.tsx", AppURL: "http://localhost:4242/checkout",
+		File: "checkout.tsx", Note: "Built checkout UI", AppURL: "http://localhost:4242/checkout",
 	})
 	require.NoError(t, err)
 	clock.Set(clock.Now().Add(time.Minute))
@@ -959,7 +1281,7 @@ func TestVerificationAcceptanceProjectedStatesRequireCompleteEventSnapshots(t *t
 	require.NoError(t, err)
 	assert.Equal(t, coop.CheckPassed, acceptanceResult(t, checkoutEvent.Verification, "state.checkout.state").Status)
 	assert.Equal(t, coop.CheckPending, acceptanceResult(t, checkoutEvent.Verification, "state.subscription.state").Status)
-	_, err = service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, false, "")
+	_, err = service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, nil)
 	require.ErrorContains(t, err, "still pending")
 
 	clock.Set(clock.Now().Add(time.Second))
@@ -968,7 +1290,7 @@ func TestVerificationAcceptanceProjectedStatesRequireCompleteEventSnapshots(t *t
 	require.NoError(t, err)
 	assert.Equal(t, coop.CheckPassed, acceptanceResult(t, subscriptionEvent.Verification, "state.checkout.state").Status)
 	assert.Equal(t, coop.CheckPassed, acceptanceResult(t, subscriptionEvent.Verification, "state.subscription.state").Status)
-	confirmed, err := service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, false, "")
+	confirmed, err := service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, coop.NodeDone, acceptanceNode(t, confirmed).State)
 }
@@ -984,7 +1306,7 @@ func TestVerificationAcceptanceUnavailableRequiresExplicitRecordedOverride(t *te
 	started, err := service.StartWork(session.ID, 1, "Building UI")
 	require.NoError(t, err)
 	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
-		File: "checkout.tsx", AppURL: "http://localhost:4242/checkout",
+		File: "checkout.tsx", Note: "Built checkout UI", AppURL: "http://localhost:4242/checkout",
 	})
 	require.NoError(t, err)
 	clock.Set(time.Date(2026, 7, 21, 18, 2, 0, 0, time.UTC))
@@ -994,7 +1316,8 @@ func TestVerificationAcceptanceUnavailableRequiresExplicitRecordedOverride(t *te
 	_, err = service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
 	require.NoError(t, err)
 
-	_, err = service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, false, "")
+	_, err = service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, nil)
+	require.ErrorIs(t, err, ErrVerificationOverrideRequired)
 	require.ErrorContains(t, err, "explicit override")
 	before := acceptanceNode(t, readAcceptanceSession(t, store, session.ID))
 	assert.Equal(t, coop.NodeReview, before.State)
@@ -1005,8 +1328,10 @@ func TestVerificationAcceptanceUnavailableRequiresExplicitRecordedOverride(t *te
 	confirmed, err := service.ConfirmReviewAttempts(
 		session.ID,
 		[]AttemptRef{{Node: 1, Attempt: started.Attempt}},
-		true,
-		"Stripe read permission is intentionally unavailable in this test account.",
+		acceptanceReviewOverride(
+			t, store, session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}},
+			"Stripe read permission is intentionally unavailable in this test account.",
+		),
 	)
 	require.NoError(t, err)
 	node := acceptanceNode(t, confirmed)
@@ -1016,6 +1341,65 @@ func TestVerificationAcceptanceUnavailableRequiresExplicitRecordedOverride(t *te
 	assert.Contains(t, node.Attempts[0].Override.Reason, "intentionally unavailable")
 	require.Len(t, node.Attempts[0].Results, 1)
 	assert.Equal(t, coop.CheckUnavailable, node.Attempts[0].Results[0].Status)
+}
+
+func TestVerificationAcceptanceOverrideRejectsEvidenceChangedAfterConsent(t *testing.T) {
+	store, session := newVerificationAcceptanceStore(t, coop.NodeUIComponent)
+	unavailable := requiredAcceptanceResult("app.backend-state", coop.CheckState, coop.CheckUnavailable)
+	unavailable.Detail = "Backend state could not be read."
+	clock := newAcceptanceClock()
+	service := newVerificationAcceptanceService(
+		store,
+		&acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) (Evaluation, error) {
+			return Evaluation{Results: []coop.CheckResult{unavailable}}, nil
+		}},
+		clock,
+	)
+	started, err := service.StartWork(session.ID, 1, "Building UI")
+	require.NoError(t, err)
+	_, err = service.ReportWorkAttempt(
+		context.Background(),
+		session.ID,
+		1,
+		started.Attempt,
+		ReportWorkInput{
+			File: "checkout.tsx", Note: "Built checkout UI",
+			AppURL: "http://localhost:4242/checkout",
+		},
+	)
+	require.NoError(t, err)
+	clock.Set(clock.Now().Add(time.Minute))
+	_, err = service.MarkAppOpened(session.ID, 1, started.Attempt)
+	require.NoError(t, err)
+	clock.Set(clock.Now().Add(time.Nanosecond))
+	_, err = service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
+	require.NoError(t, err)
+
+	refs := []AttemptRef{{Node: 1, Attempt: started.Attempt}}
+	armedSession := readAcceptanceSession(t, store, session.ID)
+	armedDigest := ReviewEvidenceDigest(armedSession, refs)
+	_, err = service.ConfirmReviewAttempts(session.ID, refs, nil)
+	require.ErrorIs(t, err, ErrVerificationOverrideRequired)
+
+	_, err = store.Update(session.ID, func(current *coop.Session) error {
+		node, nodeErr := current.NodeByNumber(1)
+		if nodeErr != nil {
+			return nodeErr
+		}
+		node.CurrentAttempt().Results[0].Detail = "A different automatic check is now unavailable."
+		return nil
+	})
+	require.NoError(t, err)
+
+	_, err = service.ConfirmReviewAttempts(session.ID, refs, &ReviewOverride{
+		EvidenceDigest: armedDigest,
+		Reason:         "Developer accepted the originally displayed unavailable finding.",
+	})
+	require.ErrorIs(t, err, ErrVerificationOverrideChanged)
+	unchanged := acceptanceNode(t, readAcceptanceSession(t, store, session.ID))
+	assert.Equal(t, coop.NodeReview, unchanged.State)
+	assert.Nil(t, unchanged.CurrentAttempt().Override)
+	assert.Nil(t, unchanged.CurrentAttempt().EndedAt)
 }
 
 func TestVerificationAcceptanceCandidateRequiresRecordedUIOverride(t *testing.T) {
@@ -1032,7 +1416,7 @@ func TestVerificationAcceptanceCandidateRequiresRecordedUIOverride(t *testing.T)
 	started, err := service.StartWork(session.ID, 1, "Building UI")
 	require.NoError(t, err)
 	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
-		File: "checkout.tsx", AppURL: "http://localhost:4242/checkout",
+		File: "checkout.tsx", Note: "Built checkout UI", AppURL: "http://localhost:4242/checkout",
 	})
 	require.NoError(t, err)
 	clock.Set(clock.Now().Add(time.Minute))
@@ -1042,11 +1426,14 @@ func TestVerificationAcceptanceCandidateRequiresRecordedUIOverride(t *testing.T)
 	_, err = service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
 	require.NoError(t, err)
 
-	_, err = service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, false, "")
+	_, err = service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, nil)
 	require.ErrorContains(t, err, "explicit override")
 	confirmed, err := service.ConfirmReviewAttempts(
-		session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, true,
-		"Developer confirmed the UI despite unavailable event attribution.",
+		session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}},
+		acceptanceReviewOverride(
+			t, store, session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}},
+			"Developer confirmed the UI despite unavailable event attribution.",
+		),
 	)
 	require.NoError(t, err)
 	node := acceptanceNode(t, confirmed)
@@ -1064,7 +1451,7 @@ func TestVerificationAcceptanceRecoveredEmptySnapshotRemovesUIOverrideRequiremen
 	started, err := service.StartWork(session.ID, 1, "Building UI")
 	require.NoError(t, err)
 	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
-		File: "checkout.tsx", AppURL: "http://localhost:4242/checkout",
+		File: "checkout.tsx", Note: "Built checkout UI", AppURL: "http://localhost:4242/checkout",
 	})
 	require.NoError(t, err)
 	clock.Set(clock.Now().Add(time.Minute))
@@ -1073,14 +1460,14 @@ func TestVerificationAcceptanceRecoveredEmptySnapshotRemovesUIOverrideRequiremen
 	clock.Set(clock.Now().Add(time.Nanosecond))
 	_, err = service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
 	require.NoError(t, err)
-	_, err = service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, false, "")
+	_, err = service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, nil)
 	require.ErrorContains(t, err, "explicit override")
 
 	recovered, err := service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
 	require.NoError(t, err)
 	assert.Equal(t, string(decisionNeedsHuman), recovered.Decision)
 	assert.Empty(t, recovered.Verification)
-	confirmed, err := service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, false, "")
+	confirmed, err := service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, coop.NodeDone, acceptanceNode(t, confirmed).State)
 	assert.Nil(t, acceptanceNode(t, confirmed).Attempts[0].Override)
@@ -1113,12 +1500,12 @@ func TestVerificationAcceptanceUnavailableBackendJoinsContainingUIReview(t *test
 	ui, err := service.StartWork(session.ID, 1, "Building UI")
 	require.NoError(t, err)
 	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, ui.Attempt, ReportWorkInput{
-		File: "checkout.tsx", AppURL: "http://localhost:3000/checkout",
+		File: "checkout.tsx", Note: "Built checkout UI", AppURL: "http://localhost:3000/checkout",
 	})
 	require.NoError(t, err)
 	state, err := service.StartWork(session.ID, 2, "Checking state")
 	require.NoError(t, err)
-	reported, err := service.ReportWorkAttempt(context.Background(), session.ID, 2, state.Attempt, ReportWorkInput{File: "webhook.go"})
+	reported, err := service.ReportWorkAttempt(context.Background(), session.ID, 2, state.Attempt, ReportWorkInput{File: "webhook.go", Note: "Implemented webhook"})
 	require.NoError(t, err)
 	assert.Equal(t, string(decisionNeedsHuman), reported.Decision)
 	loaded := readAcceptanceSession(t, store, session.ID)
@@ -1135,9 +1522,12 @@ func TestVerificationAcceptanceUnavailableBackendJoinsContainingUIReview(t *test
 	require.NoError(t, err)
 	refs := []AttemptRef{{Node: 1, Attempt: ui.Attempt}, {Node: 2, Attempt: state.Attempt}}
 
-	_, err = service.ConfirmReviewAttempts(session.ID, refs, false, "")
+	_, err = service.ConfirmReviewAttempts(session.ID, refs, nil)
 	require.ErrorContains(t, err, "explicit override")
-	confirmed, err := service.ConfirmReviewAttempts(session.ID, refs, true, "Developer accepted the unavailable backend check.")
+	confirmed, err := service.ConfirmReviewAttempts(
+		session.ID, refs,
+		acceptanceReviewOverride(t, store, session.ID, refs, "Developer accepted the unavailable backend check."),
+	)
 	require.NoError(t, err)
 	assert.Equal(t, coop.SessionCompleted, confirmed.Status)
 	require.NotNil(t, confirmed.Steps[0].Nodes[1].Attempts[0].Override)
@@ -1263,8 +1653,7 @@ func TestVerificationAcceptanceAwaitWakesForHumanRejectionAndReusesCorrectionAtt
 	confirmed, err := service.ConfirmReviewAttempts(
 		session.ID,
 		[]AttemptRef{{Node: 1, Attempt: continued.Attempt}},
-		false,
-		"",
+		nil,
 	)
 	require.NoError(t, err)
 	assert.Equal(t, coop.SessionCompleted, confirmed.Status)
@@ -1311,13 +1700,13 @@ func TestVerificationAcceptanceAwaitStepReviewPollsEveryOpenedUIAttempt(t *testi
 	first, err := service.StartWork(session.ID, 1, "Building checkout UI")
 	require.NoError(t, err)
 	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, first.Attempt, ReportWorkInput{
-		File: "checkout.tsx", AppURL: "http://localhost:4242/checkout",
+		File: "checkout.tsx", Note: "Built checkout UI", AppURL: "http://localhost:4242/checkout",
 	})
 	require.NoError(t, err)
 	second, err := service.StartWork(session.ID, 2, "Building success UI")
 	require.NoError(t, err)
 	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 2, second.Attempt, ReportWorkInput{
-		File: "success.tsx", AppURL: "http://localhost:4242/success",
+		File: "success.tsx", Note: "Built success UI", AppURL: "http://localhost:4242/success",
 	})
 	require.NoError(t, err)
 
@@ -1354,7 +1743,7 @@ func TestVerificationAcceptanceAwaitTimeoutReturnsExactRetryAndCleansHeartbeat(t
 	started, err := service.StartWork(session.ID, 1, "Building UI")
 	require.NoError(t, err)
 	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
-		File: "checkout.tsx", AppURL: "http://localhost:4242/checkout",
+		File: "checkout.tsx", Note: "Built checkout UI", AppURL: "http://localhost:4242/checkout",
 	})
 	require.NoError(t, err)
 
@@ -1364,7 +1753,7 @@ func TestVerificationAcceptanceAwaitTimeoutReturnsExactRetryAndCleansHeartbeat(t
 	assert.Equal(t, "timeout", response.State)
 	assert.Equal(t, started.Attempt, response.Attempt)
 	assert.Equal(t,
-		"stripe coop agent await-review --session=verification_acceptance --step=1 --attempt=1",
+		"stripe coop agent await-review --session=verification_acceptance --node=1 --attempt=1",
 		response.Next,
 	)
 	age, heartbeatErr := store.HeartbeatAge(session.ID)
@@ -1496,6 +1885,12 @@ func readAcceptanceSession(t *testing.T, store *coop.Store, id string) *coop.Ses
 	session, err := store.Read(id)
 	require.NoError(t, err)
 	return session
+}
+
+func acceptanceReviewOverride(t *testing.T, store *coop.Store, sessionID string, refs []AttemptRef, reason string) *ReviewOverride {
+	t.Helper()
+	session := readAcceptanceSession(t, store, sessionID)
+	return &ReviewOverride{EvidenceDigest: ReviewEvidenceDigest(session, refs), Reason: reason}
 }
 
 func acceptanceNode(t *testing.T, session *coop.Session) *coop.SessionNode {

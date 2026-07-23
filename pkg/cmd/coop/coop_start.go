@@ -122,9 +122,11 @@ Steps:
 3. Based on their answer, run "stripe coop recommend --query=<description of what they need>"
 4. Explain what you found in simple terms: "I'll set up X which lets you do Y" and confirm.
 5. Only after confirmation, run "stripe coop run <blueprint-id> --language=<lang>".
-6. Follow the instructions in the JSON response and work through each step.
+6. Follow the instructions in the JSON response and work through each node.
 
-The developer will confirm each step in the TUI before you proceed.
+Co-op automatically checks supported Stripe resources and state. The developer
+reviews app UI and Dashboard-owned work in the TUI. Do not ask them to relay
+automatic findings; follow the CLI decision and continuation action directly.
 
 Important: Run "stripe whoami" first to check auth. If not logged in OR if it shows "Test mode key: not available", run "stripe sandbox create --from-git" to provision a sandbox. The claim URL will appear automatically in the TUI.`, langHint)
 }

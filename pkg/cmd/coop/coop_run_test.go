@@ -71,12 +71,29 @@ func TestNewCoopSessionRejectsMalformedKeyValues(t *testing.T) {
 func TestSessionLifecycleInstructionsUseDirectBoundedAwait(t *testing.T) {
 	prompt := sessionLifecycleInstructions("Build the integration.", &coop.Session{ID: "coop_prompt"})
 
-	assert.Contains(t, prompt, "Run the exact await-review command directly as the sole foreground waiter")
-	assert.Contains(t, prompt, "If it returns state=timeout, immediately run its exact next command")
+	assert.Contains(t, prompt, `When a response instead contains "next_template", fill every named "required_inputs" value`)
+	assert.Contains(t, prompt, "Run the returned await-review command directly as the sole foreground waiter")
+	assert.Contains(t, prompt, `If it returns state=timeout, immediately run its executable "next" command`)
 	assert.Contains(t, prompt, "If that final command is next-action, keep it as the sole foreground waiter")
 	assert.Contains(t, prompt, "Do not background it")
 	assert.NotContains(t, prompt, "shell timeout")
 	assert.NotContains(t, prompt, "5-minute")
+	assert.Contains(t, prompt, "structured fields are the contract")
+	assert.NotContains(t, prompt, "description — it's the source of truth")
+}
+
+func TestCoopRunResponseDisclosesBlueprintVerificationCoverage(t *testing.T) {
+	blueprint, err := coop.LoadBlueprint("one-time-payment")
+	require.NoError(t, err)
+	session := coop.NewSessionFromBlueprint(blueprint, "coop_coverage", nil, nil)
+
+	response := newCoopAgentRunResponse(blueprint, session)
+
+	require.NotNil(t, response.VerificationCoverage)
+	assert.Positive(t, response.VerificationCoverage.DirectChecks)
+	assert.Contains(t, response.VerificationCoverage.Message, "Unsupported facts")
+	assert.Contains(t, response.Message, "Automatic verification covers")
+	assert.NotEmpty(t, response.Nodes)
 }
 
 func TestCoopRunReturnsStructuredErrorForMalformedSetting(t *testing.T) {

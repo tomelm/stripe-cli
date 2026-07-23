@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -19,6 +21,8 @@ import (
 type Store struct {
 	baseDir string
 }
+
+const MaxSessionFileBytes = 4 << 20
 
 var (
 	ErrInvalidSessionID  = errors.New("invalid session id")
@@ -37,6 +41,10 @@ var (
 	// the lock only for the duration of a single write (well under a second), so a
 	// much larger threshold reliably distinguishes a crash from an active writer.
 	sessionLockStale = 30 * time.Second
+	// observerLeaseHeartbeatInterval is capped below relative to
+	// sessionLockStale so platforms without process-liveness support never
+	// reclaim a healthy, long-lived observer.
+	observerLeaseHeartbeatInterval = 10 * time.Second
 )
 
 // NewStore creates a Store, ensuring the coop directory exists.
@@ -83,19 +91,29 @@ func (s *Store) writePath(path string, session *Session) error {
 	}
 	defer unlock()
 
-	if existing, err := os.ReadFile(path); err == nil {
+	if existing, err := readBoundedSessionFile(path); err == nil {
 		var current Session
-		if json.Unmarshal(existing, &current) == nil {
-			if current.Version != session.Version {
-				return fmt.Errorf("%w: expected %d, file has %d", ErrVersionConflict, session.Version, current.Version)
-			}
+		if err := json.Unmarshal(existing, &current); err != nil {
+			return fmt.Errorf("%w: parsing existing session %q: %v", ErrCorruptSession, session.ID, err)
 		}
+		if err := validateSessionIdentity(session.ID, &current); err != nil {
+			return err
+		}
+		if current.Version != session.Version {
+			return fmt.Errorf("%w: expected %d, file has %d", ErrVersionConflict, session.Version, current.Version)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("reading existing session %q: %w", session.ID, err)
 	}
 
-	session.UpdatedAt = time.Now().UTC()
-	session.Version++
-
-	return s.writeUnlocked(path, session)
+	next := *session
+	next.UpdatedAt = time.Now().UTC()
+	next.Version++
+	if err := s.writeUnlocked(path, &next); err != nil {
+		return err
+	}
+	*session = next
+	return nil
 }
 
 func replaceSessionFile(tmpPath, path string) error {
@@ -249,18 +267,37 @@ func (s *Store) Read(id string) (*Session, error) {
 	if err := json.Unmarshal(data, &session); err != nil {
 		return nil, fmt.Errorf("%w: parsing session %q: %v", ErrCorruptSession, id, err)
 	}
+	if err := validateSessionIdentity(id, &session); err != nil {
+		return nil, err
+	}
 	return &session, nil
 }
 
 func readSessionFile(path string) ([]byte, error) {
 	deadline := time.Now().Add(250 * time.Millisecond)
 	for {
-		data, err := os.ReadFile(path)
+		data, err := readBoundedSessionFile(path)
 		if err == nil || !isWindowsTransientReadError(err) || time.Now().After(deadline) {
 			return data, err
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+func readBoundedSessionFile(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, MaxSessionFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > MaxSessionFileBytes {
+		return nil, fmt.Errorf("%w: session file exceeds %d bytes", ErrCorruptSession, MaxSessionFileBytes)
+	}
+	return data, nil
 }
 
 func isWindowsTransientReadError(err error) bool {
@@ -280,7 +317,7 @@ func (s *Store) Update(id string, fn func(*Session) error) (*Session, error) {
 	}
 	defer unlock()
 
-	data, err := os.ReadFile(path)
+	data, err := readBoundedSessionFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("%w: %q", ErrSessionNotFound, id)
@@ -292,7 +329,13 @@ func (s *Store) Update(id string, fn func(*Session) error) (*Session, error) {
 	if err := json.Unmarshal(data, &session); err != nil {
 		return nil, fmt.Errorf("%w: parsing session %q: %v", ErrCorruptSession, id, err)
 	}
+	if err := validateSessionIdentity(id, &session); err != nil {
+		return nil, err
+	}
 	if err := fn(&session); err != nil {
+		return nil, err
+	}
+	if err := validateSessionIdentity(id, &session); err != nil {
 		return nil, err
 	}
 	updatedData, err := json.MarshalIndent(&session, "", "  ")
@@ -309,6 +352,22 @@ func (s *Store) Update(id string, fn func(*Session) error) (*Session, error) {
 		return nil, err
 	}
 	return &session, nil
+}
+
+func validateSessionIdentity(requestedID string, session *Session) error {
+	if session == nil || session.ID != requestedID {
+		actualID := ""
+		if session != nil {
+			actualID = session.ID
+		}
+		return fmt.Errorf(
+			"%w: session file %q contains identity %q",
+			ErrCorruptSession,
+			requestedID,
+			actualID,
+		)
+	}
+	return nil
 }
 
 // PinStripeAccount records the first usable Stripe account identity for an
@@ -349,6 +408,9 @@ func (s *Store) writeUnlocked(path string, session *Session) error {
 	data, err := json.MarshalIndent(session, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling session: %w", err)
+	}
+	if len(data) > MaxSessionFileBytes {
+		return fmt.Errorf("session exceeds %d bytes", MaxSessionFileBytes)
 	}
 
 	tmp, err := os.CreateTemp(s.baseDir, filepath.Base(path)+".*.tmp")
@@ -513,33 +575,97 @@ func (s *Store) AcquireObserverLease(id string) (func(), error) {
 		return nil, err
 	}
 	leasePath := path + ".observer"
-	for {
-		file, err := os.OpenFile(leasePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-		if err == nil {
-			contents := fmt.Sprintf("%d\n%d\n", os.Getpid(), time.Now().UnixNano())
-			if _, writeErr := file.WriteString(contents); writeErr != nil {
-				_ = file.Close()
-				_ = os.Remove(leasePath)
-				return nil, fmt.Errorf("writing observer lease: %w", writeErr)
-			}
-			if closeErr := file.Close(); closeErr != nil {
-				_ = os.Remove(leasePath)
-				return nil, fmt.Errorf("closing observer lease: %w", closeErr)
-			}
-			return func() {
-				if current, readErr := os.ReadFile(leasePath); readErr == nil && string(current) == contents {
-					_ = os.Remove(leasePath)
-				}
-			}, nil
-		}
-		if !os.IsExist(err) {
-			return nil, fmt.Errorf("creating observer lease: %w", err)
-		}
+	unlock, err := s.acquireSessionLock(leasePath)
+	if err != nil {
+		return nil, fmt.Errorf("locking observer lease: %w", err)
+	}
+	if _, statErr := os.Stat(leasePath); statErr == nil {
 		if !s.lockAbandoned(leasePath) {
+			unlock()
 			return nil, fmt.Errorf("%w: %s", ErrObserverLeaseHeld, id)
 		}
-		if err := os.Remove(leasePath); err != nil && !os.IsNotExist(err) {
-			return nil, fmt.Errorf("reclaiming observer lease: %w", err)
+		if removeErr := os.Remove(leasePath); removeErr != nil && !os.IsNotExist(removeErr) {
+			unlock()
+			return nil, fmt.Errorf("reclaiming observer lease: %w", removeErr)
+		}
+	} else if !os.IsNotExist(statErr) {
+		unlock()
+		return nil, fmt.Errorf("reading observer lease: %w", statErr)
+	}
+
+	contents := fmt.Sprintf("%d\n%d\n", os.Getpid(), time.Now().UnixNano())
+	file, err := os.OpenFile(leasePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		unlock()
+		return nil, fmt.Errorf("creating observer lease: %w", err)
+	}
+	if _, writeErr := file.WriteString(contents); writeErr != nil {
+		_ = file.Close()
+		_ = os.Remove(leasePath)
+		unlock()
+		return nil, fmt.Errorf("writing observer lease: %w", writeErr)
+	}
+	if closeErr := file.Close(); closeErr != nil {
+		_ = os.Remove(leasePath)
+		unlock()
+		return nil, fmt.Errorf("closing observer lease: %w", closeErr)
+	}
+	unlock()
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go s.renewObserverLease(leasePath, contents, stop, done)
+	var releaseOnce sync.Once
+	return func() {
+		releaseOnce.Do(func() {
+			close(stop)
+			<-done
+			unlock, lockErr := s.acquireSessionLock(leasePath)
+			if lockErr != nil {
+				return
+			}
+			defer unlock()
+			if current, readErr := os.ReadFile(leasePath); readErr == nil && string(current) == contents {
+				_ = os.Remove(leasePath)
+			}
+		})
+	}, nil
+}
+
+func (s *Store) renewObserverLease(leasePath, contents string, stop <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
+	interval := observerLeaseHeartbeatInterval
+	if sessionLockStale > 0 {
+		maxInterval := sessionLockStale / 3
+		if maxInterval > 0 && (interval <= 0 || interval > maxInterval) {
+			interval = maxInterval
+		}
+	}
+	if interval <= 0 {
+		interval = time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case now := <-ticker.C:
+			unlock, err := s.acquireSessionLock(leasePath)
+			if err != nil {
+				return
+			}
+			current, readErr := os.ReadFile(leasePath)
+			if readErr != nil || string(current) != contents {
+				unlock()
+				return
+			}
+			timestamp := now.UTC()
+			if err := os.Chtimes(leasePath, timestamp, timestamp); err != nil {
+				unlock()
+				return
+			}
+			unlock()
 		}
 	}
 }

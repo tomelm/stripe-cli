@@ -121,7 +121,7 @@ func TestUILayoutMatrix(t *testing.T) {
 					assert.LessOrEqual(t, lipgloss.Height(m.renderFooter()), m.footerHeightBudget(), "rejection footer should stay within its budget")
 				}
 				if scenario.expectCompletion {
-					assert.Contains(t, rendered, "Integration complete")
+					assert.Contains(t, rendered, "Blueprint workflow finished")
 					assert.NotContains(t, rendered, "Waiting for agent to continue")
 				}
 			})
@@ -148,8 +148,8 @@ func TestCompletionTransitionClearsTransientStatus(t *testing.T) {
 	updated := updatedModel.(Model)
 	rendered := renderLayoutScenario(&updated, layoutSize{name: "normal", width: 80, height: 24})
 
-	assert.Contains(t, rendered, "Integration complete")
-	assert.Contains(t, rendered, "Waiting for agent to publish next steps")
+	assert.Contains(t, rendered, "Blueprint workflow finished")
+	assert.Contains(t, updated.renderCompletionBody(), "Waiting for agent to publish next steps")
 	assert.NotContains(t, rendered, "Waiting for agent to continue")
 }
 
@@ -185,7 +185,7 @@ func TestSessionUpdateResizesAfterAutoSelectingReview(t *testing.T) {
 	assertHeaderIsPinned(t, rendered)
 	assertFooterIsPinned(t, rendered, "enter")
 	assert.Contains(t, rendered, "Review")
-	assert.Contains(t, rendered, "Confirmation steps")
+	assert.Contains(t, rendered, "What to try")
 }
 
 func TestFooterActionRowStaysPinnedAcrossFooterModes(t *testing.T) {
@@ -352,7 +352,7 @@ func expandedDetailsLayoutModel() Model {
 	m := reviewStepLongPromptLayoutModel()
 	m.expanded = true
 	m.detailTab = 1
-	testPresentationAttempt(&m.session.Steps[0].Nodes[0]).Implementation.Snippet = strings.Repeat("const session = await stripe.checkout.sessions.create({ mode: 'payment' })\n", 8)
+	testPresentationAttempt(&m.session.Steps[0].Nodes[0]).Implementation.Note = strings.Repeat("Created and verified a Checkout Session with the expected Price. ", 8)
 	return m
 }
 

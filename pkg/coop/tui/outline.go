@@ -147,6 +147,8 @@ func (m Model) renderStepLine(ch coop.SessionStep, stepIndex int, selected bool)
 	line := prefix + m.theme.MutedStyle.Render(disclosure) + m.theme.StepTitleStyle.Render(title)
 	if m.stepReviewCount(stepIndex) > 0 {
 		line += "  " + m.theme.ReviewStyle.Render("Awaiting review")
+	} else if m.stepExerciseReadyCount(stepIndex) > 0 {
+		line += "  " + m.theme.AttentionStyle.Render("App ready to exercise")
 	}
 	if m.stepCollapsed(stepIndex) {
 		if summary := m.collapsedStepSummary(stepIndex); summary != "" {
@@ -239,6 +241,22 @@ func (m Model) stepReviewCountRaw(stepIndex int) int {
 	return count
 }
 
+func (m Model) stepExerciseReadyCount(stepIndex int) int {
+	if m.session == nil || stepIndex < 0 || stepIndex >= len(m.session.Steps) {
+		return 0
+	}
+	count := 0
+	for nodeIndex := range m.session.Steps[stepIndex].Nodes {
+		node := &m.session.Steps[stepIndex].Nodes[nodeIndex]
+		attempt := node.CurrentAttempt()
+		if node.Type == coop.NodeUIComponent && node.State == coop.NodeReview && attempt != nil &&
+			attempt.AppSurface != nil && attempt.AppSurface.URL != "" {
+			count++
+		}
+	}
+	return count
+}
+
 func (m Model) stepHasPendingReviewWithNoActiveWork(stepIndex int) bool {
 	if m.session == nil || stepIndex < 0 || stepIndex >= len(m.session.Steps) {
 		return false
@@ -278,7 +296,7 @@ func (m Model) renderNodeLine(node coop.SessionNode, idx int, includedInStepRevi
 	case (node.State == coop.NodeActive || node.State == coop.NodeReview) && attempt != nil && attempt.Feedback != "":
 		label := "Needs correction: "
 		if node.State == coop.NodeReview {
-			label = "Correction addressed: "
+			label = "Agent resubmitted after feedback: "
 		}
 		annText = label + attempt.Feedback
 		annStyle = func(s string) string { return m.theme.AttentionStyle.Render(s) }
@@ -347,6 +365,9 @@ func (m Model) nodeStatusLabel(node coop.SessionNode, includedInStepReview bool)
 		if includedInStepReview {
 			return "Included", func(s string) string { return m.theme.MutedStyle.Render(s) }
 		}
+		if node.Type == coop.NodeUIComponent && attemptHasAppSurface(presentationAttempt(&node)) {
+			return "Ready to exercise", func(s string) string { return m.theme.AttentionStyle.Render(s) }
+		}
 		return "Needs review", func(s string) string { return m.theme.AttentionStyle.Render(s) }
 	case coop.NodeSkipped:
 		return "Skipped", func(s string) string { return m.theme.DimmedStyle.Render(s) }
@@ -355,6 +376,10 @@ func (m Model) nodeStatusLabel(node coop.SessionNode, includedInStepReview bool)
 	default:
 		return "", func(s string) string { return s }
 	}
+}
+
+func attemptHasAppSurface(attempt *coop.NodeAttempt) bool {
+	return attempt != nil && attempt.AppSurface != nil && attempt.AppSurface.URL != ""
 }
 
 func (m Model) nodeIcon(node coop.SessionNode) string {

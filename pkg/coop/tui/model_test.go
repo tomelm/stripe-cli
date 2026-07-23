@@ -218,6 +218,48 @@ func TestSelectedAppSurfacePrefersSelectedUIWithinStepReview(t *testing.T) {
 	assert.Equal(t, "http://localhost:3000/success", selection.url)
 }
 
+func TestAppSurfaceRemainsAvailableWhileLaterNodeIsActive(t *testing.T) {
+	m := readyModel()
+	ui := &m.session.Steps[0].Nodes[0]
+	ui.Type = coop.NodeUIComponent
+	ui.Title = "Checkout page"
+	ui.State = coop.NodeReview
+	attempt := testPresentationAttempt(ui)
+	attempt.AppSurface = &coop.AppSurface{URL: "http://localhost:3000/checkout"}
+	m.session.Steps[0].Nodes[1].State = coop.NodeActive
+	m.selectNode(1)
+
+	selection, ok := m.selectedAppSurface()
+
+	require.True(t, ok)
+	assert.Equal(t, 1, selection.node)
+	assert.Equal(t, "http://localhost:3000/checkout", selection.url)
+	assertContainsPlain(t, m.renderFooter(), "Ready to exercise: Checkout page")
+	assertContainsPlain(t, m.renderFooter(), "press o")
+	assertContainsPlain(t, m.renderStepLine(m.session.Steps[0], 0, false), "App ready to exercise")
+	assertContainsPlain(t, m.renderNodeLine(*ui, 0, false, false), "Ready to exercise")
+	assertNotContainsPlain(t, m.renderFooter(), "Waiting for you: review step")
+}
+
+func TestSelectedUIReviewTargetsOnlyThatSurface(t *testing.T) {
+	m := readyModel()
+	now := time.Now().UTC()
+	m.session.Steps[0].Nodes = []coop.SessionNode{
+		{NodeDefinition: coop.NodeDefinition{Key: "preview", Title: "Preview", Type: coop.NodeUIComponent}, State: coop.NodeReview,
+			Attempts: []coop.NodeAttempt{{Number: 1, StartedAt: now, AppSurface: &coop.AppSurface{URL: "http://localhost:3000/preview"}}}},
+		{NodeDefinition: coop.NodeDefinition{Key: "success", Title: "Success", Type: coop.NodeUIComponent}, State: coop.NodeReview,
+			Attempts: []coop.NodeAttempt{{Number: 1, StartedAt: now, AppSurface: &coop.AppSurface{URL: "http://localhost:3000/success"}}}},
+	}
+	m.selectNode(1)
+
+	target, ok := m.selectedReviewTarget()
+	require.True(t, ok)
+	assert.Equal(t, "node", target.kind)
+	assert.Equal(t, []int{2}, target.nodeNumbers)
+	assertContainsPlain(t, m.renderReviewCard(), "http://localhost:3000/success")
+	assertNotContainsPlain(t, m.renderReviewCard(), "http://localhost:3000/preview")
+}
+
 func TestUpdateKeyConfirmUnavailableRequiresTwoExplicitPresses(t *testing.T) {
 	dir := t.TempDir()
 	store, err := coop.NewStoreAt(dir)
@@ -253,11 +295,7 @@ func TestUpdateKeyConfirmUnavailableRequiresTwoExplicitPresses(t *testing.T) {
 	refreshed.Version++
 	result, _ = updated.Update(sessionUpdatedMsg{session: &refreshed})
 	updated = result.(Model)
-	assert.Empty(t, updated.overrideTarget, "a session refresh invalidates the override confirmation")
-
-	result, _ = updated.Update(tea.KeyPressMsg{Code: 'c', Text: "c"})
-	updated = result.(Model)
-	assert.NotEmpty(t, updated.overrideTarget)
+	assert.NotEmpty(t, updated.overrideTarget, "an unchanged material result keeps the explicit confirmation armed")
 	assert.Equal(t, coop.NodeReview, updated.session.Steps[0].Nodes[0].State)
 
 	updated.selectNode(1)
@@ -279,6 +317,25 @@ func TestUpdateKeyConfirmUnavailableRequiresTwoExplicitPresses(t *testing.T) {
 	require.NotNil(t, storedAttempt)
 	require.NotNil(t, storedAttempt.Override)
 	assert.Contains(t, storedAttempt.Override.Reason, "visible UI")
+}
+
+func TestVerificationOverrideTargetIgnoresSamplingTimeButTracksMaterialChanges(t *testing.T) {
+	m := readyModel()
+	node := &m.session.Steps[0].Nodes[0]
+	node.State = coop.NodeReview
+	attempt := testPresentationAttempt(node)
+	attempt.Results = []coop.CheckResult{{
+		ID: "state.checkout", Kind: coop.CheckState, Importance: coop.CheckRequired,
+		Status: coop.CheckUnavailable, Detail: "Stripe read unavailable", UpdatedAt: time.Now().UTC(),
+	}}
+	refs := []workflow.AttemptRef{{Node: 1, Attempt: attempt.Number}}
+
+	original := workflow.ReviewEvidenceDigest(m.session, refs)
+	attempt.Results[0].UpdatedAt = attempt.Results[0].UpdatedAt.Add(time.Second)
+	assert.Equal(t, original, workflow.ReviewEvidenceDigest(m.session, refs))
+
+	attempt.Results[0].Detail = "Different material finding"
+	assert.NotEqual(t, original, workflow.ReviewEvidenceDigest(m.session, refs))
 }
 
 func TestViewProgressBarReflectsSessionProgress(t *testing.T) {
@@ -593,7 +650,7 @@ func TestUpdateKeyConfirmStepReview(t *testing.T) {
 	assert.False(t, updated.userMoved)
 }
 
-func TestUpdateKeyConfirmStepReviewFromNodeSelection(t *testing.T) {
+func TestUpdateKeyConfirmFromNodeSelectionConfirmsOnlyThatNode(t *testing.T) {
 	dir := t.TempDir()
 	store, _ := coop.NewStoreAt(dir)
 
@@ -610,7 +667,7 @@ func TestUpdateKeyConfirmStepReviewFromNodeSelection(t *testing.T) {
 	node1, _ := updated.session.NodeByNumber(1)
 	node2, _ := updated.session.NodeByNumber(2)
 	assert.Equal(t, coop.NodeDone, node1.State)
-	assert.Equal(t, coop.NodeDone, node2.State)
+	assert.Equal(t, coop.NodeReview, node2.State)
 }
 
 func TestSelectedReviewTargetStepRequiresReadyStep(t *testing.T) {
@@ -973,7 +1030,7 @@ func TestCompletionViewWaitsForAgentSuggestions(t *testing.T) {
 
 	assert.Nil(t, cmd)
 	assert.Equal(t, 0, updated.selectionCursor)
-	assert.Contains(t, updated.renderCompletionView(), "Waiting for agent to publish next steps")
+	assert.Contains(t, updated.renderCompletionBody(), "Waiting for agent to publish next steps")
 }
 
 func TestCompletionViewportKeepsReceiptAtTop(t *testing.T) {
@@ -1196,6 +1253,7 @@ func TestHandleKeyOpenBrowser(t *testing.T) {
 func TestHandleKeyCopyReviewCommand(t *testing.T) {
 	m := readyModel()
 	m.session.Steps[1].Nodes[0].State = coop.NodeReview
+	m.session.Steps[1].Nodes[0].ReviewCommand = "stripe trigger checkout.session.completed"
 	m.selectionCursor = 2
 
 	result, cmd := m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})

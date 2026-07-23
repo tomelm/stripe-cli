@@ -32,32 +32,13 @@ func (m Model) renderCompletionBodyWithLines() completionBody {
 	suggestionLines := map[int]int{}
 	w := m.contentWidth() - 4
 
-	summary := m.session.NodeSummary()
-	done := summary[coop.NodeDone]
-	total := m.session.TotalNodes()
-	agentReported, stateVerifiedHandlers, unavailable, overrides := completionVerificationCounts(m.session)
-
-	box := m.theme.SuccessStyle.Render(fmt.Sprintf("✓ Integration complete: %s", m.session.Blueprint)) +
-		"\n" + m.theme.MutedStyle.Render(fmt.Sprintf("%d nodes complete.", done))
-	if total != done {
-		box += m.theme.MutedStyle.Render(fmt.Sprintf(" (%d skipped)", total-done))
+	done, skipped := completionNodeCounts(m.session)
+	box := m.theme.SuccessStyle.Render(fmt.Sprintf("✓ Blueprint workflow finished: %s", m.session.Blueprint)) +
+		"\n" + m.theme.MutedStyle.Render(fmt.Sprintf("%d blueprint nodes completed.", done))
+	if skipped > 0 {
+		box += m.theme.MutedStyle.Render(fmt.Sprintf(" (%d skipped)", skipped))
 	}
-	if agentReported > 0 {
-		box += "\n" + m.theme.MutedStyle.Render(fmt.Sprintf("%d completed from agent reports without direct automatic checks.", agentReported))
-	}
-	if stateVerifiedHandlers > 0 {
-		label := "webhook step"
-		if stateVerifiedHandlers != 1 {
-			label = "webhook steps"
-		}
-		box += "\n" + m.theme.MutedStyle.Render(fmt.Sprintf("%d %s: %s.", stateVerifiedHandlers, label, coop.AsyncHandlerStateVerifiedSummary))
-	}
-	if unavailable > 0 {
-		box += "\n" + m.theme.AttentionStyle.Render(fmt.Sprintf("%d completed while automatic verification was unavailable.", unavailable))
-	}
-	if overrides > 0 {
-		box += "\n" + m.theme.AttentionStyle.Render(fmt.Sprintf("%d automatic-check override(s) recorded.", overrides))
-	}
+	box += "\n" + m.theme.MutedStyle.Render("This records the test-mode blueprint work, not production readiness.")
 	content := m.theme.DetailBoxStyle.Width(min(w, 70)).Render(box)
 
 	if m.statusMessage != "" {
@@ -116,30 +97,25 @@ func (m Model) renderCompletionBodyWithLines() completionBody {
 	return completionBody{body: content, suggestionLines: suggestionLines}
 }
 
-func completionVerificationCounts(session *coop.Session) (agentReported, stateVerifiedHandlers, unavailable, overrides int) {
+func completionNodeCounts(session *coop.Session) (done, skipped int) {
 	if session == nil {
-		return 0, 0, 0, 0
+		return 0, 0
 	}
 	for stepIndex := range session.Steps {
-		for nodeIndex := range session.Steps[stepIndex].Nodes {
-			node := &session.Steps[stepIndex].Nodes[nodeIndex]
-			attempt := presentationAttempt(node)
-			if completedWithoutAutomaticVerification(node) {
-				switch {
-				case coop.AsyncHandlerCompletionSummary(node) != "":
-					stateVerifiedHandlers++
-				case completedWithUnavailableVerification(node):
-					unavailable++
-				default:
-					agentReported++
-				}
-			}
-			if attempt != nil && attempt.Override != nil {
-				overrides++
+		step := &session.Steps[stepIndex]
+		if step.Key == "context-step" {
+			continue
+		}
+		for nodeIndex := range step.Nodes {
+			switch step.Nodes[nodeIndex].State {
+			case coop.NodeDone:
+				done++
+			case coop.NodeSkipped:
+				skipped++
 			}
 		}
 	}
-	return agentReported, stateVerifiedHandlers, unavailable, overrides
+	return done, skipped
 }
 
 func (m Model) renderCompletionReceipt(width int) string {
@@ -164,12 +140,19 @@ func (m Model) renderCompletionReceipt(width int) string {
 		}
 	}
 
-	checks := m.completionImportantChecks()
+	if report := m.completionVerificationReport(width); report != "" {
+		if content.Len() > 0 {
+			content.WriteString("\n\n")
+		}
+		content.WriteString(report)
+	}
+
+	checks := m.completionHumanReviewPrompts()
 	if len(checks) > 0 {
 		if content.Len() > 0 {
 			content.WriteString("\n")
 		}
-		content.WriteString(m.theme.StepTitleStyle.Render("  Important checks") + "\n")
+		content.WriteString(m.theme.StepTitleStyle.Render("  What you reviewed") + "\n")
 		checkW := min(width-8, 72)
 		if checkW < 20 {
 			checkW = 20
@@ -187,6 +170,128 @@ func (m Model) renderCompletionReceipt(width int) string {
 	}
 
 	return strings.TrimRight(content.String(), "\n")
+}
+
+func (m Model) completionVerificationReport(width int) string {
+	if m.session == nil {
+		return ""
+	}
+
+	var lines []string
+	for stepIndex := range m.session.Steps {
+		step := &m.session.Steps[stepIndex]
+		if step.Key == "context-step" {
+			continue
+		}
+		for nodeIndex := range step.Nodes {
+			node := &step.Nodes[nodeIndex]
+			label := completionEvidenceLabel(node)
+			if label == "" {
+				continue
+			}
+			lines = append(lines, node.Title+" — "+label)
+		}
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+
+	checkW := min(width-8, 72)
+	if checkW < 20 {
+		checkW = 20
+	}
+	var content strings.Builder
+	content.WriteString(m.theme.StepTitleStyle.Render("  Verification report") + "\n")
+	for _, item := range lines {
+		for i, line := range wrapPlainText(item, checkW) {
+			prefix := "  - "
+			if i > 0 {
+				prefix = "    "
+			}
+			content.WriteString(prefix + line + "\n")
+		}
+	}
+	content.WriteString("\n")
+	scope := "Co-op verifies Stripe configuration and state only where a direct rule is listed. Visible UI is human-reviewed; application persistence, access control, and webhook processing are not implied."
+	for i, line := range wrapPlainText(scope, checkW) {
+		prefix := "  "
+		if i == 0 {
+			prefix += "Scope: "
+		} else {
+			prefix += "       "
+		}
+		content.WriteString(m.theme.MutedStyle.Render(prefix+line) + "\n")
+	}
+	return strings.TrimRight(content.String(), "\n")
+}
+
+func completionEvidenceLabel(node *coop.SessionNode) string {
+	if node == nil {
+		return ""
+	}
+	if node.State == coop.NodeSkipped {
+		return "Skipped"
+	}
+	attempt := presentationAttempt(node)
+	if attempt == nil {
+		return "No verification evidence recorded"
+	}
+
+	var labels []string
+	if hasPassedDirectCheck(attempt) {
+		labels = append(labels, "Co-op checked")
+	}
+	if humanConfirmedAttempt(node, attempt) {
+		labels = append(labels, "You reviewed")
+	}
+	if summary := coop.AsyncHandlerCompletionSummary(node); summary != "" {
+		labels = append(labels, summary)
+	} else if completedWithUnavailableVerification(node) {
+		labels = append(labels, "Automatic check unavailable")
+	} else if completedWithoutAutomaticVerification(node) {
+		labels = append(labels, "Agent reported; no direct automatic check")
+	}
+	if hasCoverageGap(attempt) {
+		labels = append(labels, "Coverage gap")
+	}
+	if attempt.Override != nil {
+		labels = append(labels, "Human override recorded")
+	}
+	if len(labels) == 0 {
+		return "No direct automatic check recorded"
+	}
+	return strings.Join(labels, " · ")
+}
+
+func humanConfirmedAttempt(node *coop.SessionNode, attempt *coop.NodeAttempt) bool {
+	if node == nil || attempt == nil || attempt.EndReason != coop.AttemptConfirmed {
+		return false
+	}
+	return node.Type == coop.NodeUIComponent || node.Type == coop.NodeDashboard
+}
+
+func hasPassedDirectCheck(attempt *coop.NodeAttempt) bool {
+	if attempt == nil {
+		return false
+	}
+	for _, result := range attempt.Results {
+		if (result.Kind == coop.CheckResource || result.Kind == coop.CheckState) && result.Status == coop.CheckPassed {
+			return true
+		}
+	}
+	return false
+}
+
+func hasCoverageGap(attempt *coop.NodeAttempt) bool {
+	if attempt == nil {
+		return false
+	}
+	for _, result := range attempt.Results {
+		if result.Kind == coop.CheckCoverage && result.Status == coop.CheckUnavailable {
+			return true
+		}
+	}
+	return false
 }
 
 func wrapPlainText(s string, width int) []string {
@@ -235,16 +340,21 @@ func (m Model) completionBuiltItems() []string {
 	return items
 }
 
-func (m Model) completionImportantChecks() []string {
+func (m Model) completionHumanReviewPrompts() []string {
 	var checks []string
 	seen := map[string]bool{}
 	for _, ch := range m.session.Steps {
 		for _, node := range ch.Nodes {
-			if node.State != coop.NodeDone || node.ReviewPrompt == "" || seen[node.ReviewPrompt] {
+			attempt := presentationAttempt(&node)
+			if node.State != coop.NodeDone || !humanConfirmedAttempt(&node, attempt) {
 				continue
 			}
-			seen[node.ReviewPrompt] = true
-			checks = append(checks, node.ReviewPrompt)
+			prompt := humanReviewPrompt(&node)
+			if prompt == "" || seen[prompt] {
+				continue
+			}
+			seen[prompt] = true
+			checks = append(checks, prompt)
 			if len(checks) == 2 {
 				return checks
 			}

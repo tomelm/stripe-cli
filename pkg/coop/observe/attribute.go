@@ -4,7 +4,6 @@ import (
 	"strings"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
-	"github.com/stripe/stripe-cli/pkg/coop/checks"
 )
 
 // TriggerTarget identifies one open attempt whose rules should be rerun.
@@ -13,8 +12,10 @@ type TriggerTarget struct {
 	AttemptNumber int
 }
 
-// RequestFailure is a safely attributable 4xx/5xx response. It deliberately
-// carries no response message or workflow action.
+// RequestFailure is bounded 4xx/5xx supporting evidence associated by
+// method/path with one plausible open attempt. Stripe request logs are
+// account-wide, so this is never proof that the attempt made the request and
+// never carries a workflow action.
 type RequestFailure struct {
 	Status      int
 	RequestID   string
@@ -23,9 +24,10 @@ type RequestFailure struct {
 	DeclineCode string
 }
 
-// Attribution attaches bounded supporting evidence to exactly one attempt.
-// It has no pass, completion, or workflow-decision field. Failure is present
-// only for a uniquely attributable 4xx/5xx request.
+// Attribution associates bounded supporting evidence with exactly one
+// plausible attempt. It has no pass, completion, or workflow-decision field.
+// Failure is present only when one open attempt matched, but remains advisory
+// until the stream has a stronger correlation key.
 type Attribution struct {
 	Target  TriggerTarget
 	Fact    Fact
@@ -40,11 +42,10 @@ type SessionMatch struct {
 }
 
 // MatchSession maps one normalized fact onto a frozen session without
-// mutating it. The optional projections are compiler-proven bridges from a UI
-// to the immediately following async-handler step; without them, matching
-// remains strictly step-local. Ambiguous facts may trigger several
-// authoritative rereads but cannot attach evidence or failures to an attempt.
-func MatchSession(session *coop.Session, fact Fact, projections ...checks.UIEventProjection) SessionMatch {
+// mutating it. Matching remains strictly declarative and step-local.
+// Ambiguous facts may trigger several authoritative rereads but cannot attach
+// evidence or failures to an attempt.
+func MatchSession(session *coop.Session, fact Fact) SessionMatch {
 	if session == nil || session.Status == coop.SessionCompleted || session.Status == coop.SessionAborted ||
 		(fact.Request == nil) == (fact.Event == nil) {
 		return SessionMatch{}
@@ -53,9 +54,6 @@ func MatchSession(session *coop.Session, fact Fact, projections ...checks.UIEven
 	match := SessionMatch{Triggers: directTriggers(session, fact)}
 	if len(match.Triggers) == 0 {
 		match.Triggers = sameStepUITriggers(session, fact)
-	}
-	if len(match.Triggers) == 0 && fact.Event != nil {
-		match.Triggers = projectedUITriggers(session, *fact.Event, projections)
 	}
 	if len(match.Triggers) != 1 {
 		return match
@@ -94,9 +92,13 @@ func directTriggers(session *coop.Session, fact Fact) []TriggerTarget {
 	return triggers
 }
 
-// sameStepUITriggers lets one open app surface inherit a fact declared by a
-// completed sibling in the same step. Ended declaration attempts stay frozen.
+// sameStepUITriggers lets one open app surface react to a request declared by
+// a completed sibling in the same step. Events must be declared on the UI node
+// itself so the compiled state check and the observer target have one owner.
 func sameStepUITriggers(session *coop.Session, fact Fact) []TriggerTarget {
+	if fact.Request == nil {
+		return nil
+	}
 	var triggers []TriggerTarget
 	// If nothing open declared the fact directly, a completed sibling may
 	// describe activity exercised through the same step's one open UI. The UI
@@ -107,7 +109,6 @@ func sameStepUITriggers(session *coop.Session, fact Fact) []TriggerTarget {
 		declared := false
 		candidate := TriggerTarget{}
 		candidateCount := 0
-		var candidateAttempt *coop.NodeAttempt
 		for nodeIndex := range step.Nodes {
 			node := &step.Nodes[nodeIndex]
 			declared = declared || nodeDeclares(node, fact)
@@ -117,65 +118,13 @@ func sameStepUITriggers(session *coop.Session, fact Fact) []TriggerTarget {
 			}
 			candidateCount++
 			candidate = TriggerTarget{NodeNumber: nodeOffset + nodeIndex + 1, AttemptNumber: attempt.Number}
-			candidateAttempt = attempt
 		}
-		if declared && candidateCount == 1 && (fact.Request != nil || eventCorrelates(step, candidateAttempt, fact.Event.Discoveries)) {
+		if declared && candidateCount == 1 {
 			triggers = append(triggers, candidate)
 		}
 		nodeOffset += len(step.Nodes)
 	}
 	return triggers
-}
-
-func projectedUITriggers(session *coop.Session, event EventFact, projections []checks.UIEventProjection) []TriggerTarget {
-	var triggers []TriggerTarget
-	// A UI may exercise a resource whose event contract lives in the next
-	// implementation step. Only a compiler-proven projection, an exact event
-	// and resource type, and a reported/open UI attempt can propose that
-	// resource identity. The evaluator performs the authoritative reread.
-	nodeOffset := 0
-	seen := make(map[TriggerTarget]bool)
-	for stepIndex := range session.Steps {
-		step := &session.Steps[stepIndex]
-		for nodeIndex := range step.Nodes {
-			node := &step.Nodes[nodeIndex]
-			attempt := reportedOpenedUIAttempt(node)
-			if attempt == nil {
-				continue
-			}
-			for _, projection := range projections {
-				if projection.UI.Step != step.Key || projection.UI.Node != node.Key ||
-					projection.State.EventType != event.Type ||
-					!projectedEventCorrelates(attempt, projection.State.ResourceType, event.Discoveries) {
-					continue
-				}
-				target := TriggerTarget{NodeNumber: nodeOffset + nodeIndex + 1, AttemptNumber: attempt.Number}
-				if !seen[target] {
-					seen[target] = true
-					triggers = append(triggers, target)
-				}
-			}
-		}
-		nodeOffset += len(step.Nodes)
-	}
-	return triggers
-}
-
-func projectedEventCorrelates(attempt *coop.NodeAttempt, resourceType string, discoveries []Discovery) bool {
-	if attempt == nil || len(discoveries) != 1 {
-		return false
-	}
-	discovery := discoveries[0]
-	normalizedType := strings.ReplaceAll(strings.TrimSpace(discovery.Type), ".", "_")
-	if normalizedType == "" || normalizedType != resourceType || strings.TrimSpace(discovery.ID) == "" {
-		return false
-	}
-	for _, binding := range attempt.Resources {
-		if binding.Type == resourceType && binding.ID == discovery.ID {
-			return true
-		}
-	}
-	return !attemptBlocksDiscoveryType(attempt, discovery.Type)
 }
 
 func reportedOpenedUIAttempt(node *coop.SessionNode) *coop.NodeAttempt {
@@ -249,9 +198,10 @@ func eventCorrelates(step *coop.SessionStep, attempt *coop.NodeAttempt, discover
 			return false
 		}
 	}
-	// A human opening an app is the one narrow correlation window in which an
-	// event may propose a new binding. The evaluator still verifies its action
-	// window before accepting it.
+	// A human opening an app creates the one narrow discovery window in which
+	// an event may propose a replaceable candidate. This does not attribute the
+	// event to the attempt; the evaluator verifies its action window and keeps
+	// the attribution result unavailable.
 	return attempt.ReportedAt != nil && hasUsableDiscovery(discoveries) && stepHasOpenApp(step)
 }
 

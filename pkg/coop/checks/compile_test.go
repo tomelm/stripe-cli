@@ -271,10 +271,9 @@ func TestCompileEvidenceUsesHiddenRequestInputs(t *testing.T) {
 	assert.Equal(t, "private_label", plan.Resources[0].Evidence[0].Predicates[0].Input)
 }
 
-func TestCompileCorrelationEvidenceIsAllOrNothing(t *testing.T) {
+func TestCompileEvidenceKeepsApplicableRelationshipPredicates(t *testing.T) {
 	rules := []EvidenceRule{{
 		ID: "line_items", Retrieve: "/v1/checkout/sessions/{id}/line_items",
-		CorrelatesAttempt: true,
 		Predicates: []PredicateTemplate{
 			{Kind: PredicateEqualsBinding, Field: "data.0.price", Input: "line_items.0.price"},
 			{Kind: PredicateEqualsBinding, Field: "data.0.product", Input: "metadata.product"},
@@ -289,13 +288,14 @@ func TestCompileCorrelationEvidenceIsAllOrNothing(t *testing.T) {
 
 	evidence, _, err := compileEvidence(rules, request)
 	require.NoError(t, err)
-	assert.Empty(t, evidence, "one compiled relationship must not weaken a two-relationship attribution rule")
+	require.Len(t, evidence, 1)
+	assert.Len(t, evidence[0].Predicates, 1,
+		"relationship evidence verifies applicable object facts without claiming attempt ownership")
 
 	params["metadata"] = map[string]any{"product": "${node.setup.create-product:id}"}
 	evidence, _, err = compileEvidence(rules, request)
 	require.NoError(t, err)
 	require.Len(t, evidence, 1)
-	assert.True(t, evidence[0].CorrelatesAttempt)
 	assert.Len(t, evidence[0].Predicates, 2)
 }
 

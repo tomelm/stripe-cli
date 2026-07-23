@@ -254,7 +254,7 @@ func TestMatchSessionMatchesNamedTestHelperRequest(t *testing.T) {
 	require.NotNil(t, match.Attribution.Failure)
 }
 
-func TestMatchSessionProjectsSameStepRequestToReportedOpenedUI(t *testing.T) {
+func TestMatchSessionRoutesSameStepRequestToReportedOpenedUI(t *testing.T) {
 	reported := time.Now().UTC().Add(-time.Minute)
 	opened := reported.Add(time.Second)
 	ended := reported.Add(-time.Second)
@@ -280,7 +280,7 @@ func TestMatchSessionProjectsSameStepRequestToReportedOpenedUI(t *testing.T) {
 	assert.Equal(t, "api_error", match.Attribution.Failure.ErrorCode)
 }
 
-func TestMatchSessionProjectsSameStepEventToReportedOpenedUI(t *testing.T) {
+func TestMatchSessionRequiresUIOwnedEventDeclaration(t *testing.T) {
 	reported := time.Now().UTC().Add(-time.Minute)
 	opened := reported.Add(time.Second)
 	session := &coop.Session{Steps: []coop.SessionStep{{Nodes: []coop.SessionNode{
@@ -292,12 +292,11 @@ func TestMatchSessionProjectsSameStepEventToReportedOpenedUI(t *testing.T) {
 		Type: "checkout.session.completed", Discoveries: []Discovery{{Type: "checkout.session", ID: "cs_new"}},
 	}})
 
-	assert.Equal(t, []TriggerTarget{{NodeNumber: 2, AttemptNumber: 3}}, match.Triggers)
-	require.NotNil(t, match.Attribution)
-	assert.Equal(t, TriggerTarget{NodeNumber: 2, AttemptNumber: 3}, match.Attribution.Target)
+	assert.Empty(t, match.Triggers)
+	assert.Nil(t, match.Attribution)
 }
 
-func TestMatchSessionPrefersDirectOpenNodeOverSameStepUIProjection(t *testing.T) {
+func TestMatchSessionPrefersDirectOpenNodeOverSameStepUIRoute(t *testing.T) {
 	reported := time.Now().UTC().Add(-time.Minute)
 	opened := reported.Add(time.Second)
 	session := &coop.Session{Steps: []coop.SessionStep{{Nodes: []coop.SessionNode{
@@ -319,7 +318,7 @@ func TestMatchSessionPrefersDirectOpenNodeOverSameStepUIProjection(t *testing.T)
 	assert.Equal(t, TriggerTarget{NodeNumber: 1, AttemptNumber: 1}, match.Attribution.Target)
 }
 
-func TestMatchSessionDoesNotProjectAcrossStepsToFutureDeclaration(t *testing.T) {
+func TestMatchSessionDoesNotMatchAcrossStepsToFutureDeclaration(t *testing.T) {
 	reported := time.Now().UTC().Add(-time.Minute)
 	opened := reported.Add(time.Second)
 
@@ -352,82 +351,6 @@ func TestMatchSessionDoesNotProjectAcrossStepsToFutureDeclaration(t *testing.T) 
 			Method: "POST", Path: "/v1/checkout/sessions", Status: 200,
 		}})
 
-		assert.Empty(t, match.Triggers)
-		assert.Nil(t, match.Attribution)
-	})
-}
-
-func TestMatchSessionUIProjectionRequiresOneSafeTarget(t *testing.T) {
-	reported := time.Now().UTC().Add(-time.Minute)
-	opened := reported.Add(time.Second)
-	declaration := coop.SessionNode{NodeDefinition: coop.NodeDefinition{
-		Events: []string{"checkout.session.completed"},
-	}}
-	fact := Fact{Event: &EventFact{
-		Type: "checkout.session.completed", Discoveries: []Discovery{{Type: "checkout.session", ID: "cs_new"}},
-	}}
-
-	t.Run("ambiguous UI attempts", func(t *testing.T) {
-		session := &coop.Session{Steps: []coop.SessionStep{{Nodes: []coop.SessionNode{
-			declaration,
-			reportedOpenAppNode(1, reported, opened),
-			reportedOpenAppNode(2, reported, opened),
-		}}}}
-
-		match := MatchSession(session, fact)
-		assert.Empty(t, match.Triggers)
-		assert.Nil(t, match.Attribution)
-	})
-
-	t.Run("unreported UI attempt", func(t *testing.T) {
-		ui := reportedOpenAppNode(1, reported, opened)
-		ui.Attempts[0].ReportedAt = nil
-		session := &coop.Session{Steps: []coop.SessionStep{{Nodes: []coop.SessionNode{declaration, ui}}}}
-
-		match := MatchSession(session, fact)
-		assert.Empty(t, match.Triggers)
-		assert.Nil(t, match.Attribution)
-	})
-
-	t.Run("unopened UI attempt", func(t *testing.T) {
-		ui := reportedOpenAppNode(1, reported, opened)
-		ui.Attempts[0].AppSurface.OpenedAt = nil
-		session := &coop.Session{Steps: []coop.SessionStep{{Nodes: []coop.SessionNode{declaration, ui}}}}
-
-		match := MatchSession(session, fact)
-		assert.Empty(t, match.Triggers)
-		assert.Nil(t, match.Attribution)
-	})
-
-	t.Run("ended UI attempt", func(t *testing.T) {
-		ui := reportedOpenAppNode(1, reported, opened)
-		ui.Attempts[0].EndedAt = &opened
-		session := &coop.Session{Steps: []coop.SessionStep{{Nodes: []coop.SessionNode{declaration, ui}}}}
-
-		match := MatchSession(session, fact)
-		assert.Empty(t, match.Triggers)
-		assert.Nil(t, match.Attribution)
-	})
-
-	t.Run("conflicting UI binding", func(t *testing.T) {
-		ui := reportedOpenAppNode(1, reported, opened)
-		ui.Attempts[0].Resources = []coop.ResourceBinding{{
-			Role: "checkout_session", Type: "checkout_session", ID: "cs_existing", Source: coop.BindingAgent,
-		}}
-		session := &coop.Session{Steps: []coop.SessionStep{{Nodes: []coop.SessionNode{declaration, ui}}}}
-
-		match := MatchSession(session, fact)
-		assert.Empty(t, match.Triggers)
-		assert.Nil(t, match.Attribution)
-	})
-
-	t.Run("event without usable discovery", func(t *testing.T) {
-		session := &coop.Session{Steps: []coop.SessionStep{{Nodes: []coop.SessionNode{
-			declaration,
-			reportedOpenAppNode(1, reported, opened),
-		}}}}
-
-		match := MatchSession(session, Fact{Event: &EventFact{Type: "checkout.session.completed"}})
 		assert.Empty(t, match.Triggers)
 		assert.Nil(t, match.Attribution)
 	})

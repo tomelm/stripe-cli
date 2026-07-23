@@ -42,7 +42,7 @@ func TestUILayoutStressSessions(t *testing.T) {
 				}
 				if scenario.expectReviewCard {
 					assert.Contains(t, rendered, "Review")
-					assert.Contains(t, rendered, "Confirmation steps")
+					assert.Contains(t, rendered, "What to try")
 					assert.LessOrEqual(t, lipgloss.Height(m.renderFooter()), m.footerHeightBudget())
 				}
 			})
@@ -73,7 +73,7 @@ func TestUILayoutCopyAudit(t *testing.T) {
 				assert.NotContains(t, lower, strings.ToLower(phrase))
 			}
 			if strings.Contains(rendered, "Review") {
-				assert.Contains(t, rendered, "Confirmation steps")
+				assert.Contains(t, rendered, "What to try")
 			}
 		})
 	}
@@ -83,10 +83,9 @@ func stressLongReviewModel() Model {
 	m := reviewStepLongPromptLayoutModel()
 	m.session.Steps[0].Nodes[0].Title = "Review Checkout Session creation, saved IDs, redirect behavior, and webhook assumptions"
 	testPresentationAttempt(&m.session.Steps[0].Nodes[0]).Implementation = &coop.Implementation{
-		File:    "server/src/very/long/path/to/payments/checkout/session/create_checkout_session_handler_with_extremely_specific_name.ts",
-		Lines:   "128-276",
-		Snippet: strings.Repeat("await stripe.checkout.sessions.create({ mode: 'payment', line_items: [{ price: savedPriceID, quantity: 1 }] })\n", 6),
-		Note:    "Created the Checkout Session endpoint, persisted the returned IDs, and reused the saved price ID for later payment confirmation.",
+		File:  "server/src/very/long/path/to/payments/checkout/session/create_checkout_session_handler_with_extremely_specific_name.ts",
+		Lines: "128-276",
+		Note:  "Created the Checkout Session endpoint, persisted the returned IDs, and reused the saved price ID for later payment confirmation.",
 	}
 	m.session.Steps[0].Nodes[0].ReviewPrompt = "Open the app, start Checkout, inspect the server logs, confirm the saved price ID is reused instead of creating a new Price, confirm the redirect URL is correct, confirm errors are handled without exposing secrets, and confirm the success page reflects the completed payment."
 	testPresentationAttempt(&m.session.Steps[0].Nodes[0]).AgentChecks = []coop.Verification{

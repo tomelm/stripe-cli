@@ -882,6 +882,10 @@ func TestEvaluateBoundsCompiledTargets(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, report.Results, MaxResultsPerRun)
 	assert.Equal(t, 1, countKind(report.Results, coop.CheckCoverage))
+	coverage := resultWithSuffix(t, report, "checkrun.coverage")
+	assert.Equal(t, coop.CheckRequired, coverage.Importance)
+	assert.Equal(t, coop.CheckUnavailable, coverage.Status,
+		"capacity loss must prevent automatic confirmation")
 	assert.Len(t, reader.paths, MaxTargetsPerRun*(1+MaxEvidencePerTarget))
 	seen := make(map[string]bool, len(report.Results))
 	for _, result := range report.Results {
@@ -893,7 +897,7 @@ func TestEvaluateBoundsCompiledTargets(t *testing.T) {
 		"the exact maximum snapshot must remain persistable")
 }
 
-func TestEvaluateTruncatedCorrelationCannotPromoteCandidate(t *testing.T) {
+func TestEvaluateOversizedCandidateEvidenceFailsClosed(t *testing.T) {
 	started := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
 	reported := started.Add(time.Minute)
 	opened := reported.Add(time.Minute)
@@ -941,7 +945,7 @@ func TestEvaluateTruncatedCorrelationCannotPromoteCandidate(t *testing.T) {
 		RetrievePath: "/v1/checkout/sessions/{id}", IDPrefixes: []string{"cs_"},
 		Evidence: []checks.EvidenceCheck{{
 			ID: "oversized-correlation", RetrievePath: "/v1/checkout/sessions/{id}/line_items",
-			CorrelatesAttempt: true, Predicates: predicates,
+			Predicates: predicates,
 		}},
 	}}}
 	reader := &memoryReader{objects: map[string]map[string]any{
@@ -964,10 +968,11 @@ func TestEvaluateTruncatedCorrelationCannotPromoteCandidate(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, report.Bindings, 1)
 	assert.Equal(t, coop.BindingObservedCandidate, report.Bindings[0].Source,
-		"a truncated relationship can never establish attribution")
+		"bounded object evidence can never establish attempt attribution")
 	assert.Equal(t, coop.CheckUnavailable,
 		resultWithSuffix(t, report, ".attribution.checkout_session.checkout_session").Status)
 	assert.Equal(t, 1, countKind(report.Results, coop.CheckCoverage))
+	assert.Equal(t, coop.CheckRequired, resultWithSuffix(t, report, "checkrun.coverage").Importance)
 }
 
 func statePlan() checks.StepPlan {
