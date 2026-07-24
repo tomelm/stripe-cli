@@ -150,7 +150,7 @@ func TestAgentProcessPulseIsExclusiveOwnerSafeAndReadable(t *testing.T) {
 	leasePath := filepath.Join(dir, "session.json.agent-pulse")
 	info, err := os.Stat(leasePath)
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	assertPrivateAgentProcessFileMode(t, info)
 
 	firstRelease()
 	age, err = store.AgentProcessPulseAge("session")

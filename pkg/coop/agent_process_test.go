@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -35,7 +36,15 @@ func TestAgentProcessLifecyclePersistsFastExit(t *testing.T) {
 
 	info, err := os.Stat(filepath.Join(dir, "fast.json.agent-process"))
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+	assertPrivateAgentProcessFileMode(t, info)
+}
+
+func assertPrivateAgentProcessFileMode(t *testing.T, info os.FileInfo) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return
+	}
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 }
 
 func TestAgentProcessLifecycleRunningRequiresCurrentLaunch(t *testing.T) {
