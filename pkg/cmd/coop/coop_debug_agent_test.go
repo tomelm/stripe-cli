@@ -38,6 +38,30 @@ func TestDebugAgentPaneCommandUsesStripeBinaryAndSession(t *testing.T) {
 	assert.Equal(t, "XDG_CONFIG_HOME='/tmp/xdg config' '/tmp/stripe bin' coop debug-agent --session 'coop_123'", cmd)
 }
 
+func TestCoopDebugAgentEvaluatesWithoutObserver(t *testing.T) {
+	store, session := setupDebugAgentSession(t, []coop.SessionStep{{
+		StepDefinition: coop.StepDefinition{Key: "step", Title: "Step"},
+		Nodes: []coop.SessionNode{{
+			NodeDefinition: coop.NodeDefinition{Key: "checkout", Title: "Build Checkout", Type: coop.NodeAPIRequest},
+			State:          coop.NodePending,
+		}},
+	}})
+
+	ctx, cancel := context.WithTimeout(context.Background(), debugAgentTestTimeout)
+	defer cancel()
+	require.NoError(t, <-runDebugAgentForTest(ctx, store, session.ID))
+
+	completed, err := store.Read(session.ID)
+	require.NoError(t, err)
+	assert.Equal(t, coop.SessionCompleted, completed.Status)
+	node, err := completed.NodeByNumber(1)
+	require.NoError(t, err)
+	require.Len(t, node.Attempts, 1)
+	require.Len(t, node.Attempts[0].Results, 1)
+	assert.Equal(t, "debug.agent.completed", node.Attempts[0].Results[0].ID)
+	assert.Equal(t, coop.CheckPassed, node.Attempts[0].Results[0].Status)
+}
+
 func TestCoopDebugAgentRerunsRequestedChanges(t *testing.T) {
 	store, session := setupDebugAgentSession(t, []coop.SessionStep{
 		{
@@ -57,7 +81,9 @@ func TestCoopDebugAgentRerunsRequestedChanges(t *testing.T) {
 
 	waitForDebugSession(t, store, session.ID, func(s *coop.Session) bool {
 		node, _ := s.NodeByNumber(1)
-		return node.State == coop.NodeReview
+		attempt := node.CurrentAttempt()
+		return node.State == coop.NodeReview && attempt != nil &&
+			attempt.AutomaticResultsAt != nil && !attempt.AutomaticCheckPending()
 	})
 	waitForDebugHeartbeat(t, store, session.ID)
 
@@ -73,7 +99,9 @@ func TestCoopDebugAgentRerunsRequestedChanges(t *testing.T) {
 	waitForDebugSession(t, store, session.ID, func(s *coop.Session) bool {
 		node, _ := s.NodeByNumber(1)
 		attempt := node.CurrentAttempt()
-		return node.State == coop.NodeReview && attempt != nil && len(attempt.AgentChecks) > 0 && attempt.Implementation != nil
+		return node.State == coop.NodeReview && attempt != nil &&
+			attempt.AutomaticResultsAt != nil && !attempt.AutomaticCheckPending() &&
+			len(attempt.AgentChecks) > 0 && attempt.Implementation != nil
 	})
 
 	corrected, err := store.Read(session.ID)
@@ -115,14 +143,25 @@ func TestCoopDebugAgentWaitsForStepReviewAfterStepIsReady(t *testing.T) {
 	waitForDebugSession(t, store, session.ID, func(s *coop.Session) bool {
 		node1, _ := s.NodeByNumber(1)
 		node2, _ := s.NodeByNumber(2)
-		return node1.State == coop.NodeReview && node2.State == coop.NodeReview
+		attempt1 := node1.CurrentAttempt()
+		attempt2 := node2.CurrentAttempt()
+		return node1.State == coop.NodeReview && node2.State == coop.NodeReview &&
+			attempt1 != nil && attempt1.AutomaticResultsAt != nil && !attempt1.AutomaticCheckPending() &&
+			attempt2 != nil && attempt2.AutomaticResultsAt != nil && !attempt2.AutomaticCheckPending()
 	})
 
 	current, err := store.Read(session.ID)
 	require.NoError(t, err)
-	require.NoError(t, current.TransitionNode(1, coop.NodeDone))
-	require.NoError(t, current.TransitionNode(2, coop.NodeDone))
-	require.NoError(t, store.Write(current))
+	node1, err := current.NodeByNumber(1)
+	require.NoError(t, err)
+	node2, err := current.NodeByNumber(2)
+	require.NoError(t, err)
+	service := workflow.NewService(store)
+	_, err = service.ConfirmReviewAttempts(session.ID, []workflow.AttemptRef{
+		{Node: 1, Attempt: node1.CurrentAttempt().Number},
+		{Node: 2, Attempt: node2.CurrentAttempt().Number},
+	})
+	require.NoError(t, err)
 
 	require.NoError(t, <-done)
 	finalSession, err := store.Read(session.ID)
@@ -158,42 +197,11 @@ func runDebugAgentForTest(ctx context.Context, store *coop.Store, sessionID stri
 		out:                      io.Discard,
 		waitForNextStepSelection: false,
 	}
-	go runDebugObserverForTest(runCtx, store, sessionID)
 	go func() {
 		defer cancel()
 		done <- agent.run(runCtx)
 	}()
 	return done
-}
-
-func runDebugObserverForTest(ctx context.Context, store *coop.Store, sessionID string) {
-	service := workflow.NewService(store, workflow.WithEvaluator(debugAgentEvaluator{}))
-	ticker := time.NewTicker(2 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		session, err := store.Read(sessionID)
-		if err != nil {
-			continue
-		}
-		nodeNumber := 0
-		for stepIndex := range session.Steps {
-			for nodeIndex := range session.Steps[stepIndex].Nodes {
-				nodeNumber++
-				node := &session.Steps[stepIndex].Nodes[nodeIndex]
-				attempt := node.CurrentAttempt()
-				if node.State != coop.NodeActive || attempt == nil || attempt.ReportedAt == nil ||
-					!workflow.AttemptNeedsReevaluation(attempt) {
-					continue
-				}
-				_, _ = service.Reevaluate(ctx, sessionID, nodeNumber, attempt.Number, workflow.TriggerPoll)
-			}
-		}
-	}
 }
 
 func waitForDebugSession(t *testing.T, store *coop.Store, sessionID string, predicate func(*coop.Session) bool) {
