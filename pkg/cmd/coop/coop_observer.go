@@ -383,8 +383,7 @@ func (controller *coopObserverController) consume(
 			if !ok {
 				return
 			}
-			switch data := element.(type) {
-			case websocket.DataElement:
+			if data, ok := element.(websocket.DataElement); ok {
 				controller.observe(ctx, service, sessionID, data.Data)
 			}
 		}
