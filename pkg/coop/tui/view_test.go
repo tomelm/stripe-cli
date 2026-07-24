@@ -738,6 +738,50 @@ func TestCompletionAndOutlineDiscloseUnverifiedWork(t *testing.T) {
 	assertContainsPlain(t, m.renderNodeLine(*node, 0, false, false), "Complete · agent reported")
 }
 
+func TestCompletedUnavailableOutlineIsNonActionableAndWordSafe(t *testing.T) {
+	m := testModel()
+	m.width = 34
+	node := &m.session.Steps[0].Nodes[0]
+	node.Title = "Create product and price"
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	node.Attempts = []coop.NodeAttempt{{
+		Number: 1, StartedAt: now.Add(-time.Minute), EndedAt: &now,
+		EndReason: coop.AttemptCompletedUnverified,
+		Results: []coop.CheckResult{
+			{ID: "resource.exists", Kind: coop.CheckResource, Importance: coop.CheckRequired, Status: coop.CheckPassed},
+			{ID: "application.outcome", Kind: coop.CheckCoverage, Importance: coop.CheckRequired, Status: coop.CheckUnavailable},
+		},
+	}}
+
+	line := m.renderNodeLine(*node, 0, false, false)
+	plain := ansi.Strip(line)
+	assert.Contains(t, plain, "• Create product and price")
+	assert.Contains(t, strings.Join(strings.Fields(plain), " "), "Complete · limited automatic coverage")
+	assert.NotContains(t, plain, "!")
+	assert.NotContains(t, plain, "unavailable")
+	assertLinesWithinWidth(t, line, m.width)
+
+	// The live split-pane width that exposed the regression may use a second
+	// indented line, but must never rely on character-level terminal wrapping.
+	m.width = 63
+	line = m.renderNodeLine(*node, 0, false, false)
+	assert.Contains(t, strings.Join(strings.Fields(ansi.Strip(line)), " "), "Complete · limited automatic coverage")
+	assert.NotContains(t, ansi.Strip(line), "covera\nge")
+	assertLinesWithinWidth(t, line, m.width)
+
+	label, style := m.nodeStatusLabel(*node, false)
+	assert.Equal(t, "Complete · limited automatic coverage", label)
+	assert.Equal(t, m.theme.MutedStyle.Render(label), style(label))
+	assert.Equal(t, m.theme.MutedStyle.Render("•"), m.nodeIcon(*node))
+	assert.Equal(t, "•", stepNodeStatusLabel(*node))
+	assert.Equal(t, "Co-op checked · Limited automatic coverage", completionEvidenceLabel(node))
+
+	var detail strings.Builder
+	m.writeSummaryDetail(&detail, node)
+	assert.Contains(t, detail.String(), "Completed with limited automatic coverage")
+	assert.Contains(t, detail.String(), "Unavailable checks were not treated as passed")
+}
+
 func TestCompletionVerificationReportDisclosesCoverageGapAndOverride(t *testing.T) {
 	m := withCompletionSuggestions(testModel())
 	for stepIndex := range m.session.Steps {

@@ -247,11 +247,12 @@ func completionEvidenceLabel(node *coop.SessionNode) string {
 	if summary := coop.AsyncHandlerCompletionSummary(node); summary != "" {
 		labels = append(labels, summary)
 	} else if completedWithUnavailableVerification(node) {
-		labels = append(labels, "Automatic check unavailable")
+		labels = append(labels, "Limited automatic coverage")
 	} else if completedWithoutAutomaticVerification(node) {
 		labels = append(labels, "Agent reported; no direct automatic check")
 	}
-	if hasCoverageGap(attempt) {
+	if hasCoverageGap(attempt) &&
+		(!completedWithUnavailableVerification(node) || hasAdvisoryCoverageGap(attempt)) {
 		labels = append(labels, "Coverage gap")
 	}
 	if attempt.Override != nil {
@@ -288,6 +289,19 @@ func hasCoverageGap(attempt *coop.NodeAttempt) bool {
 	}
 	for _, result := range attempt.Results {
 		if result.Kind == coop.CheckCoverage && result.Status == coop.CheckUnavailable {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAdvisoryCoverageGap(attempt *coop.NodeAttempt) bool {
+	if attempt == nil {
+		return false
+	}
+	for _, result := range attempt.Results {
+		if result.Kind == coop.CheckCoverage && result.Status == coop.CheckUnavailable &&
+			result.Importance != coop.CheckRequired {
 			return true
 		}
 	}

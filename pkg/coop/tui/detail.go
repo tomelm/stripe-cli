@@ -183,7 +183,7 @@ func (m Model) writeSummaryDetail(md *strings.Builder, node *coop.SessionNode) {
 		if summary := coop.AsyncHandlerCompletionSummary(node); summary != "" {
 			md.WriteString("**Verification:** " + summary + ".\n\n")
 		} else if completedWithUnavailableVerification(node) {
-			md.WriteString("**Verification:** Completed while a required automatic check was unavailable.\n\n")
+			md.WriteString("**Verification:** Completed with limited automatic coverage. Unavailable checks were not treated as passed.\n\n")
 		} else {
 			md.WriteString("**Verification:** Agent reported completion; no direct automatic rule checked this work.\n\n")
 		}
@@ -343,10 +343,7 @@ func stepNodeStatusLabel(node coop.SessionNode) string {
 			return "!"
 		}
 		if completedWithoutAutomaticVerification(&node) {
-			if !completedWithUnavailableVerification(&node) {
-				return "•"
-			}
-			return "!"
+			return "•"
 		}
 		return "✓"
 	case coop.NodeActive:

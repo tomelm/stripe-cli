@@ -327,7 +327,7 @@ func (m Model) renderNodeLine(node coop.SessionNode, idx int, includedInStepRevi
 
 	line := fmt.Sprintf("%s%s %s", cursor, icon, title)
 	if label, style := m.nodeStatusLabel(node, includedInStepReview); label != "" {
-		line += "  " + style(label)
+		line = m.appendNodeStatus(line, label, style)
 	}
 
 	if annText != "" {
@@ -344,6 +344,26 @@ func (m Model) renderNodeLine(node coop.SessionNode, idx int, includedInStepRevi
 	return line
 }
 
+// appendNodeStatus keeps completed-state disclosures readable without letting
+// the terminal's character-level soft wrapping split words. Statuses stay
+// inline when they fit and move to an indented, word-wrapped line otherwise.
+func (m Model) appendNodeStatus(line, label string, style func(string) string) string {
+	candidate := line + "  " + style(label)
+	if lipgloss.Width(candidate) <= m.outlineWidth() {
+		return candidate
+	}
+
+	indent := strings.Repeat(" ", rowCursorWidth+2)
+	wrapWidth := m.outlineWidth() - lipgloss.Width(indent)
+	if wrapWidth < 12 {
+		wrapWidth = 12
+	}
+	for _, wrapped := range strings.Split(wordWrap(label, wrapWidth), "\n") {
+		line += "\n" + indent + style(wrapped)
+	}
+	return line
+}
+
 func (m Model) nodeStatusLabel(node coop.SessionNode, includedInStepReview bool) (string, func(string) string) {
 	switch node.State {
 	case coop.NodeDone:
@@ -354,7 +374,7 @@ func (m Model) nodeStatusLabel(node coop.SessionNode, includedInStepReview bool)
 			if coop.AsyncHandlerCompletionSummary(&node) != "" {
 				return "Complete · handler unverified", func(s string) string { return m.theme.MutedStyle.Render(s) }
 			} else if completedWithUnavailableVerification(&node) {
-				return "Complete · automatic check unavailable", func(s string) string { return m.theme.AttentionStyle.Render(s) }
+				return "Complete · limited automatic coverage", func(s string) string { return m.theme.MutedStyle.Render(s) }
 			}
 			return "Complete · agent reported", func(s string) string { return m.theme.MutedStyle.Render(s) }
 		}
@@ -389,10 +409,7 @@ func (m Model) nodeIcon(node coop.SessionNode) string {
 			return m.theme.AttentionStyle.Render("!")
 		}
 		if completedWithoutAutomaticVerification(&node) {
-			if !completedWithUnavailableVerification(&node) {
-				return m.theme.MutedStyle.Render("•")
-			}
-			return m.theme.AttentionStyle.Render("!")
+			return m.theme.MutedStyle.Render("•")
 		}
 		return m.theme.SuccessStyle.Render("✓")
 	case coop.NodeActive:
