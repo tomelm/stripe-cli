@@ -65,6 +65,16 @@ type observerStreamConfig struct {
 
 type observerStreamFactory func(context.Context, observerStreamConfig) ([]<-chan websocket.IElement, error)
 
+type observerPollTarget struct {
+	node    int
+	attempt int
+}
+
+type observerPollRetry struct {
+	next  time.Time
+	delay time.Duration
+}
+
 type coopObserverController struct {
 	store           observerStore
 	newWorkflow     func(observerCredentials) observerWorkflow
@@ -435,15 +445,7 @@ func (controller *coopObserverController) observe(
 }
 
 func (controller *coopObserverController) poll(ctx context.Context, sessionID string, accountReadyAfter time.Time) {
-	type target struct {
-		node    int
-		attempt int
-	}
-	type retry struct {
-		next  time.Time
-		delay time.Duration
-	}
-	retries := make(map[target]retry)
+	retries := make(map[observerPollTarget]observerPollRetry)
 	ticker := time.NewTicker(controller.pollEvery)
 	defer ticker.Stop()
 	for {
@@ -451,58 +453,73 @@ func (controller *coopObserverController) poll(ctx context.Context, sessionID st
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			session, err := controller.store.Read(sessionID)
-			if err != nil {
-				continue
-			}
-			if session.Status != coop.SessionActive {
+			if !controller.pollOnce(ctx, sessionID, accountReadyAfter, retries) {
 				return
-			}
-			// Stream authorization pins the trusted account. Give interactive
-			// authentication a generous bounded window so startup cannot settle
-			// work as unavailable; after it expires, the evaluator discloses the
-			// missing identity instead of wedging the attempt forever.
-			if session.StripeAccountID == "" && controller.now().UTC().Before(accountReadyAfter) {
-				continue
-			}
-			var credentials observerCredentials
-			if controller.credentials != nil {
-				credentials, _ = controller.credentials()
-			}
-			service := controller.workflowFor(credentials)
-			if service == nil {
-				continue
-			}
-			now := controller.now().UTC()
-			active := make(map[target]bool)
-			nodeNumber := 0
-			for stepIndex := range session.Steps {
-				for nodeIndex := range session.Steps[stepIndex].Nodes {
-					nodeNumber++
-					attempt := session.Steps[stepIndex].Nodes[nodeIndex].CurrentAttempt()
-					if attempt == nil || attempt.Number <= 0 || attempt.ReportedAt == nil ||
-						!workflow.AttemptNeedsReevaluation(attempt) {
-						continue
-					}
-					key := target{node: nodeNumber, attempt: attempt.Number}
-					active[key] = true
-					state := retries[key]
-					if state.next.After(now) {
-						continue
-					}
-					_, _ = service.Reevaluate(ctx, sessionID, nodeNumber, attempt.Number, workflow.TriggerPoll)
-					state.delay = nextObserverBackoff(state.delay, controller.pollEvery, coopObserverMaxPollInterval)
-					state.next = controller.now().UTC().Add(state.delay)
-					retries[key] = state
-				}
-			}
-			for key := range retries {
-				if !active[key] {
-					delete(retries, key)
-				}
 			}
 		}
 	}
+}
+
+// pollOnce performs one complete scheduler cycle. The poll worker remains the
+// sole owner of retries in production; the cycle boundary also lets tests
+// advance a fake clock only after completion-based backoff has been stored.
+func (controller *coopObserverController) pollOnce(
+	ctx context.Context,
+	sessionID string,
+	accountReadyAfter time.Time,
+	retries map[observerPollTarget]observerPollRetry,
+) bool {
+	session, err := controller.store.Read(sessionID)
+	if err != nil {
+		return true
+	}
+	if session.Status != coop.SessionActive {
+		return false
+	}
+	// Stream authorization pins the trusted account. Give interactive
+	// authentication a generous bounded window so startup cannot settle work
+	// as unavailable; after it expires, the evaluator discloses the missing
+	// identity instead of wedging the attempt forever.
+	if session.StripeAccountID == "" && controller.now().UTC().Before(accountReadyAfter) {
+		return true
+	}
+	var credentials observerCredentials
+	if controller.credentials != nil {
+		credentials, _ = controller.credentials()
+	}
+	service := controller.workflowFor(credentials)
+	if service == nil {
+		return true
+	}
+	now := controller.now().UTC()
+	active := make(map[observerPollTarget]bool)
+	nodeNumber := 0
+	for stepIndex := range session.Steps {
+		for nodeIndex := range session.Steps[stepIndex].Nodes {
+			nodeNumber++
+			attempt := session.Steps[stepIndex].Nodes[nodeIndex].CurrentAttempt()
+			if attempt == nil || attempt.Number <= 0 || attempt.ReportedAt == nil ||
+				!workflow.AttemptNeedsReevaluation(attempt) {
+				continue
+			}
+			key := observerPollTarget{node: nodeNumber, attempt: attempt.Number}
+			active[key] = true
+			state := retries[key]
+			if state.next.After(now) {
+				continue
+			}
+			_, _ = service.Reevaluate(ctx, sessionID, nodeNumber, attempt.Number, workflow.TriggerPoll)
+			state.delay = nextObserverBackoff(state.delay, controller.pollEvery, coopObserverMaxPollInterval)
+			state.next = controller.now().UTC().Add(state.delay)
+			retries[key] = state
+		}
+	}
+	for key := range retries {
+		if !active[key] {
+			delete(retries, key)
+		}
+	}
+	return true
 }
 
 func supportingResult(attribution *observe.Attribution, observedAt time.Time) (coop.CheckResult, bool) {

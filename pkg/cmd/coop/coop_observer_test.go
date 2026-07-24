@@ -761,16 +761,24 @@ func TestObserverPollBacksOffPendingAttempt(t *testing.T) {
 		defer clockMu.Unlock()
 		now = now.Add(delta)
 	}
-	controller.Start("observer_session")
-	defer controller.Close()
+	retries := make(map[observerPollTarget]observerPollRetry)
+	poll := func() {
+		t.Helper()
+		assert.True(t, controller.pollOnce(context.Background(), "observer_session", time.Time{}, retries))
+	}
 
+	poll()
 	receive(t, service.calls)
-	assertNoValue(t, service.calls)
+	poll()
+	assert.Len(t, service.calls, 0)
 	advance(5 * time.Millisecond)
+	poll()
 	receive(t, service.calls)
 	advance(5 * time.Millisecond)
-	assertNoValue(t, service.calls)
+	poll()
+	assert.Len(t, service.calls, 0)
 	advance(5 * time.Millisecond)
+	poll()
 	receive(t, service.calls)
 }
 
