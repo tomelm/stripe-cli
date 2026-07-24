@@ -37,15 +37,15 @@ type coopEvaluator struct {
 	now       func() time.Time
 }
 
-func newCoopEvaluator() (*coopEvaluator, error) {
+func newCoopEvaluator(apiKey, accountID string) (*coopEvaluator, error) {
 	planner, err := newCoopPlanner()
 	if err != nil {
 		return nil, err
 	}
 	var reader checkrun.Reader
-	apiKey, keyErr := configuredTestKey()
-	accountID, accountErr := configuredAccountID()
-	if keyErr == nil && accountErr == nil && apiKey != "" && accountID != "" {
+	apiKey = strings.TrimSpace(apiKey)
+	accountID = strings.TrimSpace(accountID)
+	if apiKey != "" && accountID != "" {
 		candidate, readerErr := newCoopStripeReader(apiKey, accountID)
 		if readerErr == nil {
 			reader = candidate
@@ -69,20 +69,6 @@ func newCoopStripeReader(apiKey, accountID string) (*checkrun.StripeReader, erro
 	return checkrun.NewStripeReader(checkrun.StripeReaderConfig{
 		Credential: checkrun.NewStripeCredential(apiKey), Client: client, AccountID: accountID,
 	})
-}
-
-func configuredTestKey() (string, error) {
-	if options.TestModeAPIKey == nil {
-		return "", fmt.Errorf("test-mode key is not configured")
-	}
-	return options.TestModeAPIKey()
-}
-
-func configuredAccountID() (string, error) {
-	if options.AccountID == nil {
-		return "", fmt.Errorf("account identity is not configured")
-	}
-	return options.AccountID()
 }
 
 func (p *coopPlanner) Requirements(session *coop.Session, nodeNumber int) ([]coop.ResourceRequirement, error) {

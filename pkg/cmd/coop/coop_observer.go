@@ -24,11 +24,13 @@ import (
 )
 
 const (
-	coopObserverPollInterval = 3 * time.Second
-	coopObserverStandbyRetry = time.Second
-	coopObserverAccountGrace = 2 * time.Minute
-	coopObserverStreamBuffer = 64
-	maxObserverFilters       = 128
+	coopObserverPollInterval    = 3 * time.Second
+	coopObserverMaxPollInterval = time.Minute
+	coopObserverStandbyRetry    = time.Second
+	coopObserverMaxStreamRetry  = 30 * time.Second
+	coopObserverAccountGrace    = 2 * time.Minute
+	coopObserverStreamBuffer    = 64
+	maxObserverFilters          = 128
 )
 
 type observerStore interface {
@@ -74,7 +76,7 @@ type observerAuthorizer func(context.Context, observerCredentials) error
 
 type coopObserverController struct {
 	store           observerStore
-	workflow        func() observerWorkflow
+	newWorkflow     func(observerCredentials) observerWorkflow
 	credentials     func() (observerCredentials, bool)
 	authorize       observerAuthorizer
 	streams         observerStreamFactory
@@ -87,13 +89,18 @@ type coopObserverController struct {
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	workflowMu          sync.Mutex
+	workflowCredentials observerCredentials
+	workflow            observerWorkflow
+	workflowCached      bool
 }
 
 func newCoopObserver(store *coop.Store) *coopObserverController {
 	return &coopObserverController{
 		store: store,
-		workflow: func() observerWorkflow {
-			evaluator, err := newCoopEvaluator()
+		newWorkflow: func(credentials observerCredentials) observerWorkflow {
+			evaluator, err := newCoopEvaluator(credentials.APIKey, credentials.AccountID)
 			if err != nil {
 				return nil
 			}
@@ -108,6 +115,24 @@ func newCoopObserver(store *coop.Store) *coopObserverController {
 		now:             time.Now,
 		sandboxClaimURL: coopSandboxClaimURL,
 	}
+}
+
+// workflowFor reuses the immutable catalog, evaluator, and Stripe reader for
+// one configured test identity. A login or key rotation replaces the cached
+// service, while ordinary poll and reconnect loops do no setup work.
+func (controller *coopObserverController) workflowFor(credentials observerCredentials) observerWorkflow {
+	controller.workflowMu.Lock()
+	defer controller.workflowMu.Unlock()
+	if controller.workflowCached && controller.workflowCredentials == credentials {
+		return controller.workflow
+	}
+	controller.workflowCredentials = credentials
+	controller.workflow = nil
+	if controller.newWorkflow != nil {
+		controller.workflow = controller.newWorkflow(credentials)
+	}
+	controller.workflowCached = true
+	return controller.workflow
 }
 
 func coopTUIOptions(store *coop.Store) []tui.Option {
@@ -250,20 +275,23 @@ func (controller *coopObserverController) runOwner(ctx context.Context, sessionI
 // session, and starts the stock streams. Polling remains active independently,
 // so stream startup failure or loss cannot wedge verification.
 func (controller *coopObserverController) stream(ctx context.Context, sessionID string) {
-	retryEvery := controller.standbyEvery
-	if retryEvery <= 0 {
-		retryEvery = coopObserverStandbyRetry
+	baseRetry := controller.standbyEvery
+	if baseRetry <= 0 {
+		baseRetry = coopObserverStandbyRetry
 	}
+	var retryEvery time.Duration
 	for ctx.Err() == nil {
 		session, credentials, ok := controller.prepareStream(ctx, sessionID)
 		if !ok {
+			retryEvery = nextObserverBackoff(retryEvery, baseRetry, coopObserverMaxStreamRetry)
 			if !waitObserverRetry(ctx, retryEvery) {
 				return
 			}
 			continue
 		}
-		service := controller.workflow()
+		service := controller.workflowFor(credentials)
 		if service == nil {
+			retryEvery = nextObserverBackoff(retryEvery, baseRetry, coopObserverMaxStreamRetry)
 			if !waitObserverRetry(ctx, retryEvery) {
 				return
 			}
@@ -272,6 +300,7 @@ func (controller *coopObserverController) stream(ctx context.Context, sessionID 
 		if controller.runStreamAttempt(ctx, sessionID, session, credentials, service) == observerStreamStop {
 			return
 		}
+		retryEvery = nextObserverBackoff(retryEvery, baseRetry, coopObserverMaxStreamRetry)
 		if !waitObserverRetry(ctx, retryEvery) {
 			return
 		}
@@ -367,6 +396,22 @@ func waitObserverRetry(ctx context.Context, retryEvery time.Duration) bool {
 	}
 }
 
+func nextObserverBackoff(current, base, maximum time.Duration) time.Duration {
+	if base <= 0 {
+		base = time.Second
+	}
+	if maximum < base {
+		maximum = base
+	}
+	if current <= 0 {
+		return base
+	}
+	if current >= maximum || current > maximum/2 {
+		return maximum
+	}
+	return current * 2
+}
+
 func (controller *coopObserverController) consume(
 	ctx context.Context,
 	service observerWorkflow,
@@ -442,6 +487,15 @@ func (controller *coopObserverController) observe(
 }
 
 func (controller *coopObserverController) poll(ctx context.Context, sessionID string, accountReadyAfter time.Time) {
+	type target struct {
+		node    int
+		attempt int
+	}
+	type retry struct {
+		next  time.Time
+		delay time.Duration
+	}
+	retries := make(map[target]retry)
 	ticker := time.NewTicker(controller.pollEvery)
 	defer ticker.Stop()
 	for {
@@ -463,10 +517,16 @@ func (controller *coopObserverController) poll(ctx context.Context, sessionID st
 			if session.StripeAccountID == "" && controller.now().UTC().Before(accountReadyAfter) {
 				continue
 			}
-			service := controller.workflow()
+			var credentials observerCredentials
+			if controller.credentials != nil {
+				credentials, _ = controller.credentials()
+			}
+			service := controller.workflowFor(credentials)
 			if service == nil {
 				continue
 			}
+			now := controller.now().UTC()
+			active := make(map[target]bool)
 			nodeNumber := 0
 			for stepIndex := range session.Steps {
 				for nodeIndex := range session.Steps[stepIndex].Nodes {
@@ -476,7 +536,21 @@ func (controller *coopObserverController) poll(ctx context.Context, sessionID st
 						!workflow.AttemptNeedsReevaluation(attempt) {
 						continue
 					}
+					key := target{node: nodeNumber, attempt: attempt.Number}
+					active[key] = true
+					state := retries[key]
+					if state.next.After(now) {
+						continue
+					}
 					_, _ = service.Reevaluate(ctx, sessionID, nodeNumber, attempt.Number, workflow.TriggerPoll)
+					state.delay = nextObserverBackoff(state.delay, controller.pollEvery, coopObserverMaxPollInterval)
+					state.next = controller.now().UTC().Add(state.delay)
+					retries[key] = state
+				}
+			}
+			for key := range retries {
+				if !active[key] {
+					delete(retries, key)
 				}
 			}
 		}

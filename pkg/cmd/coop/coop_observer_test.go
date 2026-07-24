@@ -714,6 +714,93 @@ func TestObserverRestartsClosedStreamsAfterBackoff(t *testing.T) {
 	assert.Equal(t, workflow.TriggerEvent, receive(t, service.calls).trigger)
 }
 
+func TestObserverBackoffIsExponentialAndBounded(t *testing.T) {
+	base := 3 * time.Second
+	maximum := time.Minute
+	var delay time.Duration
+	var got []time.Duration
+	for range 7 {
+		delay = nextObserverBackoff(delay, base, maximum)
+		got = append(got, delay)
+	}
+	assert.Equal(t, []time.Duration{
+		3 * time.Second,
+		6 * time.Second,
+		12 * time.Second,
+		24 * time.Second,
+		48 * time.Second,
+		time.Minute,
+		time.Minute,
+	}, got)
+}
+
+func TestObserverPollBacksOffPendingAttempt(t *testing.T) {
+	store := writeObserverSession(t, []coop.SessionNode{observerRequestNode("/v1/customers", 1)})
+	reported := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	_, err := store.Update("observer_session", func(session *coop.Session) error {
+		attempt := &session.Steps[0].Nodes[0].Attempts[0]
+		attempt.ReportedAt = &reported
+		attempt.Results = []coop.CheckResult{{
+			ID: "state.pending", Kind: coop.CheckState, Importance: coop.CheckRequired,
+			Status: coop.CheckPending, UpdatedAt: reported,
+		}}
+		return nil
+	})
+	require.NoError(t, err)
+	service := newRecordingObserverWorkflow()
+	controller := testObserverController(store, service, nil, false, 5*time.Millisecond)
+	var clockMu sync.Mutex
+	now := reported
+	controller.now = func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return now
+	}
+	advance := func(delta time.Duration) {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		now = now.Add(delta)
+	}
+	controller.Start("observer_session")
+	defer controller.Close()
+
+	receive(t, service.calls)
+	assertNoValue(t, service.calls)
+	advance(5 * time.Millisecond)
+	receive(t, service.calls)
+	advance(5 * time.Millisecond)
+	assertNoValue(t, service.calls)
+	advance(5 * time.Millisecond)
+	receive(t, service.calls)
+}
+
+func TestObserverCachesWorkflowForConfiguredIdentity(t *testing.T) {
+	store := writeObserverSession(t, nil)
+	calls := 0
+	first := newRecordingObserverWorkflow()
+	second := newRecordingObserverWorkflow()
+	controller := &coopObserverController{
+		store: store,
+		newWorkflow: func(observerCredentials) observerWorkflow {
+			calls++
+			if calls == 1 {
+				return first
+			}
+			return second
+		},
+	}
+	credentials := observerCredentials{APIKey: "sk_test_first", AccountID: "acct_123", DeviceName: "device"}
+
+	assert.Same(t, first, controller.workflowFor(credentials))
+	assert.Same(t, first, controller.workflowFor(credentials))
+	assert.Equal(t, 1, calls)
+
+	credentials.APIKey = "sk_test_rotated"
+	assert.Same(t, second, controller.workflowFor(credentials))
+	assert.Same(t, second, controller.workflowFor(credentials))
+	assert.Equal(t, 2, calls)
+}
+
 func TestConfiguredObserverCredentialsRejectLiveOrIncompleteProfiles(t *testing.T) {
 	previous := options
 	defer func() { options = previous }()
@@ -823,7 +910,7 @@ func TestObserverRetriesCredentialsAndPinsBeforeOpeningStreams(t *testing.T) {
 
 func testObserverController(store *coop.Store, service observerWorkflow, streams observerStreamFactory, credentials bool, pollEvery time.Duration) *coopObserverController {
 	return &coopObserverController{
-		store: store, workflow: func() observerWorkflow { return service }, streams: streams,
+		store: store, newWorkflow: func(observerCredentials) observerWorkflow { return service }, streams: streams,
 		credentials: func() (observerCredentials, bool) {
 			return observerCredentials{APIKey: "sk_test_secret", AccountID: "acct_123", DeviceName: "test-device"}, credentials
 		},
