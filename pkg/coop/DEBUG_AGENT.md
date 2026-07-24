@@ -23,6 +23,10 @@ This opens the same tmux split as `coop start`:
 
 The fake agent advances steps quickly, pauses at review cards, handles `c` confirm, handles `r` request changes, and eventually drives the completion / next-steps view.
 
+In the request-changes editor, Enter inserts a newline and Ctrl+S sends the
+feedback. Opening the submitted app with `o` is optional; confirmation does not
+depend on opening it.
+
 ## Automated tmux smoke test
 
 Run:
@@ -31,7 +35,15 @@ Run:
 scripts/test-coop-debug-agent-tmux.sh
 ```
 
-This builds a temporary CLI binary, launches a `173x50` tmux session, checks the approximate `69x50` TUI pane, requests changes once, confirms remaining reviews, and asserts the completion view appears.
+This builds a temporary CLI binary and tests both `173x50` and `260x50` tmux
+sessions. The smoke test checks:
+
+- the expected narrow and wide split layouts;
+- the review card, confirmation control, and visibly optional app-opening copy;
+- a real tmux bracketed paste containing multiline feedback longer than 500
+  characters;
+- Ctrl+S submission and the debug agent's resulting rerun; and
+- one-press confirmation and completion without sending `o`.
 
 Use this script for regression checks. Use `bin/stripe coop start ... --debug-agent` when manually inspecting layout, copy, spacing, or interactions.
 

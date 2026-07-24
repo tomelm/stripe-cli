@@ -51,6 +51,16 @@ wait_for_tui() {
   return 1
 }
 
+wait_for_agent() {
+  local pattern="$1" timeout="${2:-10}" i=0
+  while [ "$i" -lt $((timeout * 4)) ]; do
+    capture_agent | rg -q "$pattern" && return 0
+    sleep 0.25
+    i=$((i + 1))
+  done
+  return 1
+}
+
 assert_tui_visible() {
   local pattern="$1" label="$2"
   if capture_tui | rg -q "$pattern"; then
@@ -143,40 +153,65 @@ run_smoke() {
   else
     record_fail "$name debug agent reaches first review"
   fi
-  assert_tui_visible "Confirmation steps" "$name review acceptance check visible"
+  assert_tui_visible "What to try" "$name review acceptance check visible"
   assert_agent_visible "\\[debug-agent\\]" "$name debug agent logs visible"
+  assert_tui_visible "c confirm" "$name confirmation action is visible"
+  assert_tui_visible "press o, optional" "$name app opening is visibly optional"
 
   tmux send-keys -t "$tui_pane" "r"
-  sleep 0.5
-  tmux send-keys -t "$tui_pane" "Please tighten the debug checkout path"
-  sleep 0.25
-  tmux send-keys -t "$tui_pane" Enter
-  if wait_for_tui "Review" 10; then
+  if wait_for_tui "Request changes:" 3; then
+    record_pass "$name request-changes editor opens"
+  else
+    record_fail "$name request-changes editor opens"
+  fi
+  assert_tui_visible "ctrl\\+s" "$name editor advertises ctrl+s send"
+  assert_tui_visible "enter newline" "$name editor advertises multiline input"
+
+  local feedback feedback_line feedback_index buffer_name
+  feedback="Please keep the Checkout flow tied to the configured Price ID and preserve the existing error handling."
+  feedback_line="Also verify the success, cancellation, retry, and idempotency paths while keeping the implementation easy to review."
+  feedback_index=0
+  while [ "$feedback_index" -lt 6 ]; do
+    feedback="${feedback}"$'\n'"${feedback_line}"
+    feedback_index=$((feedback_index + 1))
+  done
+  feedback="${feedback}"$'\n'"PASTE-CHECK-${name}: retain this final line when the agent reruns."
+  if [ "${#feedback}" -gt 500 ] && [[ "$feedback" == *$'\n'* ]]; then
+    record_pass "$name feedback fixture is multiline and exceeds 500 characters"
+  else
+    record_fail "$name feedback fixture is multiline and exceeds 500 characters"
+  fi
+
+  # Exercise the same bracketed-paste path a real terminal uses. Preserve LF so
+  # the editor receives one multiline paste event instead of synthesizing Enter.
+  buffer_name="coop-feedback-$name-$$"
+  tmux set-buffer -b "$buffer_name" "$feedback"
+  tmux paste-buffer -p -r -d -b "$buffer_name" -t "$tui_pane"
+  if wait_for_tui "PASTE-CHECK-${name}" 3; then
+    record_pass "$name long multiline paste reaches the editor"
+  else
+    record_fail "$name long multiline paste reaches the editor"
+  fi
+
+  tmux send-keys -t "$tui_pane" C-s
+  if wait_for_agent "step requested changes; rerunning" 10; then
+    record_pass "$name feedback submission wakes the debug agent"
+  else
+    record_fail "$name feedback submission wakes the debug agent"
+  fi
+  if wait_for_tui "c confirm" 10; then
     record_pass "$name debug agent reruns after request changes"
   else
     record_fail "$name debug agent reruns after request changes"
   fi
+  assert_tui_visible "press o, optional" "$name rerun still marks app opening optional"
 
-  for _ in $(seq 1 20); do
-    local pane
-    pane="$(capture_tui)"
-    if echo "$pane" | rg -q "Integration complete"; then
-      break
-    fi
-    if echo "$pane" | rg -q "confirm all"; then
-      tmux send-keys -t "$tui_pane" "c"
-    elif echo "$pane" | rg -q "Waiting for you: review section"; then
-      tmux send-keys -t "$tui_pane" "f"
-    elif echo "$pane" | rg -q "Review"; then
-      tmux send-keys -t "$tui_pane" "c"
-    fi
-    sleep 0.75
-  done
-
-  if wait_for_tui "Integration complete" 10; then
-    record_pass "$name debug agent reaches completion view"
+  # Do not send "o": a single "c" must be enough to accept the reviewed UI.
+  tmux send-keys -t "$tui_pane" "c"
+  if wait_for_tui "Blueprint workflow finished" 10; then
+    record_pass "$name one confirmation completes without opening the app"
   else
-    record_fail "$name debug agent reaches completion view"
+    record_fail "$name one confirmation completes without opening the app"
   fi
 
   tmux kill-session -t "$tmux_session" 2>/dev/null || true
