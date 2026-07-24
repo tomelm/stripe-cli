@@ -139,9 +139,9 @@ func TestVerificationAcceptanceRequiredPassAutoCompletesNonUI(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeCLICommand)
 	evaluator := &acceptanceEvaluator{
 		requirements: []coop.ResourceRequirement{{Role: "customer", Type: "customer", Required: true}},
-		evaluations: []Evaluation{{Results: []coop.CheckResult{
+		evaluations: [][]coop.CheckResult{{
 			requiredAcceptanceResult("resource.customer.exists", coop.CheckResource, coop.CheckPassed),
-		}}},
+		}},
 	}
 	service := newVerificationAcceptanceService(store, evaluator, newAcceptanceClock())
 	started, err := service.StartWork(session.ID, 1, "Building")
@@ -175,9 +175,9 @@ func TestVerificationAcceptanceRequiredPassAutoCompletesNonUI(t *testing.T) {
 func TestVerificationAcceptanceApplicationGuidanceDoesNotDowngradeDirectPass(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeCLICommand)
 	addAcceptanceOutcome(t, store, session.ID)
-	evaluator := &acceptanceEvaluator{evaluations: []Evaluation{{Results: []coop.CheckResult{
+	evaluator := &acceptanceEvaluator{evaluations: [][]coop.CheckResult{{
 		requiredAcceptanceResult("resource.customer.exists", coop.CheckResource, coop.CheckPassed),
-	}}}}
+	}}}
 	service := newVerificationAcceptanceService(store, evaluator, newAcceptanceClock())
 
 	started, err := service.StartWork(session.ID, 1, "Building durable access")
@@ -210,14 +210,14 @@ func TestVerificationAcceptanceApplicationGuidanceDoesNotDowngradeDirectPass(t *
 func TestVerificationAcceptanceEvaluatorCannotMutatePersistedApplicationGuidance(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeCLICommand)
 	addAcceptanceOutcome(t, store, session.ID)
-	evaluator := &acceptanceEvaluator{evaluate: func(_ context.Context, input EvaluationInput) (Evaluation, error) {
+	evaluator := &acceptanceEvaluator{evaluate: func(_ context.Context, input EvaluationInput) ([]coop.CheckResult, error) {
 		node, err := input.Session.NodeByNumber(input.NodeNumber)
 		require.NoError(t, err)
 		node.RequiredOutcomes = nil
 		input.Session.LifecycleFacts = nil
-		return Evaluation{Results: []coop.CheckResult{
+		return []coop.CheckResult{
 			requiredAcceptanceResult("resource.customer.exists", coop.CheckResource, coop.CheckPassed),
-		}}, nil
+		}, nil
 	}}
 	service := newVerificationAcceptanceService(store, evaluator, newAcceptanceClock())
 	started, err := service.StartWork(session.ID, 1, "Building durable access")
@@ -247,7 +247,7 @@ func TestVerificationAcceptanceCorrectionAttemptRetainsApplicationContract(t *te
 	failure.Repair = "Create and report the mapped Customer."
 	service := newVerificationAcceptanceService(
 		store,
-		&acceptanceEvaluator{evaluations: []Evaluation{{Results: []coop.CheckResult{failure}}}},
+		&acceptanceEvaluator{evaluations: [][]coop.CheckResult{{failure}}},
 		newAcceptanceClock(),
 	)
 	started, err := service.StartWork(session.ID, 1, "Building durable access")
@@ -281,9 +281,7 @@ func TestVerificationAcceptanceCandidateCannotAutoCompleteNonUI(t *testing.T) {
 	candidate := coop.ResourceBinding{
 		Role: "checkout_session", Type: "checkout_session", ID: "cs_account_wide", Source: coop.BindingObservedCandidate,
 	}
-	evaluator := &acceptanceEvaluator{evaluations: []Evaluation{{
-		Results: []coop.CheckResult{passed},
-	}}}
+	evaluator := &acceptanceEvaluator{evaluations: [][]coop.CheckResult{{passed}}}
 	service := newVerificationAcceptanceService(store, evaluator, newAcceptanceClock())
 	started, err := service.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
@@ -314,7 +312,7 @@ func TestVerificationAcceptanceCandidateCannotAutoCompleteNonUI(t *testing.T) {
 func TestVerificationAcceptanceAsyncHandlerPassCompletesWithoutAutomaticConfirmation(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeAsyncHandler)
 	passed := requiredAcceptanceResult("state.checkout.complete", coop.CheckState, coop.CheckPassed)
-	evaluator := &acceptanceEvaluator{evaluations: []Evaluation{{Results: []coop.CheckResult{passed}}}}
+	evaluator := &acceptanceEvaluator{evaluations: [][]coop.CheckResult{{passed}}}
 	service := newVerificationAcceptanceService(store, evaluator, newAcceptanceClock())
 	started, err := service.StartWork(session.ID, 1, "Handling checkout completion")
 	require.NoError(t, err)
@@ -351,7 +349,7 @@ func TestVerificationAcceptanceRequiredFailureCreatesCorrectionAttempt(t *testin
 	failure.Expected = "Ada"
 	failure.Observed = "Grace"
 	failure.Repair = "Set the customer name to Ada and retry."
-	evaluator := &acceptanceEvaluator{evaluations: []Evaluation{{Results: []coop.CheckResult{failure}}}}
+	evaluator := &acceptanceEvaluator{evaluations: [][]coop.CheckResult{{failure}}}
 	service := newVerificationAcceptanceService(store, evaluator, newAcceptanceClock())
 	started, err := service.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
@@ -386,9 +384,9 @@ func TestVerificationAcceptanceRequiredFailureCreatesCorrectionAttempt(t *testin
 
 func TestVerificationAcceptanceAgentReportedFailureRequiresCorrection(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeCLICommand)
-	evaluator := &acceptanceEvaluator{evaluations: []Evaluation{{Results: []coop.CheckResult{
+	evaluator := &acceptanceEvaluator{evaluations: [][]coop.CheckResult{{
 		requiredAcceptanceResult("resource.customer.exists", coop.CheckResource, coop.CheckPassed),
-	}}}}
+	}}}
 	service := newVerificationAcceptanceService(store, evaluator, newAcceptanceClock())
 	started, err := service.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
@@ -414,7 +412,7 @@ func TestVerificationAcceptanceAgentReportedFailureRequiresCorrection(t *testing
 
 func TestVerificationAcceptanceNoDirectVerifierCompletesUnverified(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeCLICommand)
-	evaluator := &acceptanceEvaluator{evaluations: []Evaluation{{}}}
+	evaluator := &acceptanceEvaluator{evaluations: [][]coop.CheckResult{nil}}
 	service := newVerificationAcceptanceService(store, evaluator, newAcceptanceClock())
 	started, err := service.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
@@ -440,7 +438,7 @@ func TestVerificationAcceptancePassiveFailureCannotBlameOrWakeAgent(t *testing.T
 	observedFailure := requiredAcceptanceResult("passive.request", coop.CheckRequest, coop.CheckFailed)
 	observedFailure.Detail = "Stripe observed a matching request fail"
 	observedFailure.UpdatedAt = clock.Now().Add(-time.Second)
-	evaluator := &acceptanceEvaluator{evaluations: []Evaluation{{}}}
+	evaluator := &acceptanceEvaluator{evaluations: [][]coop.CheckResult{nil}}
 	service := newVerificationAcceptanceService(store, evaluator, clock)
 	started, err := service.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
@@ -484,9 +482,9 @@ func TestVerificationAcceptanceObserverPollsSameEvaluatorUntilPass(t *testing.T)
 	store, session := newVerificationAcceptanceStore(t, coop.NodeCLICommand)
 	pending := requiredAcceptanceResult("state.checkout.complete", coop.CheckState, coop.CheckPending)
 	passed := requiredAcceptanceResult("state.checkout.complete", coop.CheckState, coop.CheckPassed)
-	evaluator := &acceptanceEvaluator{evaluations: []Evaluation{
-		{Results: []coop.CheckResult{pending}},
-		{Results: []coop.CheckResult{passed}},
+	evaluator := &acceptanceEvaluator{evaluations: [][]coop.CheckResult{
+		{pending},
+		{passed},
 	}}
 	service := newVerificationAcceptanceService(store, evaluator, newAcceptanceClock())
 	started, err := service.StartWork(session.ID, 1, "Building")
@@ -523,7 +521,7 @@ func TestVerificationAcceptanceBusyRequestCoalescesOneFollowUpRead(t *testing.T)
 	release := make(chan struct{})
 	var callsMu sync.Mutex
 	calls := 0
-	evaluator := &acceptanceEvaluator{evaluate: func(ctx context.Context, _ EvaluationInput) (Evaluation, error) {
+	evaluator := &acceptanceEvaluator{evaluate: func(ctx context.Context, _ EvaluationInput) ([]coop.CheckResult, error) {
 		callsMu.Lock()
 		calls++
 		call := calls
@@ -533,12 +531,12 @@ func TestVerificationAcceptanceBusyRequestCoalescesOneFollowUpRead(t *testing.T)
 			select {
 			case <-release:
 			case <-ctx.Done():
-				return Evaluation{}, ctx.Err()
+				return nil, ctx.Err()
 			}
 		}
-		return Evaluation{Results: []coop.CheckResult{
+		return []coop.CheckResult{
 			requiredAcceptanceResult("resource.checkout.exists", coop.CheckResource, coop.CheckPassed),
-		}}, nil
+		}, nil
 	}}
 	service := newVerificationAcceptanceService(store, evaluator, clock)
 	started, err := service.StartWork(session.ID, 1, "Building")
@@ -591,7 +589,7 @@ func TestVerificationAcceptanceBusyEventCoalescesPersistedCandidateForNextPoll(t
 	release := make(chan struct{})
 	var callsMu sync.Mutex
 	calls := 0
-	evaluator := &acceptanceEvaluator{evaluate: func(ctx context.Context, _ EvaluationInput) (Evaluation, error) {
+	evaluator := &acceptanceEvaluator{evaluate: func(ctx context.Context, _ EvaluationInput) ([]coop.CheckResult, error) {
 		callsMu.Lock()
 		calls++
 		call := calls
@@ -601,12 +599,12 @@ func TestVerificationAcceptanceBusyEventCoalescesPersistedCandidateForNextPoll(t
 			select {
 			case <-release:
 			case <-ctx.Done():
-				return Evaluation{}, ctx.Err()
+				return nil, ctx.Err()
 			}
 		}
-		return Evaluation{Results: []coop.CheckResult{
+		return []coop.CheckResult{
 			requiredAcceptanceResult("state.checkout.complete", coop.CheckState, coop.CheckPassed),
-		}}, nil
+		}, nil
 	}}
 	service := NewService(store, WithEvaluator(evaluator))
 	started, err := service.StartWork(session.ID, 1, "Building")
@@ -670,14 +668,14 @@ func TestVerificationAcceptanceExpiredOwnerCannotLandAfterLeaseReclaimed(t *test
 	release := make(chan struct{})
 	staleFailure := requiredAcceptanceResult("state.stale", coop.CheckState, coop.CheckFailed)
 	currentFailure := requiredAcceptanceResult("state.current", coop.CheckState, coop.CheckFailed)
-	evaluator := &acceptanceEvaluator{evaluate: func(ctx context.Context, _ EvaluationInput) (Evaluation, error) {
+	evaluator := &acceptanceEvaluator{evaluate: func(ctx context.Context, _ EvaluationInput) ([]coop.CheckResult, error) {
 		close(entered)
 		select {
 		case <-release:
 		case <-ctx.Done():
-			return Evaluation{}, ctx.Err()
+			return nil, ctx.Err()
 		}
-		return Evaluation{Results: []coop.CheckResult{staleFailure}}, nil
+		return []coop.CheckResult{staleFailure}, nil
 	}}
 	service := newVerificationAcceptanceService(store, evaluator, clock)
 	started, err := service.StartWork(session.ID, 1, "Building")
@@ -740,7 +738,7 @@ func TestVerificationAcceptanceBasisMismatchKeepsCollectorPersistedCandidateForN
 		Role: "checkout_session", Type: "checkout_session", ID: "cs_one_shot",
 		Source: coop.BindingObservedCandidate,
 	}
-	evaluator := &acceptanceEvaluator{evaluate: func(ctx context.Context, _ EvaluationInput) (Evaluation, error) {
+	evaluator := &acceptanceEvaluator{evaluate: func(ctx context.Context, _ EvaluationInput) ([]coop.CheckResult, error) {
 		callsMu.Lock()
 		calls++
 		call := calls
@@ -750,14 +748,13 @@ func TestVerificationAcceptanceBasisMismatchKeepsCollectorPersistedCandidateForN
 			select {
 			case <-release:
 			case <-ctx.Done():
-				return Evaluation{}, ctx.Err()
+				return nil, ctx.Err()
 			}
 		}
-		return Evaluation{
-			Results: []coop.CheckResult{
+		return []coop.CheckResult{
 				requiredAcceptanceResult("state.checkout.complete", coop.CheckState, coop.CheckPassed),
 			},
-		}, nil
+			nil
 	}}
 	service := newVerificationAcceptanceService(store, evaluator, clock)
 	started, err := service.StartWork(session.ID, 1, "Building")
@@ -833,9 +830,9 @@ func TestVerificationAcceptanceLateFailureWakesAgentWithRepairEvidence(t *testin
 	failure.Expected = "status complete"
 	failure.Observed = "status expired"
 	failure.Repair = "Create and exercise a new Checkout Session."
-	evaluator := &acceptanceEvaluator{evaluations: []Evaluation{
-		{Results: []coop.CheckResult{pending}},
-		{Results: []coop.CheckResult{failure}},
+	evaluator := &acceptanceEvaluator{evaluations: [][]coop.CheckResult{
+		{pending},
+		{failure},
 	}}
 	service := newVerificationAcceptanceService(store, evaluator, newAcceptanceClock())
 	started, err := service.StartWork(session.ID, 1, "Building")
@@ -882,16 +879,16 @@ func TestVerificationAcceptanceStaleAsyncResultCannotLand(t *testing.T) {
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	evaluator := &acceptanceEvaluator{evaluate: func(ctx context.Context, input EvaluationInput) (Evaluation, error) {
+	evaluator := &acceptanceEvaluator{evaluate: func(ctx context.Context, input EvaluationInput) ([]coop.CheckResult, error) {
 		close(entered)
 		select {
 		case <-release:
 		case <-ctx.Done():
-			return Evaluation{}, ctx.Err()
+			return nil, ctx.Err()
 		}
-		return Evaluation{Results: []coop.CheckResult{
+		return []coop.CheckResult{
 			requiredAcceptanceResult("late.failure", coop.CheckState, coop.CheckFailed),
-		}}, nil
+		}, nil
 	}}
 	service := newVerificationAcceptanceService(store, evaluator, clock)
 
@@ -940,16 +937,16 @@ func TestVerificationAcceptanceHumanRejectionCannotRaceInflightInitialEvaluation
 	store, session := newVerificationAcceptanceStore(t, coop.NodeCLICommand)
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	evaluator := &acceptanceEvaluator{evaluate: func(ctx context.Context, _ EvaluationInput) (Evaluation, error) {
+	evaluator := &acceptanceEvaluator{evaluate: func(ctx context.Context, _ EvaluationInput) ([]coop.CheckResult, error) {
 		close(entered)
 		select {
 		case <-release:
 		case <-ctx.Done():
-			return Evaluation{}, ctx.Err()
+			return nil, ctx.Err()
 		}
-		return Evaluation{Results: []coop.CheckResult{
+		return []coop.CheckResult{
 			requiredAcceptanceResult("resource.customer.exists", coop.CheckResource, coop.CheckPassed),
-		}}, nil
+		}, nil
 	}}
 	service := newVerificationAcceptanceService(store, evaluator, newAcceptanceClock())
 	started, err := service.StartWork(session.ID, 1, "Building")
@@ -992,16 +989,16 @@ func TestVerificationAcceptanceUIConfirmationWinsDuringInitialEvaluation(t *test
 	store, session := newVerificationAcceptanceStore(t, coop.NodeUIComponent)
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	evaluator := &acceptanceEvaluator{evaluate: func(ctx context.Context, _ EvaluationInput) (Evaluation, error) {
+	evaluator := &acceptanceEvaluator{evaluate: func(ctx context.Context, _ EvaluationInput) ([]coop.CheckResult, error) {
 		close(entered)
 		select {
 		case <-release:
 		case <-ctx.Done():
-			return Evaluation{}, ctx.Err()
+			return nil, ctx.Err()
 		}
-		return Evaluation{Results: []coop.CheckResult{
+		return []coop.CheckResult{
 			requiredAcceptanceResult("resource.checkout.exists", coop.CheckResource, coop.CheckPassed),
-		}}, nil
+		}, nil
 	}}
 	service := newVerificationAcceptanceService(store, evaluator, newAcceptanceClock())
 	started, err := service.StartWork(session.ID, 1, "Building UI")
@@ -1077,15 +1074,15 @@ func TestVerificationAcceptanceBasisChangesDiscardInflightEvaluationAndPreserveS
 
 			entered := make(chan struct{})
 			release := make(chan struct{})
-			evaluator := &acceptanceEvaluator{evaluate: func(ctx context.Context, _ EvaluationInput) (Evaluation, error) {
+			evaluator := &acceptanceEvaluator{evaluate: func(ctx context.Context, _ EvaluationInput) ([]coop.CheckResult, error) {
 				close(entered)
 				select {
 				case <-release:
 				case <-ctx.Done():
-					return Evaluation{}, ctx.Err()
+					return nil, ctx.Err()
 				}
-				return Evaluation{
-					Results: []coop.CheckResult{requiredAcceptanceResult("resource.late", coop.CheckResource, coop.CheckPassed)},
+				return []coop.CheckResult{
+					requiredAcceptanceResult("resource.late", coop.CheckResource, coop.CheckPassed),
 				}, nil
 			}}
 			service := newVerificationAcceptanceService(store, evaluator, clock)
@@ -1163,9 +1160,9 @@ func TestVerificationAcceptanceBasisChangesDiscardInflightEvaluationAndPreserveS
 func TestVerificationAcceptanceObservationCannotFinishUnreportedWork(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeCLICommand)
 	passed := requiredAcceptanceResult("resource.customer.exists", coop.CheckResource, coop.CheckPassed)
-	evaluator := &acceptanceEvaluator{evaluations: []Evaluation{
-		{Results: []coop.CheckResult{passed}},
-		{Results: []coop.CheckResult{passed}},
+	evaluator := &acceptanceEvaluator{evaluations: [][]coop.CheckResult{
+		{passed},
+		{passed},
 	}}
 	service := newVerificationAcceptanceService(store, evaluator, newAcceptanceClock())
 	started, err := service.StartWork(session.ID, 1, "Building")
@@ -1193,9 +1190,9 @@ func TestVerificationAcceptanceObservationCannotFinishUnreportedWork(t *testing.
 
 func TestVerificationAcceptanceUIRequiresAppURL(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeUIComponent)
-	evaluator := &acceptanceEvaluator{evaluations: []Evaluation{{Results: []coop.CheckResult{
+	evaluator := &acceptanceEvaluator{evaluations: [][]coop.CheckResult{{
 		requiredAcceptanceResult("resource.checkout.exists", coop.CheckResource, coop.CheckPassed),
-	}}}}
+	}}}
 	service := newVerificationAcceptanceService(store, evaluator, newAcceptanceClock())
 	started, err := service.StartWork(session.ID, 1, "Building UI")
 	require.NoError(t, err)
@@ -1247,8 +1244,8 @@ func TestVerificationAcceptanceRevalidatesStoredAppURLAtOpenBoundary(t *testing.
 func TestVerificationAcceptanceUIOpenIsStableButOptionalForConfirm(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeUIComponent)
 	passed := requiredAcceptanceResult("resource.checkout.exists", coop.CheckResource, coop.CheckPassed)
-	evaluator := &acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) (Evaluation, error) {
-		return Evaluation{Results: []coop.CheckResult{passed}}, nil
+	evaluator := &acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) ([]coop.CheckResult, error) {
+		return []coop.CheckResult{passed}, nil
 	}}
 	clock := newAcceptanceClock()
 	service := newVerificationAcceptanceService(store, evaluator, clock)
@@ -1302,7 +1299,7 @@ func TestVerificationAcceptancePendingEventStateDoesNotBlockHumanReview(t *testi
 			{Role: "checkout_session", Type: "checkout_session"},
 			{Role: "subscription", Type: "subscription"},
 		},
-		evaluate: func(_ context.Context, input EvaluationInput) (Evaluation, error) {
+		evaluate: func(_ context.Context, input EvaluationInput) ([]coop.CheckResult, error) {
 			checkoutResult := checkout
 			subscriptionResult := subscription
 			node, _ := input.Session.NodeByNumber(input.NodeNumber)
@@ -1314,7 +1311,7 @@ func TestVerificationAcceptancePendingEventStateDoesNotBlockHumanReview(t *testi
 					subscriptionResult.Status = coop.CheckPassed
 				}
 			}
-			return Evaluation{Results: []coop.CheckResult{checkoutResult, subscriptionResult}}, nil
+			return []coop.CheckResult{checkoutResult, subscriptionResult}, nil
 		}}
 	clock := newAcceptanceClock()
 	service := newVerificationAcceptanceService(store, evaluator, clock)
@@ -1352,8 +1349,8 @@ func TestVerificationAcceptancePendingEventStateDoesNotBlockHumanReview(t *testi
 func TestVerificationAcceptanceUnavailableRecordsOnePressHumanDecision(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeUIComponent)
 	unavailable := requiredAcceptanceResult("app.backend-state", coop.CheckState, coop.CheckUnavailable)
-	evaluator := &acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) (Evaluation, error) {
-		return Evaluation{Results: []coop.CheckResult{unavailable}}, nil
+	evaluator := &acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) ([]coop.CheckResult, error) {
+		return []coop.CheckResult{unavailable}, nil
 	}}
 	clock := newAcceptanceClock()
 	service := newVerificationAcceptanceService(store, evaluator, clock)
@@ -1395,8 +1392,8 @@ func TestVerificationAcceptanceHumanReviewCannotOverrideChangedFailure(t *testin
 	clock := newAcceptanceClock()
 	service := newVerificationAcceptanceService(
 		store,
-		&acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) (Evaluation, error) {
-			return Evaluation{Results: []coop.CheckResult{unavailable}}, nil
+		&acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) ([]coop.CheckResult, error) {
+			return []coop.CheckResult{unavailable}, nil
 		}},
 		clock,
 	)
@@ -1448,8 +1445,8 @@ func TestVerificationAcceptanceCandidateRecordsLimitedCoverageDecision(t *testin
 	candidate := coop.ResourceBinding{
 		Role: "checkout_session", Type: "checkout_session", ID: "cs_candidate", Source: coop.BindingObservedCandidate,
 	}
-	evaluator := &acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) (Evaluation, error) {
-		return Evaluation{Results: []coop.CheckResult{passed}}, nil
+	evaluator := &acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) ([]coop.CheckResult, error) {
+		return []coop.CheckResult{passed}, nil
 	}}
 	clock := newAcceptanceClock()
 	service := newVerificationAcceptanceService(store, evaluator, clock)
@@ -1489,7 +1486,7 @@ func TestVerificationAcceptanceCandidateRecordsLimitedCoverageDecision(t *testin
 func TestVerificationAcceptanceRecoveredEmptySnapshotAvoidsLimitedCoverageDecision(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeUIComponent)
 	unavailable := requiredAcceptanceResult("automatic.account-scope", coop.CheckCoverage, coop.CheckUnavailable)
-	evaluator := &acceptanceEvaluator{evaluations: []Evaluation{{Results: []coop.CheckResult{unavailable}}, {Results: []coop.CheckResult{unavailable}}, {}}}
+	evaluator := &acceptanceEvaluator{evaluations: [][]coop.CheckResult{{unavailable}, {unavailable}, nil}}
 	clock := newAcceptanceClock()
 	service := newVerificationAcceptanceService(store, evaluator, clock)
 	started, err := service.StartWork(session.ID, 1, "Building UI")
@@ -1534,9 +1531,7 @@ func TestVerificationAcceptanceUnavailableBackendJoinsContainingUIReview(t *test
 	candidate := coop.ResourceBinding{
 		Role: "checkout_session", Type: "checkout_session", ID: "cs_candidate", Source: coop.BindingObservedCandidate,
 	}
-	evaluator := &acceptanceEvaluator{evaluations: []Evaluation{{}, {
-		Results: []coop.CheckResult{unavailable},
-	}, {}}}
+	evaluator := &acceptanceEvaluator{evaluations: [][]coop.CheckResult{nil, {unavailable}, nil}}
 	clock := newAcceptanceClock()
 	service := newVerificationAcceptanceService(store, evaluator, clock)
 
@@ -1585,9 +1580,9 @@ func TestVerificationAcceptanceUnavailableBackendJoinsContainingUIReview(t *test
 
 func TestVerificationAcceptanceHumanRejectionPreservesHistory(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeUIComponent)
-	evaluator := &acceptanceEvaluator{evaluations: []Evaluation{{Results: []coop.CheckResult{
+	evaluator := &acceptanceEvaluator{evaluations: [][]coop.CheckResult{{
 		requiredAcceptanceResult("resource.checkout.exists", coop.CheckResource, coop.CheckPassed),
-	}}}}
+	}}}
 	service := newVerificationAcceptanceService(store, evaluator, newAcceptanceClock())
 	started, err := service.StartWork(session.ID, 1, "Building UI")
 	require.NoError(t, err)
@@ -1628,8 +1623,8 @@ func TestVerificationAcceptanceHumanRejectionPreservesHistory(t *testing.T) {
 func TestVerificationAcceptanceAwaitWakesForHumanRejectionAndReusesCorrectionAttempt(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeUIComponent)
 	passed := requiredAcceptanceResult("resource.checkout.exists", coop.CheckResource, coop.CheckPassed)
-	evaluator := &acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) (Evaluation, error) {
-		return Evaluation{Results: []coop.CheckResult{passed}}, nil
+	evaluator := &acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) ([]coop.CheckResult, error) {
+		return []coop.CheckResult{passed}, nil
 	}}
 	service := NewService(
 		store,
@@ -1760,8 +1755,8 @@ func TestVerificationAcceptanceObserverPollsEveryOpenedUIAttempt(t *testing.T) {
 	}
 	require.NoError(t, store.Write(session))
 	passed := requiredAcceptanceResult("resource.checkout.exists", coop.CheckResource, coop.CheckPassed)
-	evaluator := &acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) (Evaluation, error) {
-		return Evaluation{Results: []coop.CheckResult{passed}}, nil
+	evaluator := &acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) ([]coop.CheckResult, error) {
+		return []coop.CheckResult{passed}, nil
 	}}
 	clock := newAcceptanceClock()
 	service := newVerificationAcceptanceService(store, evaluator, clock)
@@ -1809,8 +1804,8 @@ func TestVerificationAcceptanceObserverPollsEveryOpenedUIAttempt(t *testing.T) {
 func TestVerificationAcceptanceAwaitTimeoutReturnsExactRetry(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeUIComponent)
 	pending := requiredAcceptanceResult("state.checkout.complete", coop.CheckState, coop.CheckPending)
-	evaluator := &acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) (Evaluation, error) {
-		return Evaluation{Results: []coop.CheckResult{pending}}, nil
+	evaluator := &acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) ([]coop.CheckResult, error) {
+		return []coop.CheckResult{pending}, nil
 	}}
 	clock := newAcceptanceClock()
 	service := NewService(
@@ -1844,7 +1839,7 @@ func TestVerificationAcceptanceAwaitTimeoutReturnsExactRetry(t *testing.T) {
 func TestVerificationAcceptanceReportPassesAndCompletesWithoutTUI(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeCLICommand)
 	passed := requiredAcceptanceResult("resource.customer.exists", coop.CheckResource, coop.CheckPassed)
-	evaluator := &acceptanceEvaluator{evaluations: []Evaluation{{Results: []coop.CheckResult{passed}}}}
+	evaluator := &acceptanceEvaluator{evaluations: [][]coop.CheckResult{{passed}}}
 	directService := NewService(
 		store,
 		WithEvaluator(evaluator),
@@ -1874,9 +1869,9 @@ func TestVerificationAcceptanceAwaitRerunsPendingAndWakesForFailureWithoutTUI(t 
 	failed.Expected = "complete"
 	failed.Observed = "expired"
 	failed.Repair = "Create and exercise a new Checkout Session."
-	evaluator := &acceptanceEvaluator{evaluations: []Evaluation{
-		{Results: []coop.CheckResult{pending}},
-		{Results: []coop.CheckResult{failed}},
+	evaluator := &acceptanceEvaluator{evaluations: [][]coop.CheckResult{
+		{pending},
+		{failed},
 	}}
 	clock := newAcceptanceClock()
 	directService := NewService(
@@ -1918,8 +1913,8 @@ func TestVerificationAcceptanceAwaitBoundsPendingReadsAndReturnsAgentAction(t *t
 	pending := requiredAcceptanceResult("state.checkout.complete", coop.CheckState, coop.CheckPending)
 	pending.Detail = "Checkout has not completed yet."
 	pending.Repair = "Exercise Checkout, then check again."
-	evaluator := &acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) (Evaluation, error) {
-		return Evaluation{Results: []coop.CheckResult{pending}}, nil
+	evaluator := &acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) ([]coop.CheckResult, error) {
+		return []coop.CheckResult{pending}, nil
 	}}
 	clock := newAcceptanceClock()
 	directService := NewService(
@@ -1961,9 +1956,9 @@ func TestVerificationAcceptanceReportRefreshesPreReportObservation(t *testing.T)
 	passed := requiredAcceptanceResult("resource.customer.exists", coop.CheckResource, coop.CheckPassed)
 	evaluator := &acceptanceEvaluator{
 		requirements: []coop.ResourceRequirement{{Role: "customer", Type: "customer", Required: true}},
-		evaluations: []Evaluation{
-			{Results: []coop.CheckResult{missing}},
-			{Results: []coop.CheckResult{passed}},
+		evaluations: [][]coop.CheckResult{
+			{missing},
+			{passed},
 		},
 	}
 	service := newVerificationAcceptanceService(store, evaluator, newAcceptanceClock())
@@ -2006,17 +2001,17 @@ func TestVerificationAcceptanceCanceledTriggerDoesNotBlockHumanConfirmation(t *t
 		requirements: []coop.ResourceRequirement{{
 			Role: "checkout_session", Type: "checkout_session", Required: false,
 		}},
-		evaluate: func(ctx context.Context, _ EvaluationInput) (Evaluation, error) {
+		evaluate: func(ctx context.Context, _ EvaluationInput) ([]coop.CheckResult, error) {
 			callMu.Lock()
 			calls++
 			call := calls
 			callMu.Unlock()
 			if call == 1 {
-				return Evaluation{Results: []coop.CheckResult{passed}}, nil
+				return []coop.CheckResult{passed}, nil
 			}
 			close(triggerEntered)
 			<-ctx.Done()
-			return Evaluation{}, ctx.Err()
+			return nil, ctx.Err()
 		},
 	}
 	service := newVerificationAcceptanceService(store, evaluator, clock)
@@ -2080,7 +2075,7 @@ func TestVerificationAcceptanceCanceledTriggerDoesNotBlockHumanConfirmation(t *t
 			requirements: []coop.ResourceRequirement{{
 				Role: "checkout_session", Type: "checkout_session", Required: false,
 			}},
-			evaluations: []Evaluation{{Results: []coop.CheckResult{passed}}},
+			evaluations: [][]coop.CheckResult{{passed}},
 		},
 		clock,
 	)
@@ -2094,9 +2089,9 @@ func TestVerificationAcceptanceCanceledTriggerDoesNotBlockHumanConfirmation(t *t
 
 func TestVerificationAcceptanceEvaluatorTimeoutDisclosesUnavailableAndReleasesLease(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeCLICommand)
-	evaluator := &acceptanceEvaluator{evaluate: func(ctx context.Context, _ EvaluationInput) (Evaluation, error) {
+	evaluator := &acceptanceEvaluator{evaluate: func(ctx context.Context, _ EvaluationInput) ([]coop.CheckResult, error) {
 		<-ctx.Done()
-		return Evaluation{}, ctx.Err()
+		return nil, ctx.Err()
 	}}
 	service := NewService(store, WithEvaluator(evaluator))
 	service.evalTimeout = 5 * time.Millisecond
@@ -2120,9 +2115,9 @@ func TestVerificationAcceptanceEvaluatorTimeoutDisclosesUnavailableAndReleasesLe
 func TestVerificationAcceptanceRejoinRecoversPersistedExpiredLease(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeCLICommand)
 	clock := newAcceptanceClock()
-	evaluator := &acceptanceEvaluator{evaluations: []Evaluation{{Results: []coop.CheckResult{
+	evaluator := &acceptanceEvaluator{evaluations: [][]coop.CheckResult{{
 		requiredAcceptanceResult("resource.checkout.exists", coop.CheckResource, coop.CheckPassed),
-	}}}}
+	}}}
 	agent := NewService(store, WithRequirementProvider(evaluator), WithClock(clock.Now, clock.Sleep))
 	started, err := agent.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
@@ -2153,8 +2148,8 @@ func TestVerificationAcceptanceRejoinRecoversPersistedExpiredLease(t *testing.T)
 type acceptanceEvaluator struct {
 	mu           sync.Mutex
 	requirements []coop.ResourceRequirement
-	evaluations  []Evaluation
-	evaluate     func(context.Context, EvaluationInput) (Evaluation, error)
+	evaluations  [][]coop.CheckResult
+	evaluate     func(context.Context, EvaluationInput) ([]coop.CheckResult, error)
 	inputs       []EvaluationInput
 }
 
@@ -2191,23 +2186,23 @@ func (e *acceptanceEvaluator) ObservedCandidateRequirement(
 	return copy, true, nil
 }
 
-func (e *acceptanceEvaluator) Evaluate(ctx context.Context, input EvaluationInput) (Evaluation, error) {
+func (e *acceptanceEvaluator) Evaluate(ctx context.Context, input EvaluationInput) ([]coop.CheckResult, error) {
 	e.mu.Lock()
 	index := len(e.inputs)
 	e.inputs = append(e.inputs, input)
 	evaluate := e.evaluate
-	var evaluation Evaluation
+	var results []coop.CheckResult
 	if index < len(e.evaluations) {
-		evaluation = e.evaluations[index]
+		results = e.evaluations[index]
 	}
 	e.mu.Unlock()
 	if evaluate != nil {
 		return evaluate(ctx, input)
 	}
 	if index >= len(e.evaluations) {
-		return Evaluation{}, fmt.Errorf("unexpected evaluator call %d", index+1)
+		return nil, fmt.Errorf("unexpected evaluator call %d", index+1)
 	}
-	return evaluation, nil
+	return results, nil
 }
 
 func (e *acceptanceEvaluator) Inputs() []EvaluationInput {
@@ -2273,10 +2268,10 @@ func reportAcceptanceWork(
 }
 
 func setupAcceptanceEvaluator() Evaluator {
-	return &acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) (Evaluation, error) {
-		return Evaluation{Results: []coop.CheckResult{
+	return &acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) ([]coop.CheckResult, error) {
+		return []coop.CheckResult{
 			requiredAcceptanceResult("setup.passed", coop.CheckResource, coop.CheckPassed),
-		}}, nil
+		}, nil
 	}}
 }
 

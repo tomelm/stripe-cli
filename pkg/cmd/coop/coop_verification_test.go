@@ -106,9 +106,9 @@ func TestVerificationAccountSwitchDegradesInsteadOfReadingAnotherAccount(t *test
 	report, err := evaluator.Evaluate(context.Background(), workflow.EvaluationInput{Session: session, NodeNumber: 1, Attempt: 1})
 
 	require.NoError(t, err)
-	require.Len(t, report.Results, 1)
-	assert.Equal(t, coop.CheckUnavailable, report.Results[0].Status)
-	assert.Contains(t, report.Results[0].Detail, "active Stripe account differs")
+	require.Len(t, report, 1)
+	assert.Equal(t, coop.CheckUnavailable, report[0].Status)
+	assert.Contains(t, report[0].Detail, "active Stripe account differs")
 }
 
 func TestVerificationUnpinnedSessionDegradesInsteadOfReadingCurrentAccount(t *testing.T) {
@@ -125,9 +125,9 @@ func TestVerificationUnpinnedSessionDegradesInsteadOfReadingCurrentAccount(t *te
 	report, err := evaluator.Evaluate(context.Background(), workflow.EvaluationInput{Session: session, NodeNumber: 1, Attempt: 1})
 
 	require.NoError(t, err)
-	require.Len(t, report.Results, 1)
-	assert.Equal(t, coop.CheckUnavailable, report.Results[0].Status)
-	assert.Contains(t, report.Results[0].Detail, "no pinned Stripe account")
+	require.Len(t, report, 1)
+	assert.Equal(t, coop.CheckUnavailable, report[0].Status)
+	assert.Contains(t, report[0].Detail, "no pinned Stripe account")
 }
 
 func TestCheckoutVerificationEndToEndHumanAndAgentFlow(t *testing.T) {

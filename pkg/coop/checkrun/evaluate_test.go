@@ -60,8 +60,8 @@ func TestEvaluateResourceUsesAttemptInputsAndLiveSourceBindings(t *testing.T) {
 	assert.Equal(t, before, after, "evaluation must not mutate the frozen session")
 	assert.Equal(t, []string{"/v1/checkout/sessions/cs_target123", "/v1/customers/cus_source123"}, reader.paths,
 		"equals_binding must read the referenced resource live")
-	require.Len(t, report.Results, 5)
-	for _, result := range report.Results {
+	require.Len(t, report, 5)
+	for _, result := range report {
 		assert.Equal(t, coop.CheckPassed, result.Status, result.ID)
 		assert.Equal(t, coop.CheckRequired, result.Importance)
 		assert.Equal(t, reported, result.UpdatedAt)
@@ -214,8 +214,8 @@ func TestEvaluateCombinesResourceAndStateChecksInOneCachedRun(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	assert.NotZero(t, countKind(report.Results, coop.CheckResource))
-	assert.NotZero(t, countKind(report.Results, coop.CheckState))
+	assert.NotZero(t, countKind(report, coop.CheckResource))
+	assert.NotZero(t, countKind(report, coop.CheckState))
 	assert.Equal(t, []string{"/v1/payment_intents/pi_combined123"}, reader.paths)
 }
 
@@ -235,8 +235,8 @@ func TestEvaluateStateUsesOnePathForEventsAndPolling(t *testing.T) {
 		Plan: plan, Session: session, NodeNumber: 1, AttemptNumber: 1, ObservedAt: started,
 	})
 	require.NoError(t, err)
-	require.Len(t, missing.Results, 1)
-	assert.Equal(t, coop.CheckPending, missing.Results[0].Status)
+	require.Len(t, missing, 1)
+	assert.Equal(t, coop.CheckPending, missing[0].Status)
 	assert.Empty(t, reader.paths)
 
 	opened := started.Add(-time.Minute)
@@ -347,9 +347,9 @@ func TestEvaluatePersistsEventCandidateAcrossReadOutageAndRevalidatesWindow(t *t
 		Plan: plan, Session: session, NodeNumber: 2, AttemptNumber: 1, ObservedAt: eventAt.Add(time.Second),
 	})
 	require.NoError(t, err)
-	assert.NotZero(t, countKind(pollReport.Results, coop.CheckResource))
-	assert.NotZero(t, countKind(pollReport.Results, coop.CheckState))
-	for _, result := range pollReport.Results {
+	assert.NotZero(t, countKind(pollReport, coop.CheckResource))
+	assert.NotZero(t, countKind(pollReport, coop.CheckState))
+	for _, result := range pollReport {
 		if strings.Contains(result.ID, ".attribution.") {
 			assert.Equal(t, coop.CheckUnavailable, result.Status, result.ID)
 			continue
@@ -374,7 +374,7 @@ func TestEvaluatePersistsEventCandidateAcrossReadOutageAndRevalidatesWindow(t *t
 	assert.Equal(t, coop.CheckUnavailable, resultWithKindAndSuffix(t, oldReport, coop.CheckState, ".observation-window").Status)
 	assert.Equal(t, coop.CheckUnavailable, resultWithSuffix(t, oldReport, ".attribution.checkout_session.checkout_session").Status,
 		"a persisted invalid candidate must become overridable instead of remaining pending forever")
-	for _, result := range oldReport.Results {
+	for _, result := range oldReport {
 		assert.NotEqual(t, coop.CheckFailed, result.Status, result.ID)
 		assert.False(t, result.Kind == coop.CheckResource && strings.HasSuffix(result.ID, ".field-mode"), result.ID)
 		assert.False(t, result.Kind == coop.CheckState && strings.HasSuffix(result.ID, ".state"), result.ID)
@@ -424,7 +424,7 @@ func TestEvaluatePersistsEventCandidateAcrossReadOutageAndRevalidatesWindow(t *t
 		Plan: plan, Session: session, NodeNumber: 2, AttemptNumber: 1, ObservedAt: eventAt.Add(3 * time.Second),
 	})
 	require.NoError(t, err)
-	for _, result := range validEvent.Results {
+	for _, result := range validEvent {
 		if strings.Contains(result.ID, ".attribution.") {
 			assert.Equal(t, coop.CheckUnavailable, result.Status, result.ID)
 			continue
@@ -441,7 +441,7 @@ func TestEvaluatePersistsEventCandidateAcrossReadOutageAndRevalidatesWindow(t *t
 		Plan: plan, Session: session, NodeNumber: 2, AttemptNumber: 1, ObservedAt: eventAt.Add(4 * time.Second),
 	})
 	require.NoError(t, err)
-	for _, result := range validPoll.Results {
+	for _, result := range validPoll {
 		if strings.Contains(result.ID, ".attribution.") {
 			assert.Equal(t, coop.CheckUnavailable, result.Status, result.ID)
 			continue
@@ -526,7 +526,7 @@ func TestEvaluateReplacementAppliesAtomicallyAcrossSameRoleStates(t *testing.T) 
 	assert.Equal(t, []string{"/v1/payment_intents/pi_new123"}, reader.paths,
 		"every state for one role must use the replacement snapshot")
 	seen := make(map[string]bool)
-	for _, result := range report.Results {
+	for _, result := range report {
 		key := string(result.Kind) + "\x00" + result.ID
 		assert.False(t, seen[key], "duplicate result %s", result.ID)
 		seen[key] = true
@@ -555,7 +555,7 @@ func TestEvaluatePersistedWrongPrefixCandidateNeverBlamesAgent(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, coop.CheckUnavailable, resultWithSuffix(t, report, ".exists").Status)
-	for _, result := range report.Results {
+	for _, result := range report {
 		assert.NotEqual(t, coop.CheckFailed, result.Status, result.ID)
 	}
 }
@@ -871,22 +871,22 @@ func TestEvaluateBoundsCompiledTargets(t *testing.T) {
 		Plan: plan, Session: session, NodeNumber: 1, AttemptNumber: 1, ObservedAt: observed,
 	})
 	require.NoError(t, err)
-	assert.Len(t, report.Results, MaxResultsPerRun)
-	assert.Equal(t, 1, countKind(report.Results, coop.CheckCoverage))
+	assert.Len(t, report, MaxResultsPerRun)
+	assert.Equal(t, 1, countKind(report, coop.CheckCoverage))
 	coverage := resultWithSuffix(t, report, "checkrun.coverage")
 	assert.Equal(t, coop.CheckRequired, coverage.Importance)
 	assert.Equal(t, coop.CheckUnavailable, coverage.Status,
 		"capacity loss must prevent automatic confirmation")
 	assert.Len(t, reader.paths, MaxTargetsPerRun*(1+MaxEvidencePerTarget))
-	seen := make(map[string]bool, len(report.Results))
-	for _, result := range report.Results {
+	seen := make(map[string]bool, len(report))
+	for _, result := range report {
 		key := string(result.Kind) + "\x00" + result.ID
 		assert.False(t, seen[key], "duplicate bounded result %s", result.ID)
 		seen[key] = true
 	}
 	token, err := node.BeginAutomaticCheck(1, observed)
 	require.NoError(t, err)
-	require.NoError(t, node.ReconcileAutomaticEvaluation(1, token, report.Results),
+	require.NoError(t, node.ReconcileAutomaticEvaluation(1, token, report),
 		"the exact maximum snapshot must remain persistable by its lease owner")
 }
 
@@ -961,7 +961,7 @@ func TestEvaluateOversizedCandidateEvidenceFailsClosed(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, coop.CheckUnavailable,
 		resultWithSuffix(t, report, ".attribution.checkout_session.checkout_session").Status)
-	assert.Equal(t, 1, countKind(report.Results, coop.CheckCoverage))
+	assert.Equal(t, 1, countKind(report, coop.CheckCoverage))
 	assert.Equal(t, coop.CheckRequired, resultWithSuffix(t, report, "checkrun.coverage").Importance)
 }
 
@@ -1025,25 +1025,25 @@ func (reader *memoryReader) Get(ctx context.Context, path string) (map[string]an
 	return object, nil
 }
 
-func resultWithSuffix(t *testing.T, report Report, suffix string) coop.CheckResult {
+func resultWithSuffix(t *testing.T, results []coop.CheckResult, suffix string) coop.CheckResult {
 	t.Helper()
-	for _, result := range report.Results {
+	for _, result := range results {
 		if strings.HasSuffix(result.ID, suffix) {
 			return result
 		}
 	}
-	t.Fatalf("no result ends with %q in %#v", suffix, report.Results)
+	t.Fatalf("no result ends with %q in %#v", suffix, results)
 	return coop.CheckResult{}
 }
 
-func resultWithKindAndSuffix(t *testing.T, report Report, kind coop.CheckKind, suffix string) coop.CheckResult {
+func resultWithKindAndSuffix(t *testing.T, results []coop.CheckResult, kind coop.CheckKind, suffix string) coop.CheckResult {
 	t.Helper()
-	for _, result := range report.Results {
+	for _, result := range results {
 		if result.Kind == kind && strings.HasSuffix(result.ID, suffix) {
 			return result
 		}
 	}
-	t.Fatalf("no %s result ends with %q in %#v", kind, suffix, report.Results)
+	t.Fatalf("no %s result ends with %q in %#v", kind, suffix, results)
 	return coop.CheckResult{}
 }
 

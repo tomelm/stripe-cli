@@ -88,7 +88,7 @@ func TestSubscriptionUIEventEvaluatesCausalResourceGraph(t *testing.T) {
 	statePassed := false
 	relationshipPassed := false
 	attributionUnavailable := false
-	for _, result := range report.Results {
+	for _, result := range report {
 		if result.Kind == coop.CheckState && strings.Contains(result.ID, "checkout.session.completed") {
 			statePassed = true
 			assert.Equal(t, coop.CheckPassed, result.Status)

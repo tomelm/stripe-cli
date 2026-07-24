@@ -37,11 +37,6 @@ type Input struct {
 	ObservedAt    time.Time
 }
 
-// Report contains no Stripe payloads or arbitrary response fields.
-type Report struct {
-	Results []coop.CheckResult
-}
-
 // Evaluator applies only the closed checks vocabulary. Catalog must be the
 // validated catalog used to compile the plan.
 type Evaluator struct {
@@ -55,24 +50,24 @@ func NewEvaluator(reader Reader, catalog checks.Catalog) *Evaluator {
 
 // Evaluate is side-effect free. Remote failures are unavailable findings;
 // errors are reserved for invalid local input.
-func (e *Evaluator) Evaluate(ctx context.Context, input Input) (Report, error) {
+func (e *Evaluator) Evaluate(ctx context.Context, input Input) ([]coop.CheckResult, error) {
 	if ctx == nil || e == nil || input.Session == nil {
-		return Report{}, errors.New("check evaluator, context, and session are required")
+		return nil, errors.New("check evaluator, context, and session are required")
 	}
 	step, _, _, err := input.Session.StepByNodeNumber(input.NodeNumber)
 	if err != nil {
-		return Report{}, err
+		return nil, err
 	}
 	node, err := input.Session.NodeByNumber(input.NodeNumber)
 	if err != nil {
-		return Report{}, err
+		return nil, err
 	}
 	attempt, err := node.AttemptByNumber(input.AttemptNumber)
 	if err != nil {
-		return Report{}, err
+		return nil, err
 	}
 	if input.Plan.StepKey != "" && input.Plan.StepKey != step.Key {
-		return Report{}, fmt.Errorf("check plan %q does not belong to step %q", input.Plan.StepKey, step.Key)
+		return nil, fmt.Errorf("check plan %q does not belong to step %q", input.Plan.StepKey, step.Key)
 	}
 	at := input.ObservedAt.UTC()
 	if at.IsZero() {
@@ -110,7 +105,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, input Input) (Report, error) {
 		run.evaluate(target)
 	}
 	run.finalizeCandidates()
-	return Report{Results: run.results}, nil
+	return run.results, nil
 }
 
 type target struct {

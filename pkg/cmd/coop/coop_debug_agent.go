@@ -76,12 +76,12 @@ func (debugAgentEvaluator) Requirements(*coop.Session, int) ([]coop.ResourceRequ
 	return nil, nil
 }
 
-func (debugAgentEvaluator) Evaluate(context.Context, workflow.EvaluationInput) (workflow.Evaluation, error) {
-	return workflow.Evaluation{Results: []coop.CheckResult{{
+func (debugAgentEvaluator) Evaluate(context.Context, workflow.EvaluationInput) ([]coop.CheckResult, error) {
+	return []coop.CheckResult{{
 		ID: "debug.agent.completed", Kind: coop.CheckCoverage,
 		Importance: coop.CheckRequired, Status: coop.CheckPassed,
 		Detail: "The deterministic debug agent completed this node.",
-	}}}, nil
+	}}, nil
 }
 
 func (a *coopDebugAgent) workflowService() *workflow.Service {

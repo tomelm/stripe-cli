@@ -31,13 +31,6 @@ type EvaluationInput struct {
 	Attempt    int
 }
 
-// Evaluation is one complete bounded snapshot of the node's direct resource,
-// state, and coverage findings. Supporting request/event evidence is recorded
-// through RecordSupportingResult instead.
-type Evaluation struct {
-	Results []coop.CheckResult
-}
-
 // RequirementProvider is the pure catalog/blueprint planning boundary used by
 // agent submission commands. It has no Stripe reader or credentials.
 type RequirementProvider interface {
@@ -57,11 +50,13 @@ type ObservedCandidateProvider interface {
 	) (coop.ResourceRequirement, bool, error)
 }
 
-// Evaluator is the trusted read-only boundary shared by the TUI observer and
-// agent-facing Co-op commands. The coding agent supplies only typed bindings;
-// evaluator credentials and reads remain inside the Stripe CLI process.
+// Evaluator combines pure requirement planning with the trusted read-only
+// boundary shared by the TUI observer and agent-facing Co-op commands. The
+// coding agent supplies only typed bindings; credentials and reads remain
+// inside the Stripe CLI process.
 type Evaluator interface {
-	Evaluate(context.Context, EvaluationInput) (Evaluation, error)
+	RequirementProvider
+	Evaluate(context.Context, EvaluationInput) ([]coop.CheckResult, error)
 }
 
 var (
@@ -258,7 +253,7 @@ func (s *Service) evaluateAndApplyObservation(ctx context.Context, sessionID str
 	if started.stale {
 		return staleEvaluationResponse(session, nodeNumber), nil
 	}
-	evaluation, evalErr := s.evaluateBounded(ctx, EvaluationInput{
+	results, evalErr := s.evaluateBounded(ctx, EvaluationInput{
 		Session: session, NodeNumber: nodeNumber, Attempt: attemptNumber,
 	})
 	if ctx.Err() != nil {
@@ -268,16 +263,16 @@ func (s *Service) evaluateAndApplyObservation(ctx context.Context, sessionID str
 	if evalErr != nil {
 		// Any bounded timeout or local contract error is disclosed as
 		// unavailable, never as a pass.
-		evaluation = Evaluation{Results: []coop.CheckResult{{
+		results = []coop.CheckResult{{
 			ID: "automatic.verification", Kind: coop.CheckCoverage,
 			Importance: coop.CheckRequired, Status: coop.CheckUnavailable,
 			Detail: "Automatic verification could not run after bounded retries.",
 			Repair: "Continue without treating this check as passed.", UpdatedAt: s.now().UTC(),
-		}}}
+		}}
 	}
 	applied := evaluationApply{responseAttempt: attemptNumber}
 	session, err = s.store.Update(sessionID, func(session *coop.Session) error {
-		return s.applyEvaluation(session, nodeNumber, attemptNumber, started.basis, started.snapshotAt, evaluation, &applied)
+		return s.applyEvaluation(session, nodeNumber, attemptNumber, started.basis, started.snapshotAt, results, &applied)
 	})
 	if err != nil {
 		return errorResponse(err, fmt.Sprintf("stripe coop agent start-work --session=%s --node=%d", sessionID, nodeNumber)), nil
@@ -363,23 +358,23 @@ func staleEvaluationResponse(session *coop.Session, nodeNumber int) coop.Command
 }
 
 type boundedEvaluation struct {
-	evaluation Evaluation
-	err        error
+	results []coop.CheckResult
+	err     error
 }
 
-func (s *Service) evaluateBounded(ctx context.Context, input EvaluationInput) (Evaluation, error) {
+func (s *Service) evaluateBounded(ctx context.Context, input EvaluationInput) ([]coop.CheckResult, error) {
 	evalCtx, cancel := context.WithTimeout(ctx, s.evalTimeout)
 	defer cancel()
 	done := make(chan boundedEvaluation, 1)
 	go func() {
-		evaluation, err := s.evaluator.Evaluate(evalCtx, input)
-		done <- boundedEvaluation{evaluation: evaluation, err: err}
+		results, err := s.evaluator.Evaluate(evalCtx, input)
+		done <- boundedEvaluation{results: results, err: err}
 	}()
 	select {
 	case outcome := <-done:
-		return outcome.evaluation, outcome.err
+		return outcome.results, outcome.err
 	case <-evalCtx.Done():
-		return Evaluation{}, evalCtx.Err()
+		return nil, evalCtx.Err()
 	}
 }
 
@@ -454,7 +449,7 @@ func (basis evaluationBasis) matches(session *coop.Session, attempt *coop.NodeAt
 		slices.Equal(basis.resources, current.resources)
 }
 
-func (s *Service) applyEvaluation(session *coop.Session, nodeNumber, attemptNumber int, basis evaluationBasis, snapshotAt time.Time, evaluation Evaluation, applied *evaluationApply) error {
+func (s *Service) applyEvaluation(session *coop.Session, nodeNumber, attemptNumber int, basis evaluationBasis, snapshotAt time.Time, results []coop.CheckResult, applied *evaluationApply) error {
 	node, err := session.NodeByNumber(nodeNumber)
 	if err != nil {
 		return err
@@ -482,7 +477,7 @@ func (s *Service) applyEvaluation(session *coop.Session, nodeNumber, attemptNumb
 		applied.basisChanged = true
 		return nil
 	}
-	if err := node.ReconcileAutomaticEvaluation(attemptNumber, snapshotAt, evaluation.Results); err != nil {
+	if err := node.ReconcileAutomaticEvaluation(attemptNumber, snapshotAt, results); err != nil {
 		if !errors.Is(err, coop.ErrStaleResultSnapshot) {
 			return err
 		}

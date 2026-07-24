@@ -748,10 +748,10 @@ func (passingWorkflowEvaluator) Requirements(*coop.Session, int) ([]coop.Resourc
 	return nil, nil
 }
 
-func (passingWorkflowEvaluator) Evaluate(context.Context, EvaluationInput) (Evaluation, error) {
-	return Evaluation{Results: []coop.CheckResult{{
+func (passingWorkflowEvaluator) Evaluate(context.Context, EvaluationInput) ([]coop.CheckResult, error) {
+	return []coop.CheckResult{{
 		ID: "test.passed", Kind: coop.CheckResource, Importance: coop.CheckRequired, Status: coop.CheckPassed,
-	}}}, nil
+	}}, nil
 }
 
 type requiredCustomerWorkflowEvaluator struct{}
@@ -760,7 +760,7 @@ func (requiredCustomerWorkflowEvaluator) Requirements(*coop.Session, int) ([]coo
 	return []coop.ResourceRequirement{{Role: "customer", Type: "customer", Required: true}}, nil
 }
 
-func (requiredCustomerWorkflowEvaluator) Evaluate(context.Context, EvaluationInput) (Evaluation, error) {
+func (requiredCustomerWorkflowEvaluator) Evaluate(context.Context, EvaluationInput) ([]coop.CheckResult, error) {
 	return passingWorkflowEvaluator{}.Evaluate(context.Background(), EvaluationInput{})
 }
 
@@ -770,8 +770,8 @@ func (requirementsErrorWorkflowEvaluator) Requirements(*coop.Session, int) ([]co
 	return nil, errors.New("invalid verification catalog")
 }
 
-func (requirementsErrorWorkflowEvaluator) Evaluate(context.Context, EvaluationInput) (Evaluation, error) {
-	return Evaluation{}, errors.New("should not evaluate")
+func (requirementsErrorWorkflowEvaluator) Evaluate(context.Context, EvaluationInput) ([]coop.CheckResult, error) {
+	return nil, errors.New("should not evaluate")
 }
 
 type multiFailureWorkflowEvaluator struct{}
@@ -780,8 +780,8 @@ func (multiFailureWorkflowEvaluator) Requirements(*coop.Session, int) ([]coop.Re
 	return nil, nil
 }
 
-func (multiFailureWorkflowEvaluator) Evaluate(context.Context, EvaluationInput) (Evaluation, error) {
-	return Evaluation{Results: []coop.CheckResult{
+func (multiFailureWorkflowEvaluator) Evaluate(context.Context, EvaluationInput) ([]coop.CheckResult, error) {
+	return []coop.CheckResult{
 		{
 			ID: "failure.one", Kind: coop.CheckResource, Importance: coop.CheckRequired,
 			Status: coop.CheckFailed, Detail: "First mismatch", Repair: "Fix the first value.",
@@ -790,5 +790,5 @@ func (multiFailureWorkflowEvaluator) Evaluate(context.Context, EvaluationInput) 
 			ID: "failure.two", Kind: coop.CheckState, Importance: coop.CheckRequired,
 			Status: coop.CheckFailed, Detail: "Second mismatch", Repair: "Fix the second value.",
 		},
-	}}, nil
+	}, nil
 }

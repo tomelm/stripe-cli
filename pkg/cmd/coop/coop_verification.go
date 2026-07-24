@@ -139,7 +139,7 @@ func (p *coopPlanner) ObservedCandidateRequirement(
 	}, true, nil
 }
 
-func (e *coopEvaluator) Evaluate(ctx context.Context, input workflow.EvaluationInput) (workflow.Evaluation, error) {
+func (e *coopEvaluator) Evaluate(ctx context.Context, input workflow.EvaluationInput) ([]coop.CheckResult, error) {
 	if input.Session == nil || input.Session.StripeAccountID == "" {
 		return e.accountUnavailable(
 			"Automatic verification is unavailable because this session has no pinned Stripe account.",
@@ -153,16 +153,16 @@ func (e *coopEvaluator) Evaluate(ctx context.Context, input workflow.EvaluationI
 		), nil
 	}
 	if input.Session.StripeAccountID != e.accountID {
-		return workflow.Evaluation{Results: []coop.CheckResult{{
+		return []coop.CheckResult{{
 			ID: "automatic.account-scope", Kind: coop.CheckCoverage, Importance: coop.CheckRequired,
 			Status: coop.CheckUnavailable,
 			Detail: "Automatic verification is unavailable because the active Stripe account differs from this session.",
 			Repair: "Switch back to the Stripe account used when this Co-op session started.", UpdatedAt: e.now().UTC(),
-		}}}, nil
+		}}, nil
 	}
 	plan, node, err := e.plan(input.Session, input.NodeNumber)
 	if err != nil {
-		return workflow.Evaluation{}, err
+		return nil, err
 	}
 	// An app UI is the human-facing review surface for its containing step.
 	// Re-evaluate that step's ordinary checks on the UI attempt while keeping
@@ -175,25 +175,25 @@ func (e *coopEvaluator) Evaluate(ctx context.Context, input workflow.EvaluationI
 		Plan: plan, Session: input.Session, NodeNumber: input.NodeNumber,
 		AttemptNumber: input.Attempt, ObservedAt: observedAt,
 	}
-	report, err := e.runner.Evaluate(ctx, base)
+	results, err := e.runner.Evaluate(ctx, base)
 	if err != nil {
-		return workflow.Evaluation{}, err
+		return nil, err
 	}
 	for _, gap := range plan.CoverageGaps {
-		report.Results = append(report.Results, coop.CheckResult{
+		results = append(results, coop.CheckResult{
 			ID: gap.ID, Kind: coop.CheckCoverage, Importance: coop.CheckAdvisory,
 			Status: coop.CheckUnavailable, Detail: boundedVerificationText(gap.Reason),
 			Repair: boundedVerificationText(gap.Repair), UpdatedAt: observedAt,
 		})
 	}
-	return workflow.Evaluation{Results: report.Results}, nil
+	return results, nil
 }
 
-func (e *coopEvaluator) accountUnavailable(detail, repair string) workflow.Evaluation {
-	return workflow.Evaluation{Results: []coop.CheckResult{{
+func (e *coopEvaluator) accountUnavailable(detail, repair string) []coop.CheckResult {
+	return []coop.CheckResult{{
 		ID: "automatic.account-scope", Kind: coop.CheckCoverage, Importance: coop.CheckRequired,
 		Status: coop.CheckUnavailable, Detail: detail, Repair: repair, UpdatedAt: e.now().UTC(),
-	}}}
+	}}
 }
 
 func (p *coopPlanner) plan(session *coop.Session, nodeNumber int) (checks.StepPlan, *coop.SessionNode, error) {

@@ -39,11 +39,11 @@ func (observerPassingEvaluator) Requirements(*coop.Session, int) ([]coop.Resourc
 	return nil, nil
 }
 
-func (observerPassingEvaluator) Evaluate(context.Context, workflow.EvaluationInput) (workflow.Evaluation, error) {
-	return workflow.Evaluation{Results: []coop.CheckResult{{
+func (observerPassingEvaluator) Evaluate(context.Context, workflow.EvaluationInput) ([]coop.CheckResult, error) {
+	return []coop.CheckResult{{
 		ID: "observer.rejoined", Kind: coop.CheckResource,
 		Importance: coop.CheckRequired, Status: coop.CheckPassed, UpdatedAt: time.Now().UTC(),
-	}}}, nil
+	}}, nil
 }
 
 type recordingObserverWorkflow struct {
@@ -60,9 +60,9 @@ func (evaluator *recordingObserverEvaluator) Requirements(*coop.Session, int) ([
 	return nil, nil
 }
 
-func (evaluator *recordingObserverEvaluator) Evaluate(_ context.Context, input workflow.EvaluationInput) (workflow.Evaluation, error) {
+func (evaluator *recordingObserverEvaluator) Evaluate(_ context.Context, input workflow.EvaluationInput) ([]coop.CheckResult, error) {
 	evaluator.calls <- input
-	return workflow.Evaluation{}, nil
+	return nil, nil
 }
 
 func newRecordingObserverWorkflow() *recordingObserverWorkflow {

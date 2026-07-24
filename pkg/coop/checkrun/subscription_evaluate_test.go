@@ -185,7 +185,7 @@ func TestEvaluateOneTimePaymentNeverSelectsSubscriptionEvidence(t *testing.T) {
 		resultWithSuffix(t, report, ".evidence-line_items-field-data-0-price").Status)
 	assert.NotContains(t, stringsJoin(reader.paths), "/v1/subscriptions/",
 		"a one-time Checkout request must never activate trial Subscription evidence")
-	for _, result := range report.Results {
+	for _, result := range report {
 		assert.NotContains(t, result.ID, "evidence-subscription")
 	}
 }
@@ -277,7 +277,7 @@ func TestEvaluateSubscriptionEvidenceDuringAppReview(t *testing.T) {
 				resultWithSuffix(t, report, ".attribution.checkout_session.checkout_session").Status)
 			assert.Equal(t, coop.CheckAdvisory, result.Importance,
 				"facts about an unattributed candidate must remain supporting evidence")
-			for _, finding := range report.Results {
+			for _, finding := range report {
 				assert.NotEqual(t, coop.CheckFailed, finding.Status,
 					"an unattributed account-wide event must never blame the agent")
 				assert.NotContains(t, finding.ID, "trial-end",

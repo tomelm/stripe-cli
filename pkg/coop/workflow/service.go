@@ -73,9 +73,7 @@ func WithEvaluationInterval(interval time.Duration) Option {
 func WithEvaluator(evaluator Evaluator) Option {
 	return func(s *Service) {
 		s.evaluator = evaluator
-		if provider, ok := evaluator.(RequirementProvider); ok {
-			s.requirementProvider = provider
-		}
+		s.requirementProvider = evaluator
 	}
 }
 
