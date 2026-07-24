@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -43,7 +42,6 @@ type Model struct {
 	rejectionError  string
 	statusMessage   string
 	statusExpiresAt time.Time
-	overrideTarget  string
 
 	keys  keyMap
 	help  help.Model
@@ -260,7 +258,6 @@ func (m Model) applySessionUpdate(msg sessionUpdatedMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	wasComplete := m.session != nil && m.session.IsComplete()
-	armedOverride := m.overrideTarget
 	m.session = msg.session
 	m.lastVersion = msg.session.Version
 	m.lastUpdateTime = time.Now()
@@ -281,7 +278,6 @@ func (m Model) applySessionUpdate(msg sessionUpdatedMsg) (tea.Model, tea.Cmd) {
 	if !m.userMoved {
 		m.autoScroll()
 	}
-	m.restoreVerificationOverride(armedOverride)
 	m.resizeViewport()
 	m.syncViewport()
 	return m, nil
@@ -401,7 +397,6 @@ func (m Model) rejectionCursor(content string) *tea.Cursor {
 func (m *Model) resetSessionViewState() {
 	m.resetSelectionState()
 	m.clearRejectionState()
-	m.clearVerificationOverride()
 	m.clearStatus()
 	m.clearSDKSnippetState()
 }
@@ -872,59 +867,52 @@ func (m *Model) handleConfirm() tea.Cmd {
 	if m.session == nil {
 		return nil
 	}
-	target, ok := m.selectedReviewTarget()
+	target, ok := m.selectedConfirmationTarget()
 	if !ok {
 		return nil
 	}
 	refs, err := m.attemptRefs(target.nodeNumbers)
 	if err != nil {
-		m.clearVerificationOverride()
 		m.setStatus(err.Error(), 5*time.Second)
 		return nil
 	}
-	overrideTarget := workflow.ReviewEvidenceDigest(m.session, refs)
-	var override *workflow.ReviewOverride
-	if m.overrideTarget == overrideTarget {
-		override = &workflow.ReviewOverride{
-			EvidenceDigest: overrideTarget,
-			Reason:         "Developer reviewed the disclosed verification gaps and chose to continue.",
-		}
-	}
-	session, err := workflow.NewService(m.store).ConfirmReviewAttempts(
-		m.session.ID, refs, override,
-	)
+	readiness, err := workflow.ReviewAttemptsReadiness(m.session, refs)
 	if err != nil {
-		switch {
-		case errors.Is(err, workflow.ErrVerificationOverrideRequired):
-			m.overrideTarget = overrideTarget
-			m.setStatus("Automatic check unavailable. Press c again to confirm with a recorded override.", 0)
-		case errors.Is(err, workflow.ErrVerificationOverrideChanged):
-			m.clearVerificationOverride()
-			if latest, readErr := m.store.Read(m.session.ID); readErr == nil {
-				m.session = latest
-				m.lastVersion = latest.Version
-			}
-			m.setStatus("Verification findings changed. Review them, then press c again to confirm.", 0)
-		default:
-			m.clearVerificationOverride()
-			m.setStatus(err.Error(), 5*time.Second)
-		}
+		m.setStatus(err.Error(), 0)
 		m.resizeViewport()
 		m.syncViewport()
 		return nil
 	}
-	m.clearVerificationOverride()
+	if len(readiness.Blocking) > 0 {
+		m.setStatus("Co-op found a contradiction that needs agent changes.", 0)
+		m.resizeViewport()
+		m.syncViewport()
+		return nil
+	}
+	session, err := workflow.NewService(m.store).ConfirmReviewAttempts(m.session.ID, refs)
+	if err != nil {
+		m.setStatus(err.Error(), 5*time.Second)
+		m.resizeViewport()
+		m.syncViewport()
+		return nil
+	}
 	m.session = session
 	m.lastVersion = m.session.Version
 	if target.kind == "node" && len(target.nodeNumbers) > 0 {
 		m.selectNode(target.nodeNumbers[0] - 1)
 	}
 	m.userMoved = false
-	m.setStatus("Confirmed. Waiting for agent...", 5*time.Second)
+	if readiness.Incomplete {
+		m.setStatus("Confirmed with limited automatic coverage. Agent can continue.", 5*time.Second)
+	} else {
+		m.setStatus("Confirmed. Agent can continue.", 5*time.Second)
+	}
 	m.clearRejectionState()
 	if m.session.IsComplete() {
 		m.resetSelectionState()
 		m.clearStatus()
+	} else {
+		m.autoScroll()
 	}
 	m.resizeViewport()
 	m.syncViewport()
@@ -1008,7 +996,6 @@ func (m *Model) handleReject(note string) {
 		m.selectNode(target.nodeNumbers[0] - 1)
 	}
 	m.userMoved = false
-	m.clearVerificationOverride()
 	m.clearRejectionState()
 	m.setStatus("Feedback sent. Waiting for agent...", 5*time.Second)
 	m.resizeViewport()
@@ -1029,25 +1016,6 @@ func (m Model) attemptRefs(nodeNumbers []int) ([]workflow.AttemptRef, error) {
 		refs = append(refs, workflow.AttemptRef{Node: nodeNumber, Attempt: attempt.Number})
 	}
 	return refs, nil
-}
-
-func (m *Model) restoreVerificationOverride(armed string) {
-	m.overrideTarget = ""
-	if armed == "" || m.session == nil {
-		return
-	}
-	target, ok := m.selectedReviewTarget()
-	if !ok {
-		return
-	}
-	refs, err := m.attemptRefs(target.nodeNumbers)
-	if err == nil && workflow.ReviewEvidenceDigest(m.session, refs) == armed {
-		m.overrideTarget = armed
-	}
-}
-
-func (m *Model) clearVerificationOverride() {
-	m.overrideTarget = ""
 }
 
 type appSurfaceSelection struct {
@@ -1153,7 +1121,7 @@ func (m Model) appExerciseCallout() string {
 	if surface.title != "" {
 		label += surface.title + " — "
 	}
-	label += surface.url + "  (press o)"
+	label += surface.url + "  (press o, optional)"
 	if len(surfaces) > 1 {
 		label += fmt.Sprintf("  · %d app surfaces ready; select a UI node to choose", len(surfaces))
 	}
@@ -1221,10 +1189,59 @@ func (m Model) selectedReviewTarget() (reviewTarget, bool) {
 		return reviewTarget{}, false
 	}
 	_, stepIndex, _, err := m.session.StepByNodeNumber(nodeNumber)
-	if err != nil || !m.session.StepReadyForReview(stepIndex) {
+	if err != nil {
+		return reviewTarget{}, false
+	}
+	// A submitted app surface is independently reviewable while the agent
+	// continues a sibling. Confirming it does not finish the containing step.
+	if node.Type != coop.NodeUIComponent && !m.session.StepReadyForReview(stepIndex) {
 		return reviewTarget{}, false
 	}
 	return reviewTarget{title: node.Title, kind: "node", nodeNumbers: []int{nodeNumber}, stepIndex: stepIndex}, true
+}
+
+// selectedConfirmationTarget expands a ready containing step into one atomic
+// confirmation batch. A UI submitted before its siblings finish remains an
+// exact node target so the developer can review it without blocking the agent.
+func (m Model) selectedConfirmationTarget() (reviewTarget, bool) {
+	target, ok := m.selectedReviewTarget()
+	if !ok || target.kind == "step" || !m.stepReviewReady(target.stepIndex) {
+		return target, ok
+	}
+
+	step := 0
+	var nodeNumbers []int
+	for i := range m.session.Steps {
+		for j := range m.session.Steps[i].Nodes {
+			step++
+			if i == target.stepIndex && m.session.Steps[i].Nodes[j].State == coop.NodeReview {
+				nodeNumbers = append(nodeNumbers, step)
+			}
+		}
+	}
+	if len(nodeNumbers) <= 1 {
+		return target, true
+	}
+	return reviewTarget{
+		title:       m.session.Steps[target.stepIndex].Title,
+		kind:        "step",
+		nodeNumbers: nodeNumbers,
+		stepIndex:   target.stepIndex,
+	}, true
+}
+
+func (m Model) confirmationIsAvailable(target reviewTarget) bool {
+	refs, err := m.attemptRefs(target.nodeNumbers)
+	if err != nil {
+		// Keep the action visible for recovered or partially populated local
+		// session data. The atomic workflow call will return the precise error.
+		return true
+	}
+	readiness, err := workflow.ReviewAttemptsReadiness(m.session, refs)
+	// Selection already guarantees a review node. If a synthetic or recovered
+	// session lacks enough attempt metadata for the richer projection, keep the
+	// action visible and let the atomic service return a durable explanation.
+	return err != nil || len(readiness.Blocking) == 0
 }
 
 func (m Model) selectedRejectionTarget() (reviewTarget, bool) {
@@ -1258,6 +1275,9 @@ func (m Model) reviewIsActionable(nodeNumber int) bool {
 	if err != nil || node.State != coop.NodeReview {
 		return false
 	}
+	if node.Type == coop.NodeUIComponent {
+		return true
+	}
 	_, stepIndex, _, err := m.session.StepByNodeNumber(nodeNumber)
 	return err == nil && m.session.StepReadyForReview(stepIndex)
 }
@@ -1279,7 +1299,7 @@ func (m Model) reviewTargetStillValid(target reviewTarget) bool {
 }
 
 func (m Model) selectedReviewCommand() string {
-	target, ok := m.selectedReviewTarget()
+	target, ok := m.selectedConfirmationTarget()
 	if !ok {
 		return ""
 	}

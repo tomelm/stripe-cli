@@ -493,7 +493,7 @@ func (node *SessionNode) OpenApp(number int, now time.Time) error {
 }
 
 // RecordVerificationOverride stores an explicit human decision to continue
-// through unavailable automatic verification. It cannot erase findings.
+// with incomplete automatic verification. It cannot erase findings.
 func (node *SessionNode) RecordVerificationOverride(number int, now time.Time, reason string) error {
 	attempt, err := node.currentAttemptNumber(number)
 	if err != nil {

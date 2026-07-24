@@ -117,7 +117,10 @@ func (m Model) ShortHelp() []key.Binding {
 		bindings = append(bindings, m.keys.Follow)
 	}
 
-	target, canConfirm := m.selectedReviewTarget()
+	target, canConfirm := m.selectedConfirmationTarget()
+	if canConfirm && !m.confirmationIsAvailable(target) {
+		canConfirm = false
+	}
 	_, canReject := m.selectedRejectionTarget()
 	if canConfirm {
 		if m.selectedReviewCommand() != "" {

@@ -278,7 +278,7 @@ func TestVerificationAcceptanceCorrectionAttemptRetainsApplicationContract(t *te
 	assert.Contains(t, correction.Message, failure.Repair)
 }
 
-func TestVerificationAcceptanceUIOutcomeRequiresVisibleOverride(t *testing.T) {
+func TestVerificationAcceptanceUIOutcomeRecordsLimitedCoverageOnFirstConfirm(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeUIComponent)
 	addAcceptanceOutcome(t, store, session.ID)
 	evaluator := &acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) (Evaluation, error) {
@@ -306,34 +306,18 @@ func TestVerificationAcceptanceUIOutcomeRequiresVisibleOverride(t *testing.T) {
 	assert.Equal(t, string(decisionNeedsHuman), reported.Decision)
 	outcome := acceptanceResult(t, reported.Verification, coop.ApplicationOutcomeResultPrefix+"durable-access")
 	assert.Equal(t, coop.CheckUnavailable, outcome.Status)
-	initialAttempt := acceptanceNode(t, readAcceptanceSession(t, store, session.ID)).CurrentAttempt()
-	require.NotNil(t, initialAttempt)
-
-	clock.Set(clock.Now().Add(time.Minute))
-	_, err = service.MarkAppOpened(session.ID, 1, started.Attempt)
-	require.NoError(t, err)
-	clock.Set(clock.Now().Add(time.Nanosecond))
-	_, err = service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
-	require.NoError(t, err)
-
 	refs := []AttemptRef{{Node: 1, Attempt: started.Attempt}}
-	_, err = service.ConfirmReviewAttempts(session.ID, refs, nil)
-	require.ErrorIs(t, err, ErrVerificationOverrideRequired)
-	confirmed, err := service.ConfirmReviewAttempts(
-		session.ID,
-		refs,
-		acceptanceReviewOverride(
-			t,
-			store,
-			session.ID,
-			refs,
-			"Developer reviewed the disclosed application verification gap and chose to continue.",
-		),
-	)
+	confirmed, err := service.ConfirmReviewAttempts(session.ID, refs)
 	require.NoError(t, err)
 	node := acceptanceNode(t, confirmed)
 	assert.Equal(t, coop.NodeDone, node.State)
 	require.NotNil(t, node.Attempts[0].Override)
+	assert.Contains(t, node.Attempts[0].Override.Reason, "automatic verification was incomplete")
+	assert.Equal(t, coop.CheckUnavailable, acceptanceResult(
+		t,
+		node.Attempts[0].Results,
+		coop.ApplicationOutcomeResultPrefix+"durable-access",
+	).Status)
 }
 
 func TestVerificationAcceptanceCandidateCannotAutoCompleteNonUI(t *testing.T) {
@@ -755,7 +739,7 @@ func TestVerificationAcceptanceExpiredOwnerCannotLandAfterLeaseReclaimed(t *test
 	assert.Contains(t, expired.Message, "superseded")
 	node := acceptanceNode(t, readAcceptanceSession(t, store, session.ID))
 	require.Len(t, node.Attempts, 1, "stale holder must not apply policy from current failure evidence")
-	assert.Equal(t, coop.NodeActive, node.State)
+	assert.Equal(t, coop.NodeReview, node.State)
 	require.Len(t, node.CurrentAttempt().Results, 1)
 	assert.Equal(t, "state.current", node.CurrentAttempt().Results[0].ID)
 	assert.Empty(t, node.CurrentAttempt().Resources, "stale bindings must not land")
@@ -1010,7 +994,7 @@ func TestVerificationAcceptanceHumanRejectionCannotRaceInflightInitialEvaluation
 	assert.Equal(t, coop.CheckPassed, node.Attempts[0].Results[0].Status)
 }
 
-func TestVerificationAcceptanceUIIsNotConfirmableDuringInitialEvaluation(t *testing.T) {
+func TestVerificationAcceptanceUIConfirmationWinsDuringInitialEvaluation(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeUIComponent)
 	entered := make(chan struct{})
 	release := make(chan struct{})
@@ -1051,17 +1035,24 @@ func TestVerificationAcceptanceUIIsNotConfirmableDuringInitialEvaluation(t *test
 
 	inFlight := readAcceptanceSession(t, store, session.ID)
 	node := acceptanceNode(t, inFlight)
-	assert.Equal(t, coop.NodeActive, node.State)
+	assert.Equal(t, coop.NodeReview, node.State)
 	require.NotNil(t, node.CurrentAttempt())
 	require.NotNil(t, node.CurrentAttempt().ReportedAt)
-	_, err = service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, nil)
-	require.ErrorContains(t, err, "not ready for human confirmation")
+	confirmed, err := service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}})
+	require.NoError(t, err)
+	node = acceptanceNode(t, confirmed)
+	assert.Equal(t, coop.NodeDone, node.State)
+	require.NotNil(t, node.Attempts[0].Override)
+	assert.Contains(t, node.Attempts[0].Override.Reason, "automatic verification was incomplete")
 
 	close(release)
 	result := <-done
 	require.NoError(t, result.err)
-	assert.Equal(t, string(decisionNeedsHuman), result.response.Decision)
-	assert.Equal(t, coop.NodeReview, acceptanceNode(t, readAcceptanceSession(t, store, session.ID)).State)
+	assert.Equal(t, string(coop.NodeDone), result.response.State)
+	ended := acceptanceNode(t, readAcceptanceSession(t, store, session.ID))
+	assert.Equal(t, coop.NodeDone, ended.State)
+	require.Len(t, ended.Attempts, 1)
+	assert.Empty(t, ended.Attempts[0].Results, "late evaluator output cannot mutate the confirmed attempt")
 }
 
 func TestVerificationAcceptanceBasisChangesDiscardInflightEvaluationAndPreserveSupportingEvidence(t *testing.T) {
@@ -1270,7 +1261,7 @@ func TestVerificationAcceptanceRevalidatesStoredAppURLAtOpenBoundary(t *testing.
 	assert.Nil(t, attempt.AppSurface.OpenedAt)
 }
 
-func TestVerificationAcceptanceUIOpenIsStableAndRequiredBeforeConfirm(t *testing.T) {
+func TestVerificationAcceptanceUIOpenIsStableButOptionalForConfirm(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeUIComponent)
 	passed := requiredAcceptanceResult("resource.checkout.exists", coop.CheckResource, coop.CheckPassed)
 	evaluator := &acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) (Evaluation, error) {
@@ -1289,11 +1280,6 @@ func TestVerificationAcceptanceUIOpenIsStableAndRequiredBeforeConfirm(t *testing
 	require.NoError(t, err)
 	assert.Equal(t, string(decisionNeedsHuman), reported.Decision)
 
-	_, err = service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, nil)
-	require.ErrorContains(t, err, "open the app")
-
-	// Equality is not fresh enough: the read must begin strictly after the
-	// human review window opens.
 	firstOpen := time.Date(2026, 7, 21, 18, 1, 0, 0, time.UTC)
 	clock.Set(firstOpen)
 	appURL, err := service.MarkAppOpened(session.ID, 1, started.Attempt)
@@ -1310,8 +1296,6 @@ func TestVerificationAcceptanceUIOpenIsStableAndRequiredBeforeConfirm(t *testing
 	require.NotNil(t, opened.AutomaticResultsAt)
 	assert.Equal(t, *opened.AppSurface.OpenedAt, *opened.AutomaticResultsAt)
 
-	_, err = service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, nil)
-	require.ErrorContains(t, err, "automatic verification has not run since the app was opened")
 	fresh, err := service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
 	require.NoError(t, err)
 	assert.Equal(t, string(decisionNeedsHuman), fresh.Decision)
@@ -1319,14 +1303,14 @@ func TestVerificationAcceptanceUIOpenIsStableAndRequiredBeforeConfirm(t *testing
 	require.NotNil(t, opened.AutomaticResultsAt)
 	assert.True(t, opened.AutomaticResultsAt.After(*opened.AppSurface.OpenedAt))
 
-	confirmed, err := service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, nil)
+	confirmed, err := service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}})
 	require.NoError(t, err)
 	node := acceptanceNode(t, confirmed)
 	assert.Equal(t, coop.NodeDone, node.State)
 	assert.Equal(t, coop.AttemptConfirmed, node.Attempts[0].EndReason)
 }
 
-func TestVerificationAcceptanceProjectedStatesRequireCompleteEventSnapshots(t *testing.T) {
+func TestVerificationAcceptancePendingEventStateDoesNotBlockHumanReview(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeUIComponent)
 	checkout := requiredAcceptanceResult("state.checkout.state", coop.CheckState, coop.CheckPending)
 	subscription := requiredAcceptanceResult("state.subscription.state", coop.CheckState, coop.CheckPending)
@@ -1362,21 +1346,15 @@ func TestVerificationAcceptanceProjectedStatesRequireCompleteEventSnapshots(t *t
 	require.NoError(t, err)
 	assert.Equal(t, coop.CheckPassed, acceptanceResult(t, checkoutEvent.Verification, "state.checkout.state").Status)
 	assert.Equal(t, coop.CheckPending, acceptanceResult(t, checkoutEvent.Verification, "state.subscription.state").Status)
-	_, err = service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, nil)
-	require.ErrorContains(t, err, "still pending")
-
-	clock.Set(clock.Now().Add(time.Second))
-	subscriptionEvent, err := service.ReevaluateState(context.Background(), session.ID, 1, started.Attempt,
-		"customer.subscription.created", "sub_snapshot")
+	confirmed, err := service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}})
 	require.NoError(t, err)
-	assert.Equal(t, coop.CheckPassed, acceptanceResult(t, subscriptionEvent.Verification, "state.checkout.state").Status)
-	assert.Equal(t, coop.CheckPassed, acceptanceResult(t, subscriptionEvent.Verification, "state.subscription.state").Status)
-	confirmed, err := service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, nil)
-	require.NoError(t, err)
-	assert.Equal(t, coop.NodeDone, acceptanceNode(t, confirmed).State)
+	node := acceptanceNode(t, confirmed)
+	assert.Equal(t, coop.NodeDone, node.State)
+	require.NotNil(t, node.Attempts[0].Override)
+	assert.Equal(t, coop.CheckPending, acceptanceResult(t, node.Attempts[0].Results, "state.subscription.state").Status)
 }
 
-func TestVerificationAcceptanceUnavailableRequiresExplicitRecordedOverride(t *testing.T) {
+func TestVerificationAcceptanceUnavailableRecordsOnePressHumanDecision(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeUIComponent)
 	unavailable := requiredAcceptanceResult("app.backend-state", coop.CheckState, coop.CheckUnavailable)
 	evaluator := &acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) (Evaluation, error) {
@@ -1399,34 +1377,23 @@ func TestVerificationAcceptanceUnavailableRequiresExplicitRecordedOverride(t *te
 	_, err = service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
 	require.NoError(t, err)
 
-	_, err = service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, nil)
-	require.ErrorIs(t, err, ErrVerificationOverrideRequired)
-	require.ErrorContains(t, err, "explicit override")
-	before := acceptanceNode(t, readAcceptanceSession(t, store, session.ID))
-	assert.Equal(t, coop.NodeReview, before.State)
-	assert.Nil(t, before.CurrentAttempt().Override)
-
 	overrideAt := time.Date(2026, 7, 21, 18, 3, 0, 0, time.UTC)
 	clock.Set(overrideAt)
 	confirmed, err := service.ConfirmReviewAttempts(
 		session.ID,
 		[]AttemptRef{{Node: 1, Attempt: started.Attempt}},
-		acceptanceReviewOverride(
-			t, store, session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}},
-			"Stripe read permission is intentionally unavailable in this test account.",
-		),
 	)
 	require.NoError(t, err)
 	node := acceptanceNode(t, confirmed)
 	assert.Equal(t, coop.NodeDone, node.State)
 	require.NotNil(t, node.Attempts[0].Override)
 	assert.Equal(t, overrideAt, node.Attempts[0].Override.At)
-	assert.Contains(t, node.Attempts[0].Override.Reason, "intentionally unavailable")
+	assert.Contains(t, node.Attempts[0].Override.Reason, "automatic verification was incomplete")
 	require.Len(t, node.Attempts[0].Results, 1)
 	assert.Equal(t, coop.CheckUnavailable, node.Attempts[0].Results[0].Status)
 }
 
-func TestVerificationAcceptanceOverrideRejectsEvidenceChangedAfterConsent(t *testing.T) {
+func TestVerificationAcceptanceHumanReviewCannotOverrideChangedFailure(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeUIComponent)
 	unavailable := requiredAcceptanceResult("app.backend-state", coop.CheckState, coop.CheckUnavailable)
 	unavailable.Detail = "Backend state could not be read."
@@ -1461,33 +1428,26 @@ func TestVerificationAcceptanceOverrideRejectsEvidenceChangedAfterConsent(t *tes
 	require.NoError(t, err)
 
 	refs := []AttemptRef{{Node: 1, Attempt: started.Attempt}}
-	armedSession := readAcceptanceSession(t, store, session.ID)
-	armedDigest := ReviewEvidenceDigest(armedSession, refs)
-	_, err = service.ConfirmReviewAttempts(session.ID, refs, nil)
-	require.ErrorIs(t, err, ErrVerificationOverrideRequired)
-
 	_, err = store.Update(session.ID, func(current *coop.Session) error {
 		node, nodeErr := current.NodeByNumber(1)
 		if nodeErr != nil {
 			return nodeErr
 		}
-		node.CurrentAttempt().Results[0].Detail = "A different automatic check is now unavailable."
+		node.CurrentAttempt().Results[0].Status = coop.CheckFailed
+		node.CurrentAttempt().Results[0].Detail = "The persisted backend state contradicts the required state."
 		return nil
 	})
 	require.NoError(t, err)
 
-	_, err = service.ConfirmReviewAttempts(session.ID, refs, &ReviewOverride{
-		EvidenceDigest: armedDigest,
-		Reason:         "Developer accepted the originally displayed unavailable finding.",
-	})
-	require.ErrorIs(t, err, ErrVerificationOverrideChanged)
+	_, err = service.ConfirmReviewAttempts(session.ID, refs)
+	require.ErrorContains(t, err, "verification failed")
 	unchanged := acceptanceNode(t, readAcceptanceSession(t, store, session.ID))
 	assert.Equal(t, coop.NodeReview, unchanged.State)
 	assert.Nil(t, unchanged.CurrentAttempt().Override)
 	assert.Nil(t, unchanged.CurrentAttempt().EndedAt)
 }
 
-func TestVerificationAcceptanceCandidateRequiresRecordedUIOverride(t *testing.T) {
+func TestVerificationAcceptanceCandidateRecordsLimitedCoverageDecision(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeUIComponent)
 	passed := requiredAcceptanceResult("state.checkout.complete", coop.CheckState, coop.CheckPassed)
 	candidate := coop.ResourceBinding{
@@ -1513,23 +1473,17 @@ func TestVerificationAcceptanceCandidateRequiresRecordedUIOverride(t *testing.T)
 	_, err = service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
 	require.NoError(t, err)
 
-	_, err = service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, nil)
-	require.ErrorContains(t, err, "explicit override")
 	confirmed, err := service.ConfirmReviewAttempts(
 		session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}},
-		acceptanceReviewOverride(
-			t, store, session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}},
-			"Developer confirmed the UI despite unavailable event attribution.",
-		),
 	)
 	require.NoError(t, err)
 	node := acceptanceNode(t, confirmed)
 	assert.Equal(t, coop.NodeDone, node.State)
 	require.NotNil(t, node.Attempts[0].Override)
-	assert.Contains(t, node.Attempts[0].Override.Reason, "event attribution")
+	assert.Contains(t, node.Attempts[0].Override.Reason, "automatic verification was incomplete")
 }
 
-func TestVerificationAcceptanceRecoveredEmptySnapshotRemovesUIOverrideRequirement(t *testing.T) {
+func TestVerificationAcceptanceRecoveredEmptySnapshotAvoidsLimitedCoverageDecision(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeUIComponent)
 	unavailable := requiredAcceptanceResult("automatic.account-scope", coop.CheckCoverage, coop.CheckUnavailable)
 	evaluator := &acceptanceEvaluator{evaluations: []Evaluation{{Results: []coop.CheckResult{unavailable}}, {Results: []coop.CheckResult{unavailable}}, {}}}
@@ -1549,14 +1503,11 @@ func TestVerificationAcceptanceRecoveredEmptySnapshotRemovesUIOverrideRequiremen
 	clock.Set(clock.Now().Add(time.Nanosecond))
 	_, err = service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
 	require.NoError(t, err)
-	_, err = service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, nil)
-	require.ErrorContains(t, err, "explicit override")
-
 	recovered, err := service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
 	require.NoError(t, err)
 	assert.Equal(t, string(decisionNeedsHuman), recovered.Decision)
 	assert.Empty(t, recovered.Verification)
-	confirmed, err := service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, nil)
+	confirmed, err := service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}})
 	require.NoError(t, err)
 	assert.Equal(t, coop.NodeDone, acceptanceNode(t, confirmed).State)
 	assert.Nil(t, acceptanceNode(t, confirmed).Attempts[0].Override)
@@ -1615,12 +1566,7 @@ func TestVerificationAcceptanceUnavailableBackendJoinsContainingUIReview(t *test
 	require.NoError(t, err)
 	refs := []AttemptRef{{Node: 1, Attempt: ui.Attempt}, {Node: 2, Attempt: state.Attempt}}
 
-	_, err = service.ConfirmReviewAttempts(session.ID, refs, nil)
-	require.ErrorContains(t, err, "explicit override")
-	confirmed, err := service.ConfirmReviewAttempts(
-		session.ID, refs,
-		acceptanceReviewOverride(t, store, session.ID, refs, "Developer accepted the unavailable backend check."),
-	)
+	confirmed, err := service.ConfirmReviewAttempts(session.ID, refs)
 	require.NoError(t, err)
 	assert.Equal(t, coop.SessionCompleted, confirmed.Status)
 	require.NotNil(t, confirmed.Steps[0].Nodes[1].Attempts[0].Override)
@@ -1754,7 +1700,6 @@ func TestVerificationAcceptanceAwaitWakesForHumanRejectionAndReusesCorrectionAtt
 	confirmed, err := service.ConfirmReviewAttempts(
 		session.ID,
 		[]AttemptRef{{Node: 1, Attempt: continued.Attempt}},
-		nil,
 	)
 	require.NoError(t, err)
 	assert.Equal(t, coop.SessionCompleted, confirmed.Status)
@@ -1938,7 +1883,7 @@ func TestVerificationAcceptanceReportRefreshesPreReportObservation(t *testing.T)
 	assert.Len(t, evaluator.Inputs(), 2)
 }
 
-func TestVerificationAcceptanceCanceledTriggerRemainsPendingForRejoinedCoordinator(t *testing.T) {
+func TestVerificationAcceptanceCanceledTriggerDoesNotBlockHumanConfirmation(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeUIComponent)
 	clock := newAcceptanceClock()
 	passed := requiredAcceptanceResult("resource.checkout.exists", coop.CheckResource, coop.CheckPassed)
@@ -2007,8 +1952,16 @@ func TestVerificationAcceptanceCanceledTriggerRemainsPendingForRejoinedCoordinat
 	require.Len(t, canceled.Resources, 1)
 	assert.Equal(t, "cs_rejoin", canceled.Resources[0].ID)
 	assert.Equal(t, coop.BindingObservedCandidate, canceled.Resources[0].Source)
-	_, err = service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, nil)
-	require.ErrorContains(t, err, "latest attempt inputs")
+	confirmed, err := service.ConfirmReviewAttempts(
+		session.ID,
+		[]AttemptRef{{Node: 1, Attempt: started.Attempt}},
+	)
+	require.NoError(t, err)
+	node := acceptanceNode(t, confirmed)
+	assert.Equal(t, coop.NodeDone, node.State)
+	require.NotNil(t, node.Attempts[0].Override)
+	assert.False(t, node.Attempts[0].AutomaticRefreshPending,
+		"ending the immutable attempt clears only its transient retry marker")
 
 	rejoined := newVerificationAcceptanceService(
 		store,
@@ -2022,10 +1975,10 @@ func TestVerificationAcceptanceCanceledTriggerRemainsPendingForRejoinedCoordinat
 	)
 	response, err := rejoined.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
 	require.NoError(t, err)
-	assert.Equal(t, string(decisionNeedsHuman), response.Decision)
-	refreshed := acceptanceNode(t, readAcceptanceSession(t, store, session.ID)).CurrentAttempt()
-	assert.False(t, refreshed.AutomaticRefreshPending)
-	assert.False(t, AttemptNeedsReevaluation(refreshed))
+	assert.Equal(t, string(coop.NodeDone), response.State)
+	ended := acceptanceNode(t, readAcceptanceSession(t, store, session.ID)).Attempts[0]
+	assert.False(t, ended.AutomaticRefreshPending)
+	assert.Equal(t, coop.AttemptConfirmed, ended.EndReason)
 }
 
 func TestVerificationAcceptanceEvaluatorTimeoutDisclosesUnavailableAndReleasesLease(t *testing.T) {
@@ -2257,12 +2210,6 @@ func readAcceptanceSession(t *testing.T, store *coop.Store, id string) *coop.Ses
 	session, err := store.Read(id)
 	require.NoError(t, err)
 	return session
-}
-
-func acceptanceReviewOverride(t *testing.T, store *coop.Store, sessionID string, refs []AttemptRef, reason string) *ReviewOverride {
-	t.Helper()
-	session := readAcceptanceSession(t, store, sessionID)
-	return &ReviewOverride{EvidenceDigest: ReviewEvidenceDigest(session, refs), Reason: reason}
 }
 
 func acceptanceNode(t *testing.T, session *coop.Session) *coop.SessionNode {

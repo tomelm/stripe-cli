@@ -256,7 +256,7 @@ func completionEvidenceLabel(node *coop.SessionNode) string {
 		labels = append(labels, "Coverage gap")
 	}
 	if attempt.Override != nil {
-		labels = append(labels, "Human override recorded")
+		labels = append(labels, "Limited coverage recorded")
 	}
 	if len(labels) == 0 {
 		return "No direct automatic check recorded"

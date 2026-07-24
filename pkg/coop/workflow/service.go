@@ -21,11 +21,6 @@ const (
 	automaticEvaluationAcquirePoll = 100 * time.Millisecond
 )
 
-var (
-	ErrVerificationOverrideRequired = errors.New("explicit override is required")
-	ErrVerificationOverrideChanged  = errors.New("verification evidence changed")
-)
-
 type Store interface {
 	Read(id string) (*coop.Session, error)
 	Update(id string, fn func(*coop.Session) error) (*coop.Session, error)
@@ -323,6 +318,14 @@ func (s *Service) ReportWorkAttempt(_ context.Context, sessionID string, nodeNum
 		if err := node.MarkAutomaticRefresh(attemptNumber); err != nil {
 			return err
 		}
+		// Human-owned work is ready for review as soon as the agent submits it.
+		// The observer may still be evaluating in parallel; incomplete evidence
+		// remains visible but cannot hide or delay the developer's decision.
+		if isHumanReviewNode(node) {
+			if err := session.TransitionNode(nodeNumber, coop.NodeReview); err != nil {
+				return err
+			}
+		}
 
 		node.Activity = ""
 		return nil
@@ -457,14 +460,27 @@ type AttemptRef struct {
 }
 
 // ConfirmReviewAttempts applies a human decision only to the exact attempts
-// and material evidence that were presented. An override cannot bypass a
-// failure, a pending check, or findings that changed after consent was armed.
-func (s *Service) ConfirmReviewAttempts(sessionID string, refs []AttemptRef, override *ReviewOverride) (*coop.Session, error) {
+// that were presented. A deterministic required failure cannot be bypassed.
+// Incomplete automatic coverage is retained on the immutable attempts without
+// turning confirmation into a hidden wait.
+func (s *Service) ConfirmReviewAttempts(sessionID string, refs []AttemptRef) (*coop.Session, error) {
 	return s.store.Update(sessionID, func(session *coop.Session) error {
 		if err := requireActiveSession(session); err != nil {
 			return err
 		}
-		overrideDigest := ReviewEvidenceDigest(session, refs)
+		readiness, err := ReviewAttemptsReadiness(session, refs)
+		if err != nil {
+			return err
+		}
+		if len(readiness.Blocking) > 0 {
+			return fmt.Errorf("verification failed: %s", resultFeedback(readiness.Blocking))
+		}
+
+		// Pressing confirm is itself the developer's explicit decision.
+		// Automatic evidence that is missing, pending, unavailable, or still in
+		// flight remains visible on the immutable attempt. Only the
+		// deterministic failures checked above can block this batch.
+		confirmedAt := s.now()
 		for _, ref := range refs {
 			node, err := session.NodeByNumber(ref.Node)
 			if err != nil {
@@ -473,59 +489,19 @@ func (s *Service) ConfirmReviewAttempts(sessionID string, refs []AttemptRef, ove
 			if node.State == coop.NodeDone || node.State == coop.NodeSkipped {
 				continue
 			}
-			attempt, err := node.AttemptByNumber(ref.Attempt)
-			if err != nil || node.CurrentAttempt() != attempt {
-				return fmt.Errorf("%w: node %d attempt %d", coop.ErrAttemptNotCurrent, ref.Node, ref.Attempt)
-			}
-			if node.State != coop.NodeReview {
-				return fmt.Errorf("node %d is %s, not ready for human confirmation", ref.Node, node.State)
-			}
-			if node.Type == coop.NodeUIComponent && (attempt.AppSurface == nil || attempt.AppSurface.OpenedAt == nil) {
-				return fmt.Errorf("open the app for node %d before confirming it", ref.Node)
-			}
-			if node.Type == coop.NodeUIComponent && (attempt.AutomaticResultsAt == nil || !attempt.AutomaticResultsAt.After(*attempt.AppSurface.OpenedAt)) {
-				return fmt.Errorf("automatic verification has not run since the app was opened for node %d", ref.Node)
-			}
-			if attempt.AutomaticRefreshPending {
-				return fmt.Errorf("automatic verification has not incorporated the latest attempt inputs for node %d", ref.Node)
-			}
-			if attempt.AutomaticCheckPending() {
-				return fmt.Errorf("automatic verification is still running for node %d", ref.Node)
-			}
-			if supportingEvidenceNeedsReevaluation(attempt) {
-				return fmt.Errorf("automatic verification has not incorporated the latest Stripe observation for node %d", ref.Node)
-			}
-			policy := decideResults(attempt.Results, attempt.AgentChecks, true)
-			if len(policy.failed) > 0 {
-				return fmt.Errorf("verification failed for node %d: %s", ref.Node, resultFeedback(policy.failed))
-			}
-			if len(policy.pending) > 0 {
-				return fmt.Errorf("automatic verification is still pending for node %d", ref.Node)
-			}
-			requiresOverride := policy.requiresOverride || attemptHasObservedCandidate(attempt)
-			if requiresOverride && override == nil {
-				return fmt.Errorf(
-					"%w for node %d because automatic verification is unavailable",
-					ErrVerificationOverrideRequired,
-					ref.Node,
-				)
-			}
-			if requiresOverride {
-				if override.EvidenceDigest == "" || override.EvidenceDigest != overrideDigest {
-					return fmt.Errorf(
-						"%w for node %d; review the current findings before confirming again",
-						ErrVerificationOverrideChanged,
-						ref.Node,
-					)
-				}
-				if err := node.RecordVerificationOverride(ref.Attempt, s.now(), override.Reason); err != nil {
+			if readiness.attemptIsIncomplete(ref) {
+				if err := node.RecordVerificationOverride(
+					ref.Attempt,
+					confirmedAt,
+					"Developer confirmed while automatic verification was incomplete; incomplete findings remain recorded and were not treated as passed.",
+				); err != nil {
 					return err
 				}
 			}
 			if err := session.TransitionNode(ref.Node, coop.NodeDone); err != nil {
 				return err
 			}
-			if err := node.CloseAttempt(ref.Attempt, s.now(), coop.AttemptConfirmed); err != nil {
+			if err := node.CloseAttempt(ref.Attempt, confirmedAt, coop.AttemptConfirmed); err != nil {
 				return err
 			}
 		}

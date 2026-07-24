@@ -7,6 +7,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
+	"github.com/stripe/stripe-cli/pkg/coop/workflow"
 )
 
 func (m Model) renderFooter() string {
@@ -16,13 +17,17 @@ func (m Model) renderFooter() string {
 	}
 
 	var lines []string
+	var statusLines []string
 
 	if m.agentIdle() {
 		lines = append(lines, m.theme.AttentionStyle.Render("  Waiting for agent: no recent updates. Reconnect: stripe coop status"))
 	}
 
 	if m.statusMessage != "" {
-		lines = append(lines, m.theme.AttentionStyle.Render("  "+m.statusMessage))
+		for _, line := range wrapPlainText(safeEvidenceText(m.statusMessage), max(m.width-4, 20)) {
+			statusLines = append(statusLines, m.theme.AttentionStyle.Render("  "+line))
+		}
+		lines = append(lines, statusLines...)
 	}
 
 	if m.session != nil {
@@ -62,17 +67,28 @@ func (m Model) renderFooter() string {
 				return strings.Join(result, "\n")
 			}
 		}
-
-		cardMaxHeight = budget - cardGapH - actionH
-		card = m.renderReviewCardWithMaxHeight(cardMaxHeight)
-		if card != "" {
-			return strings.Join([]string{card, "", actionLine}, "\n")
+		// Preserve the compact review card for constrained terminals when there
+		// is no result from a user action to show. An explicit status always has
+		// priority over the card so a rejected keypress can never look inert.
+		if m.statusMessage == "" {
+			cardMaxHeight = budget - cardGapH - actionH
+			card = m.renderReviewCardWithMaxHeight(cardMaxHeight)
+			if card != "" {
+				return strings.Join([]string{card, "", actionLine}, "\n")
+			}
 		}
 	}
 
 	lines = append(lines, actionLine)
 	if budget := m.footerHeightBudget(); budget > 0 && lipgloss.Height(strings.Join(lines, "\n")) > budget {
-		lines = append(lines[:max(len(lines)-2, 0)], actionLine)
+		// When the footer is crowded, retain feedback from the user's last
+		// action and the controls. Generic waiting/app/presence copy is useful
+		// context, but it must never make a successful or rejected keypress
+		// appear inert.
+		lines = append(append([]string{}, statusLines...), actionLine)
+		for len(lines) > 1 && lipgloss.Height(strings.Join(lines, "\n")) > budget {
+			lines = append(lines[:len(lines)-2], actionLine)
+		}
 	}
 
 	return strings.Join(lines, "\n")
@@ -86,6 +102,9 @@ func (m Model) renderReviewCardWithMaxHeight(maxHeight int) string {
 	target, ok := m.selectedReviewTarget()
 	if !ok {
 		return ""
+	}
+	if confirmationTarget, confirmable := m.selectedConfirmationTarget(); confirmable {
+		target = confirmationTarget
 	}
 	if maxHeight > 0 && maxHeight < 3 {
 		return ""
@@ -114,7 +133,7 @@ func (m Model) renderReviewCardWithMaxHeight(maxHeight int) string {
 	}
 	apps := m.reviewAppLabels(target.nodeNumbers)
 	for index, app := range apps {
-		action := "  (press o)"
+		action := "  (press o, optional)"
 		if len(apps) > 1 && index > 0 {
 			action = "  (select its UI node, then press o)"
 		}
@@ -124,6 +143,9 @@ func (m Model) renderReviewCardWithMaxHeight(maxHeight int) string {
 		lines = append(lines, m.theme.AttentionStyle.Render("Agent resubmitted after feedback: ")+correction)
 	}
 	lines = append(lines, m.reviewAutomaticLabels(target.nodeNumbers)...)
+	if label := m.reviewReadinessLabel(target.nodeNumbers); label != "" {
+		lines = append(lines, label)
+	}
 	if verified := m.reviewVerificationLabel(target.nodeNumbers); verified != "" {
 		lines = append(lines, m.theme.MutedStyle.Render("Agent reported: ")+verified)
 	}
@@ -349,16 +371,16 @@ func (m Model) reviewAutomaticLabels(nodeNumbers []int) []string {
 		labels = append(labels, m.theme.MutedStyle.Render("Stripe observed: ")+text)
 	}
 	if summary.directUnavailable > 0 {
-		labels = append(labels, m.theme.AttentionStyle.Render(fmt.Sprintf("Automatic check unavailable: %d", summary.directUnavailable)))
+		labels = append(labels, m.theme.MutedStyle.Render(fmt.Sprintf("Limited automatic coverage: %d unavailable", summary.directUnavailable)))
 		for index, outcome := range summary.unverifiedOutcomes {
 			if index == 2 {
-				labels = append(labels, m.theme.AttentionStyle.Render("Unverified application outcomes: open details for more"))
+				labels = append(labels, m.theme.MutedStyle.Render("Unverified application outcomes: open details for more"))
 				break
 			}
-			labels = append(labels, m.theme.AttentionStyle.Render("Unverified application outcome: "+outcome))
+			labels = append(labels, m.theme.MutedStyle.Render("Unverified application outcome: "+outcome))
 		}
 		if len(summary.unavailableDetails) > 0 {
-			labels = append(labels, m.theme.AttentionStyle.Render("Why: "+summary.unavailableDetails[0]))
+			labels = append(labels, m.theme.MutedStyle.Render("Why: "+summary.unavailableDetails[0]))
 		}
 	}
 	for index, mismatch := range summary.possibleMismatches {
@@ -369,6 +391,24 @@ func (m Model) reviewAutomaticLabels(nodeNumbers []int) []string {
 		labels = append(labels, m.theme.AttentionStyle.Render("Possible mismatch: "+mismatch))
 	}
 	return labels
+}
+
+func (m Model) reviewReadinessLabel(nodeNumbers []int) string {
+	refs, err := m.attemptRefs(nodeNumbers)
+	if err != nil {
+		return ""
+	}
+	readiness, err := workflow.ReviewAttemptsReadiness(m.session, refs)
+	if err != nil {
+		return ""
+	}
+	if len(readiness.Blocking) > 0 {
+		return m.theme.AttentionStyle.Render("Co-op found a contradiction; request agent changes before confirming.")
+	}
+	if readiness.ContainsHumanReview && readiness.Incomplete {
+		return m.theme.MutedStyle.Render("You can confirm now; incomplete checks will remain recorded as unverified.")
+	}
+	return ""
 }
 
 type automaticReviewSummary struct {

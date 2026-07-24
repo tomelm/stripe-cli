@@ -607,9 +607,6 @@ func sameTime(left, right *time.Time) bool {
 }
 
 func (s *Service) applyEvaluation(session *coop.Session, nodeNumber, attemptNumber int, basis evaluationBasis, snapshotAt time.Time, evaluation Evaluation, ignoreStale bool, applied *evaluationApply) error {
-	if err := requireActiveSession(session); err != nil {
-		return err
-	}
 	node, err := session.NodeByNumber(nodeNumber)
 	if err != nil {
 		return err
@@ -621,6 +618,9 @@ func (s *Service) applyEvaluation(session *coop.Session, nodeNumber, attemptNumb
 			return nil
 		}
 		return fmt.Errorf("%w: node %d attempt %d", coop.ErrAttemptNotCurrent, nodeNumber, attemptNumber)
+	}
+	if err := requireActiveSession(session); err != nil {
+		return err
 	}
 	if !basis.matches(session, attempt) {
 		if attempt.AutomaticCheckStartedAt == nil || !attempt.AutomaticCheckStartedAt.Equal(snapshotAt) {

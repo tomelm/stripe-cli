@@ -36,7 +36,7 @@ func TestStartWorkTransitionsNodeAndReturnsTypedNextCommand(t *testing.T) {
 	assert.Equal(t, "Scanning", node.Activity)
 }
 
-func TestReportWorkWaitsForObserverBeforeContinuingStep(t *testing.T) {
+func TestReportWorkExposesHumanReviewBeforeObserverRuns(t *testing.T) {
 	store, session := workflowTestStore(t)
 	service := newPassingWorkflowService(store)
 
@@ -45,7 +45,7 @@ func TestReportWorkWaitsForObserverBeforeContinuingStep(t *testing.T) {
 	resp, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Done"})
 	require.NoError(t, err)
 	require.True(t, resp.OK)
-	assert.Equal(t, "active", resp.State)
+	assert.Equal(t, "review", resp.State)
 	assert.Equal(t, "pending", resp.Decision)
 	assert.Contains(t, resp.Message, "attached Co-op TUI")
 	assert.Contains(t, resp.Next, "await-review")
@@ -106,13 +106,14 @@ func TestAgentWorkflowRequiresPlannerButNotEvaluator(t *testing.T) {
 	response, err = agentService.AwaitReviewAttempt(context.Background(), session.ID, 1, started.Attempt)
 	require.NoError(t, err)
 	require.True(t, response.OK)
-	assert.Equal(t, "timeout", response.State)
+	assert.Equal(t, "review", response.State)
+	assert.Contains(t, response.Next, "--node=2")
 
 	loaded, err := store.Read(session.ID)
 	require.NoError(t, err)
 	node, err := loaded.NodeByNumber(1)
 	require.NoError(t, err)
-	assert.Equal(t, coop.NodeActive, node.State)
+	assert.Equal(t, coop.NodeReview, node.State)
 	assert.NotNil(t, node.CurrentAttempt().ReportedAt)
 	assert.Empty(t, node.CurrentAttempt().Results)
 }
@@ -197,7 +198,7 @@ func TestReportCheckRejectsAlreadySubmittedAttemptWithoutMutation(t *testing.T) 
 	require.NoError(t, err)
 	node, err := loaded.NodeByNumber(1)
 	require.NoError(t, err)
-	assert.Equal(t, coop.NodeActive, node.State)
+	assert.Equal(t, coop.NodeReview, node.State)
 	assert.Empty(t, node.CurrentAttempt().AgentChecks)
 }
 
@@ -212,11 +213,67 @@ func TestConfirmAndRequestChangesUseCentralWorkflow(t *testing.T) {
 	_, err = service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
 	require.NoError(t, err)
 
-	updated, err := service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, nil)
+	updated, err := service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}})
 	require.NoError(t, err)
 	node, err := updated.NodeByNumber(1)
 	require.NoError(t, err)
 	assert.Equal(t, coop.NodeDone, node.State)
+}
+
+func TestConfirmReviewAttemptsBlocksDeterministicFailureAtomically(t *testing.T) {
+	store, session := workflowTestStore(t)
+	service := newPassingWorkflowService(store)
+	refs := make([]AttemptRef, 0, 2)
+	for nodeNumber := 1; nodeNumber <= 2; nodeNumber++ {
+		started, err := service.StartWork(session.ID, nodeNumber, "Building")
+		require.NoError(t, err)
+		_, err = service.ReportWorkAttempt(
+			context.Background(),
+			session.ID,
+			nodeNumber,
+			started.Attempt,
+			ReportWorkInput{File: "server.go", Note: "Implemented node"},
+		)
+		require.NoError(t, err)
+		refs = append(refs, AttemptRef{Node: nodeNumber, Attempt: started.Attempt})
+	}
+	now := time.Now().UTC()
+	_, err := store.Update(session.ID, func(current *coop.Session) error {
+		first, firstErr := current.NodeByNumber(1)
+		if firstErr != nil {
+			return firstErr
+		}
+		if reconcileErr := first.ReconcileAutomaticResults(refs[0].Attempt, now, []coop.CheckResult{{
+			ID: "state.pending", Kind: coop.CheckState, Importance: coop.CheckRequired,
+			Status: coop.CheckPending, UpdatedAt: now,
+		}}); reconcileErr != nil {
+			return reconcileErr
+		}
+		second, secondErr := current.NodeByNumber(2)
+		if secondErr != nil {
+			return secondErr
+		}
+		return second.ReconcileAutomaticResults(refs[1].Attempt, now, []coop.CheckResult{{
+			ID: "resource.mismatch", Kind: coop.CheckResource, Importance: coop.CheckRequired,
+			Status: coop.CheckFailed, Detail: "Observed configuration contradicts the blueprint.",
+			Repair: "Update the Stripe resource and report the corrected attempt.", UpdatedAt: now,
+		}})
+	})
+	require.NoError(t, err)
+
+	_, err = service.ConfirmReviewAttempts(session.ID, refs)
+	require.ErrorContains(t, err, "verification failed")
+
+	unchanged, err := store.Read(session.ID)
+	require.NoError(t, err)
+	for nodeNumber := 1; nodeNumber <= 2; nodeNumber++ {
+		node, nodeErr := unchanged.NodeByNumber(nodeNumber)
+		require.NoError(t, nodeErr)
+		assert.Equal(t, coop.NodeReview, node.State)
+		require.NotNil(t, node.CurrentAttempt())
+		assert.Nil(t, node.CurrentAttempt().EndedAt)
+		assert.Nil(t, node.CurrentAttempt().Override)
+	}
 }
 
 func TestConfirmReviewTreatsSkippedNodesAsTerminal(t *testing.T) {
@@ -234,7 +291,7 @@ func TestConfirmReviewTreatsSkippedNodesAsTerminal(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, response.OK)
 
-	updated, err := service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1}}, nil)
+	updated, err := service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1}})
 	require.NoError(t, err)
 	node, err := updated.NodeByNumber(1)
 	require.NoError(t, err)
@@ -536,7 +593,7 @@ func TestReviewWorkflowRejectsInactiveSessions(t *testing.T) {
 		{
 			name: "confirm review",
 			run: func(service *Service, sessionID string) error {
-				_, err := service.ConfirmReviewAttempts(sessionID, []AttemptRef{{Node: 1, Attempt: 1}}, nil)
+				_, err := service.ConfirmReviewAttempts(sessionID, []AttemptRef{{Node: 1, Attempt: 1}})
 				return err
 			},
 		},

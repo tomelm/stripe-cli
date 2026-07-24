@@ -200,7 +200,7 @@ func (m Model) collapsedStepSummary(stepIndex int) string {
 		parts = append(parts, fmt.Sprintf("✓%d", done))
 	}
 	if overridden > 0 {
-		parts = append(parts, fmt.Sprintf("!%d", overridden))
+		parts = append(parts, fmt.Sprintf("limited %d", overridden))
 	}
 	if review > 0 {
 		parts = append(parts, fmt.Sprintf("◆%d", review))
@@ -368,7 +368,7 @@ func (m Model) nodeStatusLabel(node coop.SessionNode, includedInStepReview bool)
 	switch node.State {
 	case coop.NodeDone:
 		if completedWithVerificationOverride(&node) {
-			return "Complete · human override", func(s string) string { return m.theme.AttentionStyle.Render(s) }
+			return "Complete · limited automatic coverage", func(s string) string { return m.theme.MutedStyle.Render(s) }
 		}
 		if completedWithoutAutomaticVerification(&node) {
 			if coop.AsyncHandlerCompletionSummary(&node) != "" {
@@ -406,7 +406,7 @@ func (m Model) nodeIcon(node coop.SessionNode) string {
 	switch node.State {
 	case coop.NodeDone:
 		if completedWithVerificationOverride(&node) {
-			return m.theme.AttentionStyle.Render("!")
+			return m.theme.MutedStyle.Render("•")
 		}
 		if completedWithoutAutomaticVerification(&node) {
 			return m.theme.MutedStyle.Render("•")

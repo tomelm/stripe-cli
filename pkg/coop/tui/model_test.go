@@ -227,7 +227,7 @@ func TestAppSurfaceRemainsAvailableWhileLaterNodeIsActive(t *testing.T) {
 	attempt := testPresentationAttempt(ui)
 	attempt.AppSurface = &coop.AppSurface{URL: "http://localhost:3000/checkout"}
 	m.session.Steps[0].Nodes[1].State = coop.NodeActive
-	m.selectNode(1)
+	m.selectNode(0)
 
 	selection, ok := m.selectedAppSurface()
 
@@ -235,13 +235,15 @@ func TestAppSurfaceRemainsAvailableWhileLaterNodeIsActive(t *testing.T) {
 	assert.Equal(t, 1, selection.node)
 	assert.Equal(t, "http://localhost:3000/checkout", selection.url)
 	assertContainsPlain(t, m.renderFooter(), "Ready to exercise: Checkout page")
-	assertContainsPlain(t, m.renderFooter(), "press o")
+	assertContainsPlain(t, m.renderFooter(), "press o, optional")
+	assertContainsPlain(t, m.renderFooter(), "Waiting for you: review step")
+	assertContainsPlain(t, m.renderFooter(), "c confirm")
+	assertContainsPlain(t, m.renderFooter(), "r changes")
 	assertContainsPlain(t, m.renderStepLine(m.session.Steps[0], 0, false), "App ready to exercise")
 	assertContainsPlain(t, m.renderNodeLine(*ui, 0, false, false), "Ready to exercise")
-	assertNotContainsPlain(t, m.renderFooter(), "Waiting for you: review step")
 }
 
-func TestSelectedUIReviewTargetsOnlyThatSurface(t *testing.T) {
+func TestSelectedUIOpenTargetsThatSurfaceWhileReviewCoversReadyStep(t *testing.T) {
 	m := readyModel()
 	now := time.Now().UTC()
 	m.session.Steps[0].Nodes = []coop.SessionNode{
@@ -257,10 +259,11 @@ func TestSelectedUIReviewTargetsOnlyThatSurface(t *testing.T) {
 	assert.Equal(t, "node", target.kind)
 	assert.Equal(t, []int{2}, target.nodeNumbers)
 	assertContainsPlain(t, m.renderReviewCard(), "http://localhost:3000/success")
-	assertNotContainsPlain(t, m.renderReviewCard(), "http://localhost:3000/preview")
+	assertContainsPlain(t, m.renderReviewCard(), "http://localhost:3000/preview")
+	assertContainsPlain(t, m.renderReviewCard(), "Includes: Preview, Success")
 }
 
-func TestUpdateKeyConfirmUnavailableRequiresTwoExplicitPresses(t *testing.T) {
+func TestUpdateKeyConfirmUnavailableSucceedsWithOnePress(t *testing.T) {
 	dir := t.TempDir()
 	store, err := coop.NewStoreAt(dir)
 	require.NoError(t, err)
@@ -278,7 +281,7 @@ func TestUpdateKeyConfirmUnavailableRequiresTwoExplicitPresses(t *testing.T) {
 	attempt, err := node.StartAttempt(now, "")
 	require.NoError(t, err)
 	require.NoError(t, node.ReportAttempt(attempt.Number, now, &coop.Implementation{File: "checkout.tsx"}))
-	require.NoError(t, node.SetAppSurface(attempt.Number, coop.AppSurface{URL: "http://localhost:4242/checkout", OpenedAt: &now}))
+	require.NoError(t, node.SetAppSurface(attempt.Number, coop.AppSurface{URL: "http://localhost:4242/checkout"}))
 	require.NoError(t, node.ReconcileAutomaticResults(attempt.Number, now.Add(time.Nanosecond), []coop.CheckResult{{
 		ID: "state.checkout", Kind: coop.CheckState, Importance: coop.CheckRequired,
 		Status: coop.CheckUnavailable, Detail: "Stripe read unavailable", UpdatedAt: now,
@@ -287,55 +290,16 @@ func TestUpdateKeyConfirmUnavailableRequiresTwoExplicitPresses(t *testing.T) {
 
 	result, _ := m.Update(tea.KeyPressMsg{Code: 'c', Text: "c"})
 	updated := result.(Model)
-	assert.NotEmpty(t, updated.overrideTarget)
-	assert.Contains(t, updated.statusMessage, "Press c again")
-	assert.Equal(t, coop.NodeReview, updated.session.Steps[0].Nodes[0].State)
-
-	refreshed := *updated.session
-	refreshed.Version++
-	result, _ = updated.Update(sessionUpdatedMsg{session: &refreshed})
-	updated = result.(Model)
-	assert.NotEmpty(t, updated.overrideTarget, "an unchanged material result keeps the explicit confirmation armed")
-	assert.Equal(t, coop.NodeReview, updated.session.Steps[0].Nodes[0].State)
-
-	updated.selectNode(1)
-	updated.selectNode(0)
-	assert.Empty(t, updated.overrideTarget, "navigating invalidates the override confirmation")
-
-	result, _ = updated.Update(tea.KeyPressMsg{Code: 'c', Text: "c"})
-	updated = result.(Model)
-	assert.NotEmpty(t, updated.overrideTarget)
-	assert.Equal(t, coop.NodeReview, updated.session.Steps[0].Nodes[0].State)
-
-	result, _ = updated.Update(tea.KeyPressMsg{Code: 'c', Text: "c"})
-	updated = result.(Model)
-	assert.Empty(t, updated.overrideTarget)
 	assert.Equal(t, coop.NodeDone, updated.session.Steps[0].Nodes[0].State)
+	assert.Contains(t, updated.statusMessage, "limited automatic coverage")
 	stored, err := store.Read(m.session.ID)
 	require.NoError(t, err)
 	storedAttempt := presentationAttempt(&stored.Steps[0].Nodes[0])
 	require.NotNil(t, storedAttempt)
 	require.NotNil(t, storedAttempt.Override)
-	assert.Contains(t, storedAttempt.Override.Reason, "reviewed the disclosed verification gaps")
-}
-
-func TestVerificationOverrideTargetIgnoresSamplingTimeButTracksMaterialChanges(t *testing.T) {
-	m := readyModel()
-	node := &m.session.Steps[0].Nodes[0]
-	node.State = coop.NodeReview
-	attempt := testPresentationAttempt(node)
-	attempt.Results = []coop.CheckResult{{
-		ID: "state.checkout", Kind: coop.CheckState, Importance: coop.CheckRequired,
-		Status: coop.CheckUnavailable, Detail: "Stripe read unavailable", UpdatedAt: time.Now().UTC(),
-	}}
-	refs := []workflow.AttemptRef{{Node: 1, Attempt: attempt.Number}}
-
-	original := workflow.ReviewEvidenceDigest(m.session, refs)
-	attempt.Results[0].UpdatedAt = attempt.Results[0].UpdatedAt.Add(time.Second)
-	assert.Equal(t, original, workflow.ReviewEvidenceDigest(m.session, refs))
-
-	attempt.Results[0].Detail = "Different material finding"
-	assert.NotEqual(t, original, workflow.ReviewEvidenceDigest(m.session, refs))
+	assert.Contains(t, storedAttempt.Override.Reason, "incomplete findings remain recorded")
+	require.Len(t, storedAttempt.Results, 1)
+	assert.Equal(t, coop.CheckUnavailable, storedAttempt.Results[0].Status)
 }
 
 func TestViewProgressBarReflectsSessionProgress(t *testing.T) {
@@ -650,7 +614,7 @@ func TestUpdateKeyConfirmStepReview(t *testing.T) {
 	assert.False(t, updated.userMoved)
 }
 
-func TestUpdateKeyConfirmFromNodeSelectionConfirmsOnlyThatNode(t *testing.T) {
+func TestUpdateKeyConfirmFromNodeSelectionConfirmsReadyStepAtomically(t *testing.T) {
 	dir := t.TempDir()
 	store, _ := coop.NewStoreAt(dir)
 
@@ -667,7 +631,7 @@ func TestUpdateKeyConfirmFromNodeSelectionConfirmsOnlyThatNode(t *testing.T) {
 	node1, _ := updated.session.NodeByNumber(1)
 	node2, _ := updated.session.NodeByNumber(2)
 	assert.Equal(t, coop.NodeDone, node1.State)
-	assert.Equal(t, coop.NodeReview, node2.State)
+	assert.Equal(t, coop.NodeDone, node2.State)
 }
 
 func TestSelectedReviewTargetStepRequiresReadyStep(t *testing.T) {

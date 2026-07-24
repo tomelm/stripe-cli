@@ -174,9 +174,9 @@ func (m Model) writeSummaryDetail(md *strings.Builder, node *coop.SessionNode) {
 		md.WriteString("**" + label + ":** " + safeEvidenceText(attempt.Feedback) + "\n\n")
 	}
 	if completedWithVerificationOverride(node) {
-		md.WriteString("**Verification:** Completed with a human override while required automatic verification was unavailable.\n\n")
+		md.WriteString("**Verification:** Developer confirmed with limited automatic coverage; incomplete checks were not treated as passed.\n\n")
 		if reason := strings.TrimSpace(presentationAttempt(node).Override.Reason); reason != "" {
-			md.WriteString("**Override reason:** " + safeEvidenceText(reason) + "\n\n")
+			md.WriteString("**Decision:** " + safeEvidenceText(reason) + "\n\n")
 		}
 	}
 	if completedWithoutAutomaticVerification(node) {
@@ -340,7 +340,7 @@ func stepNodeStatusLabel(node coop.SessionNode) string {
 	switch node.State {
 	case coop.NodeDone:
 		if completedWithVerificationOverride(&node) {
-			return "!"
+			return "•"
 		}
 		if completedWithoutAutomaticVerification(&node) {
 			return "•"
@@ -546,7 +546,7 @@ func (m Model) writeVerificationOverrideDetail(md *strings.Builder, node *coop.S
 		return
 	}
 	override := presentationAttempt(node).Override
-	line := "- ! " + prefix + "Human override: continued while required automatic verification was unavailable"
+	line := "- • " + prefix + "Developer confirmed with limited automatic coverage"
 	if reason := strings.TrimSpace(override.Reason); reason != "" {
 		line += " — " + safeEvidenceText(reason)
 	}

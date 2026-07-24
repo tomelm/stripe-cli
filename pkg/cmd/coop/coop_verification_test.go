@@ -325,21 +325,14 @@ func TestCheckoutVerificationEndToEndHumanAndAgentFlow(t *testing.T) {
 		}
 	}
 
-	_, err = service.ConfirmReviewAttempts(session.ID, []workflow.AttemptRef{{Node: uiNodeNumber, Attempt: ui.Attempt}}, nil)
-	require.ErrorIs(t, err, workflow.ErrVerificationOverrideRequired)
-	overrideRefs := []workflow.AttemptRef{{Node: uiNodeNumber, Attempt: ui.Attempt}}
-	overrideSession, err := store.Read(session.ID)
-	require.NoError(t, err)
-	confirmed, err := service.ConfirmReviewAttempts(
-		session.ID,
-		overrideRefs,
-		&workflow.ReviewOverride{
-			EvidenceDigest: workflow.ReviewEvidenceDigest(overrideSession, overrideRefs),
-			Reason:         "I exercised this app surface and confirmed this was my Checkout flow.",
-		},
-	)
+	reviewRefs := []workflow.AttemptRef{{Node: uiNodeNumber, Attempt: ui.Attempt}}
+	confirmed, err := service.ConfirmReviewAttempts(session.ID, reviewRefs)
 	require.NoError(t, err)
 	assert.Equal(t, coop.SessionActive, confirmed.Status, "the separate future handler remains to be implemented")
+	uiNode, err = confirmed.NodeByNumber(uiNodeNumber)
+	require.NoError(t, err)
+	require.NotNil(t, uiNode.Attempts[0].Override)
+	assert.Contains(t, uiNode.Attempts[0].Override.Reason, "automatic verification was incomplete")
 	woken, err := service.AwaitReviewAttempt(context.Background(), session.ID, uiNodeNumber, ui.Attempt)
 	require.NoError(t, err)
 	assert.Equal(t, "confirmed", woken.Decision)

@@ -81,7 +81,7 @@ func TestCoopDebugAgentRerunsRequestedChanges(t *testing.T) {
 	correctedNode, err := corrected.NodeByNumber(1)
 	require.NoError(t, err)
 	require.NotNil(t, correctedNode.CurrentAttempt())
-	_, err = service.ConfirmReviewAttempts(session.ID, []workflow.AttemptRef{{Node: 1, Attempt: correctedNode.CurrentAttempt().Number}}, nil)
+	_, err = service.ConfirmReviewAttempts(session.ID, []workflow.AttemptRef{{Node: 1, Attempt: correctedNode.CurrentAttempt().Number}})
 	require.NoError(t, err)
 
 	require.NoError(t, <-done)

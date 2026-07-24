@@ -161,8 +161,9 @@ type AppSurface struct {
 }
 
 // VerificationOverride records the developer's explicit decision to continue
-// when a required automatic check is unavailable. It is never used for a
-// deterministic failure or a still-pending check.
+// human-reviewed work with incomplete automatic coverage. Findings remain on
+// the attempt and are never rewritten as passed. A deterministic failure
+// cannot be overridden.
 type VerificationOverride struct {
 	At     time.Time `json:"at"`
 	Reason string    `json:"reason,omitempty"`

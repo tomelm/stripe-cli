@@ -1,121 +1,96 @@
 package workflow
 
 import (
-	"crypto/sha256"
-	"encoding/json"
 	"fmt"
-	"sort"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
 )
 
-// ReviewOverride is the developer's explicit decision to continue through the
-// exact unavailable evidence they reviewed. EvidenceDigest is checked again
-// inside the atomic session update so newer findings cannot inherit consent.
-type ReviewOverride struct {
-	EvidenceDigest string
-	Reason         string
+// ReviewReadiness is the one policy projection shared by the TUI and the
+// atomic confirmation write. Human UI review is intentionally tolerant of
+// incomplete automatic evidence: only a known required contradiction blocks
+// confirmation. Pending, unavailable, or in-flight checks remain recorded and
+// are never rewritten as passed.
+type ReviewReadiness struct {
+	ContainsHumanReview bool
+	Incomplete          bool
+	Blocking            []coop.CheckResult
+
+	incompleteAttempts map[AttemptRef]bool
 }
 
-type materialReviewResult struct {
-	ID         string
-	Kind       coop.CheckKind
-	Importance coop.CheckImportance
-	Status     coop.CheckStatus
-	Detail     string
-	Expected   string
-	Observed   string
-	Repair     string
-}
-
-type reviewAttemptSnapshot struct {
-	Node        int
-	Attempt     int
-	Results     []materialReviewResult
-	Resources   []coop.ResourceBinding
-	AgentChecks []coop.Verification
-	AppURL      string
-	AppOpened   bool
-}
-
-// ReviewEvidenceDigest identifies the material findings shown for a set of
-// attempts. Sampling timestamps are deliberately excluded: unchanged polling
-// must not disarm consent, while any changed finding or binding must.
-func ReviewEvidenceDigest(session *coop.Session, refs []AttemptRef) string {
+// ReviewAttemptsReadiness evaluates only persisted attempt state. It performs
+// no network reads and does not mutate the session.
+func ReviewAttemptsReadiness(session *coop.Session, refs []AttemptRef) (ReviewReadiness, error) {
+	readiness := ReviewReadiness{incompleteAttempts: make(map[AttemptRef]bool)}
 	if session == nil {
-		return ""
+		return readiness, fmt.Errorf("session is required")
 	}
-	orderedRefs := append([]AttemptRef(nil), refs...)
-	sort.Slice(orderedRefs, func(i, j int) bool {
-		if orderedRefs[i].Node != orderedRefs[j].Node {
-			return orderedRefs[i].Node < orderedRefs[j].Node
+	if len(refs) == 0 {
+		return readiness, fmt.Errorf("at least one review attempt is required")
+	}
+
+	seen := make(map[AttemptRef]bool, len(refs))
+	for _, ref := range refs {
+		if ref.Node <= 0 {
+			return readiness, fmt.Errorf("invalid review node: %d", ref.Node)
 		}
-		return orderedRefs[i].Attempt < orderedRefs[j].Attempt
-	})
+		if seen[ref] {
+			return readiness, fmt.Errorf("duplicate review attempt: node %d attempt %d", ref.Node, ref.Attempt)
+		}
+		seen[ref] = true
 
-	snapshot := struct {
-		Session  string
-		Attempts []reviewAttemptSnapshot
-	}{Session: session.ID}
-	for _, ref := range orderedRefs {
-		item := reviewAttemptSnapshot{Node: ref.Node, Attempt: ref.Attempt}
 		node, err := session.NodeByNumber(ref.Node)
-		if err == nil {
-			attempt, attemptErr := node.AttemptByNumber(ref.Attempt)
-			if attemptErr == nil {
-				item.Resources = append([]coop.ResourceBinding(nil), attempt.Resources...)
-				sort.Slice(item.Resources, func(i, j int) bool {
-					left, right := item.Resources[i], item.Resources[j]
-					if left.Role != right.Role {
-						return left.Role < right.Role
-					}
-					if left.Type != right.Type {
-						return left.Type < right.Type
-					}
-					if left.ID != right.ID {
-						return left.ID < right.ID
-					}
-					return left.Source < right.Source
-				})
-
-				item.AgentChecks = append([]coop.Verification(nil), attempt.AgentChecks...)
-				sort.Slice(item.AgentChecks, func(i, j int) bool {
-					if item.AgentChecks[i].Check != item.AgentChecks[j].Check {
-						return item.AgentChecks[i].Check < item.AgentChecks[j].Check
-					}
-					return !item.AgentChecks[i].Passed && item.AgentChecks[j].Passed
-				})
-
-				if attempt.AppSurface != nil {
-					item.AppURL = attempt.AppSurface.URL
-					item.AppOpened = attempt.AppSurface.OpenedAt != nil
-				}
-				for _, result := range attempt.Results {
-					item.Results = append(item.Results, materialReviewResult{
-						ID: result.ID, Kind: result.Kind, Importance: result.Importance, Status: result.Status,
-						Detail: result.Detail, Expected: result.Expected, Observed: result.Observed, Repair: result.Repair,
-					})
-				}
-				sort.Slice(item.Results, func(i, j int) bool {
-					left, right := item.Results[i], item.Results[j]
-					if left.Kind != right.Kind {
-						return left.Kind < right.Kind
-					}
-					if left.ID != right.ID {
-						return left.ID < right.ID
-					}
-					if left.Status != right.Status {
-						return left.Status < right.Status
-					}
-					return left.Detail < right.Detail
-				})
+		if err != nil {
+			return readiness, err
+		}
+		if node.State == coop.NodeDone || node.State == coop.NodeSkipped {
+			continue
+		}
+		if ref.Attempt <= 0 {
+			return readiness, fmt.Errorf("invalid review attempt: node %d attempt %d", ref.Node, ref.Attempt)
+		}
+		attempt, err := node.AttemptByNumber(ref.Attempt)
+		if err != nil || node.CurrentAttempt() != attempt {
+			return readiness, fmt.Errorf("%w: node %d attempt %d", coop.ErrAttemptNotCurrent, ref.Node, ref.Attempt)
+		}
+		if node.State != coop.NodeReview {
+			return readiness, fmt.Errorf("node %d is %s, not ready for human confirmation", ref.Node, node.State)
+		}
+		if isHumanReviewNode(node) {
+			readiness.ContainsHumanReview = true
+		}
+		if node.Type == coop.NodeUIComponent {
+			if attempt.AppSurface == nil || attempt.AppSurface.URL == "" {
+				return readiness, fmt.Errorf("node %d has no submitted app surface", ref.Node)
 			}
 		}
-		snapshot.Attempts = append(snapshot.Attempts, item)
+
+		policy := decideResults(attempt.Results, attempt.AgentChecks, true)
+		readiness.Blocking = append(readiness.Blocking, policy.failed...)
+
+		incomplete := len(policy.pending) > 0 ||
+			len(policy.unavailable) > 0 ||
+			attempt.AutomaticRefreshPending ||
+			attempt.AutomaticCheckPending() ||
+			supportingEvidenceNeedsReevaluation(attempt) ||
+			attemptHasObservedCandidate(attempt)
+		if node.Type == coop.NodeUIComponent {
+			incomplete = incomplete ||
+				attempt.AppSurface.OpenedAt == nil ||
+				attempt.AutomaticResultsAt == nil ||
+				(attempt.AppSurface.OpenedAt != nil &&
+					attempt.AutomaticResultsAt != nil &&
+					!attempt.AutomaticResultsAt.After(*attempt.AppSurface.OpenedAt))
+		}
+		if incomplete {
+			readiness.Incomplete = true
+			readiness.incompleteAttempts[ref] = true
+		}
 	}
-	encoded, err := json.Marshal(snapshot)
-	if err != nil {
-		return ""
-	}
-	return fmt.Sprintf("%x", sha256.Sum256(encoded))
+	return readiness, nil
+}
+
+func (readiness ReviewReadiness) attemptIsIncomplete(ref AttemptRef) bool {
+	return readiness.incompleteAttempts[ref]
 }

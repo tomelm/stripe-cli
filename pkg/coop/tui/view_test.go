@@ -604,9 +604,10 @@ func TestRenderReviewCardGroupsAutomaticAndSupportingEvidence(t *testing.T) {
 	assertContainsPlain(t, card, "http://localhost:4242/checkout")
 	assertContainsPlain(t, card, "Co-op checked:")
 	assertContainsPlain(t, card, "Stripe observed:")
-	assertContainsPlain(t, card, "Automatic check unavailable:")
+	assertContainsPlain(t, card, "Limited automatic coverage:")
 	assertContainsPlain(t, card, "Unverified application outcome:")
 	assertContainsPlain(t, card, "Gate protected application data")
+	assertContainsPlain(t, card, "You can confirm now")
 }
 
 func TestRenderReviewCardFallsBackToBlueprintConfirmation(t *testing.T) {
@@ -782,7 +783,7 @@ func TestCompletedUnavailableOutlineIsNonActionableAndWordSafe(t *testing.T) {
 	assert.Contains(t, detail.String(), "Unavailable checks were not treated as passed")
 }
 
-func TestCompletionVerificationReportDisclosesCoverageGapAndOverride(t *testing.T) {
+func TestCompletionVerificationReportDisclosesLimitedCoverage(t *testing.T) {
 	m := withCompletionSuggestions(testModel())
 	for stepIndex := range m.session.Steps {
 		for nodeIndex := range m.session.Steps[stepIndex].Nodes {
@@ -802,7 +803,7 @@ func TestCompletionVerificationReportDisclosesCoverageGapAndOverride(t *testing.
 	report := m.renderCompletionBody()
 	plain := strings.Join(strings.Fields(ansi.Strip(report)), " ")
 
-	assert.Contains(t, plain, "Create product — Co-op checked · You reviewed · Coverage gap · Human override recorded")
+	assert.Contains(t, plain, "Create product — Co-op checked · You reviewed · Coverage gap · Limited coverage recorded")
 	assert.Contains(t, plain, "application persistence, access control, and webhook")
 }
 
@@ -837,7 +838,7 @@ func TestAsyncHandlerCompletionDisclosesStateWithoutClaimingProcessing(t *testin
 	assertNotContainsPlain(t, completion, "Agent reported; no direct automatic check")
 }
 
-func TestOutlineAndDetailDiscloseHumanVerificationOverride(t *testing.T) {
+func TestOutlineAndDetailDiscloseLimitedAutomaticCoverage(t *testing.T) {
 	m := testModel()
 	node := &m.session.Steps[0].Nodes[0]
 	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
@@ -854,23 +855,24 @@ func TestOutlineAndDetailDiscloseHumanVerificationOverride(t *testing.T) {
 	}}
 
 	line := m.renderNodeLine(*node, 0, false, false)
-	assertContainsPlain(t, line, "!")
-	assertContainsPlain(t, line, "Complete · human override")
-	assert.Equal(t, "!", stepNodeStatusLabel(*node))
+	assertContainsPlain(t, line, "•")
+	assertContainsPlain(t, line, "Complete · limited automatic coverage")
+	assert.Equal(t, "•", stepNodeStatusLabel(*node))
 
 	m.collapseStep(0)
-	assertContainsPlain(t, m.collapsedStepSummary(0), "!1")
+	assertContainsPlain(t, m.collapsedStepSummary(0), "limited 1")
 	m.expandStep(0)
 	m.selectNode(0)
 	m.expanded = true
 	m.detailTab = 0
-	assertContainsPlain(t, m.renderDetail(), "Completed with a human override")
+	assertContainsPlain(t, m.renderDetail(), "Developer confirmed with limited automatic coverage")
+	assertContainsPlain(t, m.renderDetail(), "incomplete checks were not treated as passed")
 	assertContainsPlain(t, m.renderDetail(), "Developer reviewed the disclosed verification gaps")
 
 	m.detailTab = 2
-	assertContainsPlain(t, m.renderDetail(), "Human override: continued while required automatic")
-	assertContainsPlain(t, m.renderDetail(), "unavailable — Developer reviewed")
-	assertContainsPlain(t, m.renderDetail(), "Developer reviewed the disclosed verification gaps")
+	checks := strings.Join(strings.Fields(strings.ReplaceAll(ansi.Strip(m.renderDetail()), "│", " ")), " ")
+	assert.Contains(t, checks, "Developer confirmed with limited automatic coverage")
+	assert.Contains(t, checks, "Developer reviewed the disclosed verification gaps")
 }
 
 func TestCompletionSummaryBoxUsesSinglePaddingSpace(t *testing.T) {
@@ -1160,6 +1162,31 @@ func TestReviewCardShowsDetailsHintWhenClipped(t *testing.T) {
 	assert.LessOrEqual(t, lipgloss.Height(footer), m.footerHeightBudget())
 	assertLinesWithinWidth(t, footer, m.width)
 	assertContainsPlain(t, footer, "more checks available")
+}
+
+func TestRenderFooterPreservesActionStatusWhenReviewCardIsClipped(t *testing.T) {
+	m := testModel()
+	m.ready = true
+	m.width = 56
+	m.height = 12
+	m.viewport = viewport.New(viewport.WithWidth(56), viewport.WithHeight(10))
+	node := &m.session.Steps[0].Nodes[0]
+	node.Type = coop.NodeUIComponent
+	node.State = coop.NodeReview
+	m.session.Steps[0].Nodes[1].State = coop.NodeActive
+	node.ReviewPrompt = "Exercise every part of this intentionally long local Checkout flow before making a decision."
+	attempt := testPresentationAttempt(node)
+	attempt.AppSurface = &coop.AppSurface{URL: "http://localhost:3000/checkout"}
+	m.selectionCursor = 0
+	m.statusMessage = "Confirmation could not be recorded because the session changed."
+
+	footer := m.renderFooter()
+	plain := strings.Join(strings.Fields(strings.ReplaceAll(ansi.Strip(footer), "│", " ")), " ")
+
+	assert.LessOrEqual(t, lipgloss.Height(footer), m.footerHeightBudget())
+	assertLinesWithinWidth(t, footer, m.width)
+	assert.Contains(t, plain, "Confirmation could not be recorded because the session changed.")
+	assert.Contains(t, plain, "c confirm")
 }
 
 func TestReviewCardFitsCoopStartSplitWidth(t *testing.T) {
