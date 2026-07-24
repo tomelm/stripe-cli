@@ -154,7 +154,7 @@ func replaceSessionFile(tmpPath, path string) error {
 
 func (s *Store) acquireSessionLock(path string) (func(), error) {
 	lockPath := path + ".lock"
-	deadline := time.Now().Add(sessionLockTimeout)
+	wait := sessionLockWait{deadline: time.Now().Add(sessionLockTimeout)}
 
 	for {
 		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
@@ -176,11 +176,41 @@ func (s *Store) acquireSessionLock(path string) (func(), error) {
 			continue
 		}
 
-		if time.Now().After(deadline) {
+		if wait.timedOut(time.Now(), sessionLockFingerprintFor(lockPath), sessionLockTimeout) {
 			return nil, fmt.Errorf("%w: %s is still present; if no stripe coop command is running, remove this lock file and retry", ErrLockTimeout, lockPath)
 		}
 		time.Sleep(sessionLockPollInterval)
 	}
+}
+
+type sessionLockFingerprint struct {
+	pid     int
+	created int64
+}
+
+type sessionLockWait struct {
+	deadline    time.Time
+	fingerprint sessionLockFingerprint
+}
+
+// timedOut treats a new owner/creation pair as progress, so sustained active
+// handoffs may wait longer than one unchanged lock generation.
+func (wait *sessionLockWait) timedOut(now time.Time, fingerprint sessionLockFingerprint, timeout time.Duration) bool {
+	if fingerprint != (sessionLockFingerprint{}) && fingerprint != wait.fingerprint {
+		if wait.fingerprint != (sessionLockFingerprint{}) {
+			wait.deadline = now.Add(timeout)
+		}
+		wait.fingerprint = fingerprint
+	}
+	return now.After(wait.deadline)
+}
+
+func sessionLockFingerprintFor(lockPath string) sessionLockFingerprint {
+	pid, created, ok := readLock(lockPath)
+	if !ok || created.IsZero() {
+		return sessionLockFingerprint{}
+	}
+	return sessionLockFingerprint{pid: pid, created: created.UnixNano()}
 }
 
 // lockAbandoned reports whether a lock file can be safely reclaimed. The lock

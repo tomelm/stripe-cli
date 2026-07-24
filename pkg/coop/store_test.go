@@ -555,6 +555,52 @@ func TestStoreWriteLockTimeoutIncludesRecoveryHint(t *testing.T) {
 	assert.Contains(t, err.Error(), "remove this lock file")
 }
 
+func TestSessionLockWaitAllowsActiveOwnerHandoffs(t *testing.T) {
+	start := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	timeout := 5 * time.Second
+	wait := sessionLockWait{deadline: start.Add(timeout)}
+	lockPath := filepath.Join(t.TempDir(), "handoff.lock")
+	fingerprint := func(pid int, created time.Time) sessionLockFingerprint {
+		writeLockFile(t, lockPath, pid, created, created)
+		return sessionLockFingerprintFor(lockPath)
+	}
+	first := fingerprint(101, start)
+	second := fingerprint(101, start.Add(time.Second))
+	third := fingerprint(202, start.Add(2*time.Second))
+
+	assert.False(t, wait.timedOut(start, first, timeout))
+	assert.False(t, wait.timedOut(start.Add(4*time.Second), first, timeout))
+	assert.False(t, wait.timedOut(start.Add(4500*time.Millisecond), second, timeout),
+		"a new creation by the same process is genuine lock progress")
+	assert.False(t, wait.timedOut(start.Add(8*time.Second), second, timeout))
+	assert.False(t, wait.timedOut(start.Add(9*time.Second), third, timeout),
+		"a handoff must keep a starved waiter alive beyond its original deadline")
+	assert.False(t, wait.timedOut(start.Add(14*time.Second), third, timeout))
+	assert.True(t, wait.timedOut(start.Add(14*time.Second+time.Nanosecond), third, timeout),
+		"the newest owner still times out after making no further progress")
+}
+
+func TestSessionLockWaitTimesOutWithoutOwnerHandoff(t *testing.T) {
+	start := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	timeout := 5 * time.Second
+	fingerprint := sessionLockFingerprint{pid: 101, created: 1}
+
+	t.Run("unchanged owner", func(t *testing.T) {
+		wait := sessionLockWait{deadline: start.Add(timeout)}
+		assert.False(t, wait.timedOut(start, fingerprint, timeout))
+		assert.False(t, wait.timedOut(start.Add(timeout), fingerprint, timeout))
+		assert.True(t, wait.timedOut(start.Add(timeout+time.Nanosecond), fingerprint, timeout))
+	})
+
+	t.Run("unreadable owner", func(t *testing.T) {
+		wait := sessionLockWait{deadline: start.Add(timeout)}
+		assert.False(t, wait.timedOut(start, sessionLockFingerprint{}, timeout))
+		assert.False(t, wait.timedOut(start.Add(4*time.Second), fingerprint, timeout))
+		assert.True(t, wait.timedOut(start.Add(timeout+time.Nanosecond), fingerprint, timeout),
+			"an invalid read followed by the first fingerprint must not manufacture progress")
+	})
+}
+
 func TestStoreListIgnoresTmpFiles(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewStoreAt(dir)
