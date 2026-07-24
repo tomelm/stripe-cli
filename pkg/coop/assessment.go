@@ -67,13 +67,9 @@ func AssessAttempts(attempts ...*NodeAttempt) AttemptAssessment {
 					assessment.DirectPending++
 				case CheckUnavailable:
 					assessment.DirectUnavailable = append(assessment.DirectUnavailable, result)
-					if result.Importance == CheckAdvisory {
-						assessment.AdvisoryDirectIssues = append(assessment.AdvisoryDirectIssues, result)
-					}
+					assessment.addAdvisoryDirectIssue(result)
 				case CheckFailed:
-					if result.Importance == CheckAdvisory {
-						assessment.AdvisoryDirectIssues = append(assessment.AdvisoryDirectIssues, result)
-					}
+					assessment.addAdvisoryDirectIssue(result)
 				}
 			case CheckCoverage:
 				if result.Status == CheckUnavailable {
@@ -113,4 +109,10 @@ func AssessAttempts(attempts ...*NodeAttempt) AttemptAssessment {
 		}
 	}
 	return assessment
+}
+
+func (assessment *AttemptAssessment) addAdvisoryDirectIssue(result CheckResult) {
+	if result.Importance == CheckAdvisory {
+		assessment.AdvisoryDirectIssues = append(assessment.AdvisoryDirectIssues, result)
+	}
 }
