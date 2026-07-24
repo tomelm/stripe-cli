@@ -219,6 +219,17 @@ type NodeDefinition struct {
 	RequiredOutcomes []RequiredOutcome   `json:"required_outcomes,omitempty"`
 }
 
+// NodeContract is the bounded, static work specification returned when an
+// agent starts one node. It keeps the protocol incremental without hiding the
+// source blueprint fields needed to implement non-API work.
+type NodeContract struct {
+	NodeDefinition
+	Number    int    `json:"number"`
+	StepKey   string `json:"step_key"`
+	StepTitle string `json:"step_title"`
+	Skippable bool   `json:"skippable"`
+}
+
 // StepDefinition is the source-derived static definition for a step.
 type StepDefinition struct {
 	Key   string `json:"key"`
@@ -299,6 +310,7 @@ type CommandResponse struct {
 	AgentPrompt      string                `json:"agent_prompt,omitempty"`
 	APIRequest       *APIRequest           `json:"api_request,omitempty"`
 	SDKExample       string                `json:"sdk_example,omitempty"`
+	NodeContract     *NodeContract         `json:"node_contract,omitempty"`
 	ResourceRoles    []ResourceRequirement `json:"stripe_resource_roles,omitempty"`
 	Verification     []CheckResult         `json:"verification_results,omitempty"`
 	LifecycleFacts   []LifecycleFact       `json:"lifecycle_facts,omitempty"`

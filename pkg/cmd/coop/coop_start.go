@@ -1,7 +1,6 @@
 package coopcmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 
@@ -136,23 +135,25 @@ func (rc *coopRunCmd) buildAgentPromptForSession(session *coop.Session) (string,
 	if err != nil {
 		return "", err
 	}
-	resp := newCoopAgentRunResponse(bp, session)
-	data, err := json.MarshalIndent(resp, "", "  ")
-	if err != nil {
-		return "", err
-	}
 
-	return fmt.Sprintf(`You are running a Stripe co-op integration session.
+	return fmt.Sprintf(`You are running Stripe Co-op session %s for %q.
 
 A developer is watching your progress in a live terminal UI (the other pane).
 
-The session is already created. Use this structured start response as the protocol source of truth:
+Run this command exactly:
 
 %s
 
-Start by running the "next" command exactly as written. Then follow agent_instructions and continue using the JSON responses from the typed co-op agent commands.
+Treat each typed Co-op JSON response as the source of truth for the current action:
+- Run an executable "next" command unchanged.
+- For "next_template", fill every "required_inputs" value; never submit placeholders literally.
+- Save the attempt number from start-work and include it in later mutations for that work.
+- Treat node_contract, lifecycle_facts, and required_outcomes as the current work contract.
+- Follow needs_agent findings directly. Run await-review or next-action as the sole foreground waiter when instructed.
 
-Important: Run "stripe whoami" first to check auth. If not logged in OR if it shows "Test mode key: not available", run "stripe sandbox create --from-git" to provision a sandbox. The claim URL will appear automatically in the TUI.`, string(data)), nil
+Before making Stripe API calls, run "stripe whoami". If it is not authenticated or says "Test mode key: not available", run "stripe sandbox create --from-git"; its claim URL appears in the TUI.
+
+Write and run working code. When asked for an app URL, keep that app running for the developer to review.`, session.ID, bp.Title, initialStartWorkCommand(session)), nil
 }
 
 func (rc *coopRunCmd) startSessionQuietly(blueprintID string) (*coop.Session, error) {

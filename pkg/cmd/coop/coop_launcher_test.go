@@ -3,7 +3,9 @@ package coopcmd
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"charm.land/huh/v2"
@@ -50,16 +52,27 @@ func TestExplicitBlueprintPromptIncludesSessionProtocol(t *testing.T) {
 	rc := &coopRunCmd{language: "node"}
 	session, err := rc.startSessionQuietly("one-time-payment")
 	require.NoError(t, err)
+	bp, err := coop.LoadBlueprint(session.Blueprint)
+	require.NoError(t, err)
 
 	prompt, err := rc.buildAgentPromptForSession(session)
 	require.NoError(t, err)
 
 	assert.Contains(t, prompt, session.ID)
-	assert.Contains(t, prompt, `"agent_instructions"`)
-	assert.Contains(t, prompt, `"nodes"`)
-	assert.Contains(t, prompt, `"next": "stripe coop agent start-work --session=`+session.ID+` --node=1`)
-	assert.Contains(t, prompt, "Understand the project")
-	assert.Contains(t, prompt, "Start by running the \"next\" command exactly as written")
+	assert.Contains(t, prompt, bp.Title)
+	assert.Contains(t, prompt, initialStartWorkCommand(session))
+	assert.Contains(t, prompt, `"next_template"`)
+	assert.Contains(t, prompt, `"required_inputs"`)
+	assert.Contains(t, prompt, "node_contract")
+	assert.Contains(t, prompt, "lifecycle_facts")
+	assert.Contains(t, prompt, "required_outcomes")
+	assert.Contains(t, prompt, "sole foreground waiter")
+	assert.Contains(t, prompt, `Before making Stripe API calls, run "stripe whoami"`)
+	assert.NotContains(t, prompt, `"agent_instructions"`)
+	assert.NotContains(t, prompt, `"nodes"`)
+	assert.NotContains(t, prompt, `"verification_coverage"`)
+	assert.NotContains(t, prompt, "Create Checkout Session")
+	assert.Less(t, len(prompt), 2_000)
 }
 
 func TestPromptAutoApproveReturnsPromptErrors(t *testing.T) {
@@ -260,4 +273,46 @@ func TestAgentPaneCommandShellQuotesLauncherPath(t *testing.T) {
 	// The pane command must be exactly the single-quoted launcher path, so
 	// `bash -c` executes the launcher instead of parsing the path.
 	assert.Equal(t, shellQuote(matches[0]), paneCmd)
+}
+
+func TestAgentLauncherPreservesFailureDiagnostics(t *testing.T) {
+	falsePath, err := exec.LookPath("false")
+	require.NoError(t, err)
+
+	promptPath := filepath.Join(t.TempDir(), "prompt.txt")
+	require.NoError(t, os.WriteFile(promptPath, []byte("test prompt"), 0o600))
+
+	rc := &coopRunCmd{}
+	launcherPath, err := rc.buildAgentCmd(&agentInfo{name: "custom", path: falsePath}, promptPath, false)
+	require.NoError(t, err)
+
+	cmd := exec.Command("bash", launcherPath)
+	cmd.Stdin = strings.NewReader("\n")
+	cmd.Env = append(os.Environ(), "SHELLOPTS=errexit")
+	output, err := cmd.CombinedOutput()
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, err, &exitErr)
+	assert.Equal(t, 1, exitErr.ExitCode())
+	assert.Contains(t, string(output), "Agent exited with status 1.")
+	assert.Contains(t, string(output), "Press Enter to close this pane.")
+}
+
+func TestAgentLauncherPreservesSuccessfulTmuxExit(t *testing.T) {
+	truePath, err := exec.LookPath("true")
+	require.NoError(t, err)
+
+	promptPath := filepath.Join(t.TempDir(), "prompt.txt")
+	require.NoError(t, os.WriteFile(promptPath, []byte("test prompt"), 0o600))
+
+	rc := &coopRunCmd{}
+	launcherPath, err := rc.buildAgentCmd(&agentInfo{name: "custom", path: truePath}, promptPath, false)
+	require.NoError(t, err)
+
+	cmd := exec.Command("bash", launcherPath)
+	cmd.Stdin = strings.NewReader("\n")
+	cmd.Env = append(os.Environ(), "TMUX=test")
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err)
+	assert.Contains(t, string(output), "Agent exited with status 0.")
+	assert.Contains(t, string(output), "Press Enter to close this pane.")
 }

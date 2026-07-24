@@ -159,9 +159,19 @@ func (s *Service) StartWork(sessionID string, nodeNumber int, note string) (coop
 	if err := requireActiveSession(frozen); err != nil {
 		return errorResponse(err, "stripe coop status"), nil
 	}
-	frozenNode, err := frozen.NodeByNumber(nodeNumber)
+	frozenStep, _, frozenNodeIndex, err := frozen.StepByNodeNumber(nodeNumber)
 	if err != nil {
 		return errorResponse(err, "stripe coop status"), nil
+	}
+	frozenNode := &frozenStep.Nodes[frozenNodeIndex]
+	definition := frozenNode.NodeDefinition
+	definition.RequiredOutcomes = coop.RequiredOutcomesForNode(frozenNode)
+	nodeContract := &coop.NodeContract{
+		NodeDefinition: definition,
+		Number:         nodeNumber,
+		StepKey:        frozenStep.Key,
+		StepTitle:      frozenStep.Title,
+		Skippable:      frozenStep.Skippable,
 	}
 	roles, requirementErr := s.requirements(frozen, nodeNumber)
 	if requirementErr != nil {
@@ -214,6 +224,7 @@ func (s *Service) StartWork(sessionID string, nodeNumber int, note string) (coop
 		Message:          fmt.Sprintf("Started attempt %d: %s", attemptNumber, node.Title),
 		NextTemplate:     nextTemplate,
 		RequiredInputs:   requiredInputs,
+		NodeContract:     nodeContract,
 		ResourceRoles:    roles,
 		LifecycleFacts:   coop.LifecycleFactsForNode(session, node),
 		RequiredOutcomes: coop.RequiredOutcomesForNode(node),

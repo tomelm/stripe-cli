@@ -120,29 +120,35 @@ func (rc *coopRunCmd) promptAutoApprove(agent *agentInfo) (bool, error) {
 
 func (rc *coopRunCmd) buildAgentCmd(agent *agentInfo, promptPath string, autoApprove bool) (string, error) {
 	launcherPath := promptPath + ".sh"
-	var script string
+	flags := ""
 
 	switch agent.name {
 	case "claude":
-		flags := ""
 		if autoApprove {
 			flags = " --dangerously-skip-permissions"
 		}
-		script = fmt.Sprintf("#!/bin/bash\nprompt=$(cat %s)\nrm -f %s %s\nexec %s%s \"$prompt\"\n",
-			shellQuote(promptPath), shellQuote(promptPath), shellQuote(launcherPath), shellQuote(agent.path), flags)
 
 	case "codex":
-		flags := ""
 		if autoApprove {
 			flags = " --dangerously-bypass-approvals-and-sandbox"
 		}
-		script = fmt.Sprintf("#!/bin/bash\nprompt=$(cat %s)\nrm -f %s %s\nexec %s%s \"$prompt\"\n",
-			shellQuote(promptPath), shellQuote(promptPath), shellQuote(launcherPath), shellQuote(agent.path), flags)
-
-	default:
-		script = fmt.Sprintf("#!/bin/bash\nprompt=$(cat %s)\nrm -f %s %s\nexec %s \"$prompt\"\n",
-			shellQuote(promptPath), shellQuote(promptPath), shellQuote(launcherPath), shellQuote(agent.path))
 	}
+
+	script := fmt.Sprintf(`#!/bin/bash
+prompt=$(cat %s)
+rm -f %s %s
+if %s%s "$prompt"; then
+  status=0
+else
+  status=$?
+fi
+if [[ -n "${TMUX:-}" || $status -ne 0 ]]; then
+  printf '\nAgent exited with status %%s.\n' "$status"
+  printf 'Press Enter to close this pane.\n'
+  IFS= read -r _
+fi
+exit "$status"
+`, shellQuote(promptPath), shellQuote(promptPath), shellQuote(launcherPath), shellQuote(agent.path), flags)
 
 	if err := os.WriteFile(launcherPath, []byte(script), 0700); err != nil {
 		return "", fmt.Errorf("creating agent launcher: %w", err)

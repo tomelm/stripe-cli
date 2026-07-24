@@ -92,14 +92,14 @@ func newCoopAgentGuidedActionResponse(action *coop.GuidedAction, session *coop.S
 }
 
 func newCoopAgentSessionResponse(title string, session *coop.Session, instructions string) coopAgentRunResponse {
-	var nodes []nodeBrief
+	var nodes []coop.NodeContract
 	nodeNumber := 0
 	for _, step := range session.Steps {
 		for _, n := range step.Nodes {
 			nodeNumber++
 			definition := n.NodeDefinition
 			definition.RequiredOutcomes = coop.RequiredOutcomesForNode(&n)
-			nodes = append(nodes, nodeBrief{
+			nodes = append(nodes, coop.NodeContract{
 				NodeDefinition: definition,
 				Number:         nodeNumber,
 				StepKey:        step.Key,
@@ -116,13 +116,17 @@ func newCoopAgentSessionResponse(title string, session *coop.Session, instructio
 			Node:           1,
 			State:          "created",
 			Message:        fmt.Sprintf("Session started: %s (%d nodes)", title, session.TotalNodes()),
-			Next:           fmt.Sprintf("stripe coop agent start-work --session=%s --node=1 --note=%s", session.ID, quoteArg("Beginning: "+session.Steps[0].Nodes[0].Title)),
+			Next:           initialStartWorkCommand(session),
 			LifecycleFacts: append([]coop.LifecycleFact(nil), session.LifecycleFacts...),
 		},
 		AgentInstructions: instructions,
 		Nodes:             nodes,
 	}
 	return resp
+}
+
+func initialStartWorkCommand(session *coop.Session) string {
+	return fmt.Sprintf("stripe coop agent start-work --session=%s --node=1 --note=%s", session.ID, quoteArg("Beginning: "+session.Steps[0].Nodes[0].Title))
 }
 
 func newCoopSession(bp *coop.Blueprint, sessionID, language string, rawSettings, rawParams []string, parentSession, parentStep string) (*coop.Session, error) {
@@ -165,7 +169,7 @@ func mergeKeyValues(dst map[string]string, flag string, values []string) error {
 type coopAgentRunResponse struct {
 	coop.CommandResponse
 	AgentInstructions    string                       `json:"agent_instructions"`
-	Nodes                []nodeBrief                  `json:"nodes"`
+	Nodes                []coop.NodeContract          `json:"nodes"`
 	VerificationCoverage *verificationCoverageSummary `json:"verification_coverage,omitempty"`
 }
 
@@ -244,14 +248,6 @@ func verificationCoverageForSession(session *coop.Session) verificationCoverageS
 		summary.AppSurfaces,
 	)
 	return summary
-}
-
-type nodeBrief struct {
-	coop.NodeDefinition
-	Number    int    `json:"number"`
-	StepKey   string `json:"step_key"`
-	StepTitle string `json:"step_title"`
-	Skippable bool   `json:"skippable"`
 }
 
 func agentInstructions(bp *coop.Blueprint, session *coop.Session) string {

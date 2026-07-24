@@ -39,6 +39,102 @@ func TestVerificationAcceptanceStartReturnsAttemptRolesAndReportTemplate(t *test
 	assert.Equal(t, []string{"note", "stripe-resource:customer"}, response.RequiredInputs)
 }
 
+func TestVerificationAcceptanceStartReturnsCurrentNodeContract(t *testing.T) {
+	tests := []struct {
+		name      string
+		nodeType  coop.NodeType
+		configure func(*coop.NodeDefinition)
+		check     func(*testing.T, *coop.NodeContract)
+	}{
+		{
+			name:     "api request",
+			nodeType: coop.NodeAPIRequest,
+			configure: func(node *coop.NodeDefinition) {
+				node.Request = &coop.APIRequest{Method: "POST", Path: "/v1/checkout/sessions"}
+			},
+			check: func(t *testing.T, contract *coop.NodeContract) {
+				require.NotNil(t, contract.Request)
+				assert.Equal(t, "/v1/checkout/sessions", contract.Request.Path)
+			},
+		},
+		{
+			name:     "async handler",
+			nodeType: coop.NodeAsyncHandler,
+			configure: func(node *coop.NodeDefinition) {
+				node.Events = []string{"checkout.session.completed"}
+			},
+			check: func(t *testing.T, contract *coop.NodeContract) {
+				assert.Equal(t, []string{"checkout.session.completed"}, contract.Events)
+			},
+		},
+		{
+			name:     "ui component",
+			nodeType: coop.NodeUIComponent,
+			configure: func(node *coop.NodeDefinition) {
+				node.ReviewPrompt = "Open the app and exercise checkout."
+			},
+			check: func(t *testing.T, contract *coop.NodeContract) {
+				assert.Equal(t, "Open the app and exercise checkout.", contract.ReviewPrompt)
+			},
+		},
+		{
+			name:     "cli command",
+			nodeType: coop.NodeCLICommand,
+			configure: func(node *coop.NodeDefinition) {
+				node.ReviewCommand = "stripe products retrieve prod_test"
+			},
+			check: func(t *testing.T, contract *coop.NodeContract) {
+				assert.Equal(t, "stripe products retrieve prod_test", contract.ReviewCommand)
+			},
+		},
+		{
+			name:     "test helper",
+			nodeType: coop.NodeTestHelper,
+			configure: func(node *coop.NodeDefinition) {
+				node.TestRequests = []coop.TestHelperRequest{{
+					Key:        "expire",
+					APIRequest: coop.APIRequest{Method: "POST", Path: "/v1/test_helpers/checkout/sessions/{id}/expire"},
+				}}
+			},
+			check: func(t *testing.T, contract *coop.NodeContract) {
+				require.Len(t, contract.TestRequests, 1)
+				assert.Equal(t, "expire", contract.TestRequests[0].Key)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store, session := newVerificationAcceptanceStore(t, tt.nodeType)
+			_, err := store.Update(session.ID, func(session *coop.Session) error {
+				step := &session.Steps[0]
+				step.Skippable = true
+				node := &step.Nodes[0]
+				node.Description = "Implement the current blueprint node."
+				tt.configure(&node.NodeDefinition)
+				return nil
+			})
+			require.NoError(t, err)
+
+			service := newVerificationAcceptanceService(store, &acceptanceEvaluator{}, newAcceptanceClock())
+			service.fetchSnippet = func(string, string, interface{}, string) (string, error) {
+				return "sdk example", nil
+			}
+			response, err := service.StartWork(session.ID, 1, "Starting current work")
+			require.NoError(t, err)
+			require.True(t, response.OK)
+			require.NotNil(t, response.NodeContract)
+			assert.Equal(t, 1, response.NodeContract.Number)
+			assert.Equal(t, "checkout", response.NodeContract.StepKey)
+			assert.Equal(t, "Checkout", response.NodeContract.StepTitle)
+			assert.True(t, response.NodeContract.Skippable)
+			assert.Equal(t, tt.nodeType, response.NodeContract.Type)
+			assert.Equal(t, "Implement the current blueprint node.", response.NodeContract.Description)
+			tt.check(t, response.NodeContract)
+		})
+	}
+}
+
 func TestVerificationAcceptanceRequiredPassAutoCompletesNonUI(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeCLICommand)
 	evaluator := &acceptanceEvaluator{
