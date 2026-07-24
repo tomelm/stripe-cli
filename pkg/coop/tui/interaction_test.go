@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -156,6 +158,29 @@ func TestRequestChangesEditorCancellationDiscardsFeedback(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, node.Attempts, initialAttemptCount)
 	assert.Empty(t, node.RejectionNote)
+}
+
+func TestRequestChangesEditorPreservesFeedbackAfterStoreError(t *testing.T) {
+	dir := t.TempDir()
+	store, err := coop.NewStoreAt(dir)
+	require.NoError(t, err)
+	m := reviewStepLongPromptLayoutModel()
+	require.NoError(t, store.Write(m.session))
+	m.store = store
+	m = prepareInteractiveModel(m, 69, 50)
+
+	m = updateWithRunes(t, m, "r")
+	note := "Keep this feedback available so I can retry after fixing the store."
+	m = updateWithRunes(t, m, note)
+	require.NoError(t, os.Remove(filepath.Join(dir, m.session.ID+".json")))
+
+	m = updateWithModifiedKey(t, m, tea.KeyEnter, tea.ModCtrl)
+
+	assert.True(t, m.rejecting)
+	assert.Equal(t, note, m.rejectionInput.Value())
+	assert.Contains(t, m.rejectionError, "Could not send feedback")
+	assert.NoError(t, m.err)
+	assertContainsPlain(t, m.View().Content, "Keep this feedback available")
 }
 
 func TestFollowInteractionJourney(t *testing.T) {

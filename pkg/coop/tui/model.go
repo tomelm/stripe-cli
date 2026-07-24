@@ -251,7 +251,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncViewport()
 		return m, nil
 	}
-
 	return m.updateRejectionInputIfActive(msg)
 }
 
@@ -999,7 +998,9 @@ func (m *Model) handleReject(note string) {
 	target := m.rejectTarget
 	refs, err := m.attemptRefs(target.nodeNumbers)
 	if err != nil {
-		m.rejectionError = err.Error()
+		m.rejectionError = fmt.Sprintf("Could not send feedback: %v", err)
+		m.resizeViewport()
+		m.syncViewport()
 		return
 	}
 	session, err := workflow.NewService(m.store).RequestChangesAttempts(m.session.ID, refs, note)
