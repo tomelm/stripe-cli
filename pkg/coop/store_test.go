@@ -553,6 +553,38 @@ func TestStoreWriteLockTimeoutIncludesRecoveryHint(t *testing.T) {
 	require.ErrorIs(t, err, ErrLockTimeout)
 	assert.Contains(t, err.Error(), lockPath)
 	assert.Contains(t, err.Error(), "remove this lock file")
+
+	require.NoError(t, os.Remove(lockPath))
+	require.NoError(t, store.Write(&Session{ID: "locked", Status: SessionActive}),
+		"a file-lock error must release the in-process lock")
+}
+
+func TestProcessSessionLockIsBoundedAndPathSpecific(t *testing.T) {
+	dir := t.TempDir()
+	firstPath := filepath.Join(dir, "first.lock")
+	secondPath := filepath.Join(dir, "second.lock")
+
+	unlockFirst, err := acquireProcessSessionLock(firstPath, time.Second)
+	require.NoError(t, err)
+
+	unlockSecond, err := acquireProcessSessionLock(secondPath, time.Second)
+	require.NoError(t, err, "an unrelated lock path must remain available")
+	unlockSecond()
+
+	_, err = acquireProcessSessionLock(firstPath, 10*time.Millisecond)
+	require.ErrorIs(t, err, ErrLockTimeout)
+	unlockFirst()
+
+	unlockFirstAgain, err := acquireProcessSessionLock(firstPath, time.Second)
+	require.NoError(t, err, "a timed-out waiter must not wedge later callers")
+	unlockFirstAgain()
+
+	key, err := filepath.Abs(firstPath)
+	require.NoError(t, err)
+	processSessionLocks.Lock()
+	_, retained := processSessionLocks.locks[key]
+	processSessionLocks.Unlock()
+	assert.False(t, retained, "unused path locks must be removed")
 }
 
 func TestSessionLockWaitAllowsActiveOwnerHandoffs(t *testing.T) {

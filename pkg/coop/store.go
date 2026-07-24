@@ -155,6 +155,17 @@ func replaceSessionFile(tmpPath, path string) error {
 
 func (s *Store) acquireSessionLock(path string) (func(), error) {
 	lockPath := path + ".lock"
+	releaseProcessLock, err := acquireProcessSessionLock(lockPath, sessionLockTimeout)
+	if err != nil {
+		return nil, err
+	}
+	processLockHeld := true
+	defer func() {
+		if processLockHeld {
+			releaseProcessLock()
+		}
+	}()
+
 	started := time.Now()
 	wait := sessionLockWait{deadline: started.Add(sessionLockTimeout), limit: started.Add(sessionLockMaxWait)}
 
@@ -165,7 +176,11 @@ func (s *Store) acquireSessionLock(path string) (func(), error) {
 			// writer can be recognized and reclaimed below.
 			fmt.Fprintf(f, "%d\n%d\n", os.Getpid(), time.Now().UnixNano())
 			f.Close()
-			return func() { os.Remove(lockPath) }, nil
+			processLockHeld = false
+			return func() {
+				_ = os.Remove(lockPath)
+				releaseProcessLock()
+			}, nil
 		}
 		if !os.IsExist(err) {
 			return nil, fmt.Errorf("creating lock file: %w", err)
@@ -182,6 +197,65 @@ func (s *Store) acquireSessionLock(path string) (func(), error) {
 			return nil, fmt.Errorf("%w: %s is still present; if no stripe coop command is running, remove this lock file and retry", ErrLockTimeout, lockPath)
 		}
 		time.Sleep(sessionLockPollInterval)
+	}
+}
+
+type processSessionLock struct {
+	ready      chan struct{}
+	references int
+}
+
+var processSessionLocks struct {
+	sync.Mutex
+	locks map[string]*processSessionLock
+}
+
+// acquireProcessSessionLock gives callers in this process a path-specific turn
+// before they contend on the cross-process file lock. Local queueing uses the
+// short timeout: critical sections should be brief, and recursive acquisition
+// must fail rather than accumulating behind the file lock's longer ceiling.
+func acquireProcessSessionLock(lockPath string, timeout time.Duration) (func(), error) {
+	key, err := filepath.Abs(lockPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolving session lock path: %w", err)
+	}
+
+	processSessionLocks.Lock()
+	if processSessionLocks.locks == nil {
+		processSessionLocks.locks = make(map[string]*processSessionLock)
+	}
+	lock := processSessionLocks.locks[key]
+	if lock == nil {
+		lock = &processSessionLock{ready: make(chan struct{}, 1)}
+		lock.ready <- struct{}{}
+		processSessionLocks.locks[key] = lock
+	}
+	lock.references++
+	processSessionLocks.Unlock()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-lock.ready:
+		var releaseOnce sync.Once
+		return func() {
+			releaseOnce.Do(func() {
+				lock.ready <- struct{}{}
+				releaseProcessSessionLock(key, lock)
+			})
+		}, nil
+	case <-timer.C:
+		releaseProcessSessionLock(key, lock)
+		return nil, fmt.Errorf("%w: %s is still in use by this process", ErrLockTimeout, key)
+	}
+}
+
+func releaseProcessSessionLock(key string, lock *processSessionLock) {
+	processSessionLocks.Lock()
+	defer processSessionLocks.Unlock()
+	lock.references--
+	if lock.references == 0 && processSessionLocks.locks[key] == lock {
+		delete(processSessionLocks.locks, key)
 	}
 }
 

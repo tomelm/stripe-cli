@@ -10,7 +10,8 @@ import (
 )
 
 func TestStoreAcceptanceSerializesConcurrentUpdatesWithoutLostWrites(t *testing.T) {
-	store, err := NewStoreAt(t.TempDir())
+	dir := t.TempDir()
+	store, err := NewStoreAt(dir)
 	require.NoError(t, err)
 	session := &Session{
 		ID:     "concurrent_acceptance",
@@ -26,8 +27,10 @@ func TestStoreAcceptanceSerializesConcurrentUpdatesWithoutLostWrites(t *testing.
 	errors := make(chan error, workers)
 	var wait sync.WaitGroup
 	for worker := 0; worker < workers; worker++ {
+		workerStore, storeErr := NewStoreAt(dir)
+		require.NoError(t, storeErr)
 		wait.Add(1)
-		go func() {
+		go func(store *Store) {
 			defer wait.Done()
 			for write := 0; write < writesPerWorker; write++ {
 				if _, updateErr := store.Update(session.ID, func(current *Session) error {
@@ -42,7 +45,7 @@ func TestStoreAcceptanceSerializesConcurrentUpdatesWithoutLostWrites(t *testing.
 					return
 				}
 			}
-		}()
+		}(workerStore)
 	}
 	wait.Wait()
 	close(errors)
