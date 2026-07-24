@@ -161,15 +161,17 @@ func NewWaitingModel(store *coop.Store, existingSessionIDs map[string]bool, opts
 }
 
 func (m Model) Init() tea.Cmd {
-	if m.waiting {
-		return tea.Batch(m.spinner.Tick, tickCmd(), tea.RequestBackgroundColor)
+	cmds := []tea.Cmd{tickCmd(), tea.RequestBackgroundColor}
+	if !m.waiting {
+		cmds = append(cmds, m.loadSession())
 	}
-	return tea.Batch(m.loadSession(), m.spinner.Tick, tickCmd(), tea.RequestBackgroundColor)
+	if m.spinnerShouldAnimate() {
+		cmds = append(cmds, m.spinner.Tick)
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmds []tea.Cmd
-
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
@@ -245,11 +247,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinner.TickMsg:
+		if !m.spinnerShouldAnimate() {
+			return m, nil
+		}
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		m.syncViewport()
-		cmds = append(cmds, cmd)
-		return m, tea.Batch(cmds...)
+		return m, cmd
 
 	case tea.BackgroundColorMsg:
 		m.applyTheme(msg.IsDark())
@@ -274,6 +278,7 @@ func (m Model) applySessionUpdate(msg sessionUpdatedMsg) (tea.Model, tea.Cmd) {
 	if m.session != nil && msg.session.ID == m.session.ID && msg.session.Version <= m.lastVersion {
 		return m, nil
 	}
+	wasAnimating := m.spinnerShouldAnimate()
 	wasComplete := m.session != nil && m.session.IsComplete()
 	m.session = msg.session
 	m.lastVersion = msg.session.Version
@@ -282,7 +287,7 @@ func (m Model) applySessionUpdate(msg sessionUpdatedMsg) (tea.Model, tea.Cmd) {
 
 	// Child session completed → return to parent with step marked done.
 	if !wasComplete && m.session.IsComplete() && m.session.ParentSessionID != "" {
-		return m, m.returnToParent()
+		return m, m.startSpinnerIfNeeded(wasAnimating, m.returnToParent())
 	}
 	if !wasComplete && m.session.IsComplete() {
 		m.resetSelectionState()
@@ -297,7 +302,27 @@ func (m Model) applySessionUpdate(msg sessionUpdatedMsg) (tea.Model, tea.Cmd) {
 	}
 	m.resizeViewport()
 	m.syncViewport()
-	return m, nil
+	return m, m.startSpinnerIfNeeded(wasAnimating, nil)
+}
+
+// spinnerShouldAnimate reports whether the current view is explicitly waiting
+// on work whose progress is otherwise invisible. Normal ready sessions use the
+// polling tick only; their active-node icon is intentionally static.
+func (m Model) spinnerShouldAnimate() bool {
+	if m.err != nil {
+		return false
+	}
+	if !m.ready || m.waiting || m.session == nil || m.sdkLoading {
+		return true
+	}
+	return m.session.IsComplete() && len(m.getCompletionSuggestions()) == 0
+}
+
+func (m Model) startSpinnerIfNeeded(wasAnimating bool, cmd tea.Cmd) tea.Cmd {
+	if wasAnimating || !m.spinnerShouldAnimate() {
+		return cmd
+	}
+	return tea.Batch(cmd, m.spinner.Tick)
 }
 
 func (m Model) View() tea.View {
@@ -881,7 +906,7 @@ func (m *Model) enterWaitingMode(message string) tea.Cmd {
 	m.session = nil
 	m.resetSessionViewState()
 	m.existingSessionIDs = nil
-	return m.snapshotWaitingBaseline()
+	return tea.Batch(m.snapshotWaitingBaseline(), m.spinner.Tick)
 }
 
 func (m *Model) handleConfirm() tea.Cmd {

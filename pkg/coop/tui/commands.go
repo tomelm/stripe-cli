@@ -102,10 +102,11 @@ func (m *Model) fetchSnippetIfNeeded() tea.Cmd {
 	cursor := nodeIndex
 	m.sdkLoading = true
 	m.sdkLoadingNode = cursor
-	return func() tea.Msg {
+	fetch := func() tea.Msg {
 		snippet, err := coop.FetchSDKSnippet(path, method, params, lang)
 		return sdkSnippetMsg{step: cursor, snippet: snippet, err: err}
 	}
+	return tea.Batch(m.spinner.Tick, fetch)
 }
 
 func (m *Model) selectCompletionOption() tea.Cmd {

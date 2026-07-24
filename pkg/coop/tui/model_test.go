@@ -1159,14 +1159,45 @@ func TestSyncViewportSetsContent(t *testing.T) {
 	assert.Contains(t, view, "Set up product")
 }
 
-func TestSpinnerTickDoesNotPanic(t *testing.T) {
+func TestSpinnerTickStopsWhenSessionIsReady(t *testing.T) {
 	m := readyModel()
-	now := time.Now()
-	// Simulate spinner tick
-	assert.NotPanics(t, func() {
-		m.Update(m.spinner.Tick())
-		_ = now
-	})
+	m.spinner = newThemedSpinner(m.theme)
+
+	_, cmd := m.Update(m.spinner.Tick())
+
+	assert.Nil(t, cmd)
+}
+
+func TestSpinnerTickContinuesWhileWaitingOrLoading(t *testing.T) {
+	tests := map[string]func(Model) Model{
+		"waiting": func(m Model) Model {
+			m.waiting = true
+			return m
+		},
+		"session loading": func(m Model) Model {
+			m.session = nil
+			return m
+		},
+		"SDK loading": func(m Model) Model {
+			m.sdkLoading = true
+			return m
+		},
+	}
+
+	for name, configure := range tests {
+		t.Run(name, func(t *testing.T) {
+			m := readyModel()
+			m.spinner = newThemedSpinner(m.theme)
+			m = configure(m)
+			before := m.spinner.View()
+
+			updatedModel, cmd := m.Update(m.spinner.Tick())
+			updated := updatedModel.(Model)
+
+			assert.NotNil(t, cmd)
+			assert.NotEqual(t, before, updated.spinner.View())
+		})
+	}
 }
 
 func TestCompletionEnterDeployWaitsForGuidedFollowupSession(t *testing.T) {
@@ -1203,8 +1234,14 @@ func TestCompletionEnterDeployWaitsForGuidedFollowupSession(t *testing.T) {
 	assert.Equal(t, "Waiting for agent to start the guided deploy flow...", updated.waitingMessage)
 	require.NotNil(t, cmd)
 	msg := cmd()
-	baseline, ok := msg.(waitingBaselineMsg)
+	batch, ok := msg.(tea.BatchMsg)
 	require.True(t, ok)
+	var baseline waitingBaselineMsg
+	for _, batchCmd := range batch {
+		if candidate, ok := batchCmd().(waitingBaselineMsg); ok {
+			baseline = candidate
+		}
+	}
 	assert.NotNil(t, baseline.existingSessionIDs)
 }
 
