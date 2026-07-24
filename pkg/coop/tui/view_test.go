@@ -1182,7 +1182,7 @@ func TestRenderFooterRejectionInput(t *testing.T) {
 	footer := m.renderFooter()
 
 	assertContainsPlain(t, footer, "enter newline")
-	assertContainsPlain(t, footer, "ctrl/cmd+enter send")
+	assertContainsPlain(t, footer, "ctrl+s send")
 	assertContainsPlain(t, footer, "esc cancel")
 	assertContainsPlain(t, footer, "Missing webhook test")
 }

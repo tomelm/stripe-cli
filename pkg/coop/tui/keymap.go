@@ -74,8 +74,8 @@ func newKeyMap() keyMap {
 			key.WithHelp("enter", "expand"),
 		),
 		Submit: key.NewBinding(
-			key.WithKeys("ctrl+enter", "super+enter"),
-			key.WithHelp("ctrl/cmd+enter", "send"),
+			key.WithKeys("ctrl+s", "ctrl+enter", "super+enter"),
+			key.WithHelp("ctrl+s", "send"),
 		),
 		Tab: key.NewBinding(
 			key.WithKeys("tab"),

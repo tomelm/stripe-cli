@@ -78,9 +78,9 @@ func TestRequestChangesEditorPreservesMultilineFeedback(t *testing.T) {
 	assert.True(t, m.rejecting)
 	assert.Equal(t, note, m.rejectionInput.Value())
 	assertContainsPlain(t, m.renderFooter(), "enter newline")
-	assertContainsPlain(t, m.renderFooter(), "ctrl/cmd+enter send")
+	assertContainsPlain(t, m.renderFooter(), "ctrl+s send")
 
-	m = updateWithModifiedKey(t, m, tea.KeyEnter, tea.ModCtrl)
+	m = updateWithModifiedKey(t, m, 's', tea.ModCtrl)
 	assert.False(t, m.rejecting)
 	persisted, err := m.store.Read(m.session.ID)
 	require.NoError(t, err)
