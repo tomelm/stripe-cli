@@ -199,11 +199,11 @@ Each node has:
 Required application outcomes guide both the developer and agent; they are not
 hidden app-specific verifiers. Because Stripe resource reads cannot prove
 application-owned persistence, authorization, idempotency, or reconciliation,
-Co-op records these outcomes as required automatic-check-unavailable results
-until a public trusted observation contract exists. An agent's reported check
-remains a claim rather than independent proof. During UI review, account-wide
-observations may trigger an authoritative Stripe reread, but without a unique
-trusted resource binding they cannot produce an attempt-attributed failure.
+the outcomes remain implementation and human-review guidance rather than
+automatic results. An agent's reported check remains a claim rather than
+independent proof. During UI review, account-wide observations may trigger an
+authoritative Stripe reread, but without a unique trusted resource binding they
+cannot produce an attempt-attributed failure.
 
 Verification applicability is derived from this existing blueprint data: requests select resource and bounded evidence rules, indexed `${node...}` references select cataloged relationship predicates, events select state rules, and `uiComponent` selects the app handoff. Reusable Stripe object predicates, related reads, request gates, ID constraints, and repair guidance live in the strictly validated embedded catalog in `checks/catalog.json`; blueprints do not duplicate them in sidecars. Unsupported operations, events, relationships, extra array elements, and runtime-resolved inputs compile to explicit advisory coverage gaps rather than silently disappearing or being treated as passes.
 

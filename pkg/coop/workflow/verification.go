@@ -97,13 +97,12 @@ const (
 )
 
 type resultPolicy struct {
-	decision         policyDecision
-	failed           []coop.CheckResult
-	pending          []coop.CheckResult
-	unavailable      []coop.CheckResult
-	requiresOverride bool
-	required         int
-	passed           int
+	decision    policyDecision
+	failed      []coop.CheckResult
+	pending     []coop.CheckResult
+	unavailable []coop.CheckResult
+	required    int
+	passed      int
 }
 
 // decideResults contains no Stripe fields or product switches. It treats only
@@ -153,7 +152,6 @@ func decideResults(results []coop.CheckResult, agentChecks []coop.Verification, 
 		policy.decision = decisionNeedsAgent
 	case humanReview:
 		policy.decision = decisionNeedsHuman
-		policy.requiresOverride = len(policy.unavailable) > 0
 	case len(policy.pending) > 0:
 		policy.decision = decisionPending
 	case len(policy.unavailable) > 0 || policy.required == 0 || policy.passed != policy.required:
@@ -320,11 +318,6 @@ func (s *Service) evaluateAndApplyObservation(ctx context.Context, sessionID str
 	if started.stale {
 		return staleEvaluationResponse(session, nodeNumber), nil
 	}
-	node, nodeErr := session.NodeByNumber(nodeNumber)
-	if nodeErr != nil {
-		return coop.CommandResponse{}, nodeErr
-	}
-	requiredOutcomes := coop.RequiredOutcomesForNode(node)
 	evaluation, evalErr := s.evaluateBounded(ctx, EvaluationInput{
 		Session: session, NodeNumber: nodeNumber, Attempt: attemptNumber, Trigger: trigger,
 		EventType: eventType, ResourceID: resourceID,
@@ -343,7 +336,6 @@ func (s *Service) evaluateAndApplyObservation(ctx context.Context, sessionID str
 			Repair: "Continue without treating this check as passed.", UpdatedAt: s.now().UTC(),
 		}}}
 	}
-	evaluation.Results = withRequiredOutcomeGaps(requiredOutcomes, evaluation.Results, started.snapshotAt)
 	applied := evaluationApply{responseAttempt: attemptNumber}
 	session, err = s.store.Update(sessionID, func(session *coop.Session) error {
 		return s.applyEvaluation(session, nodeNumber, attemptNumber, started.basis, started.snapshotAt, evaluation, ignoreStale, &applied)
@@ -505,35 +497,6 @@ func supersededEvaluationResponse(session *coop.Session, nodeNumber, attemptNumb
 		response.Message = "This automatic evaluation was superseded by a newer trusted-session read."
 	}
 	return response
-}
-
-// withRequiredOutcomeGaps is the core-owned boundary between public
-// application obligations and trusted automatic evidence. Evaluators cannot
-// claim this reserved result namespace: until Co-op has a public, trusted
-// application observation contract, every required outcome is explicit
-// unavailable evidence rather than a hidden verifier or an implicit pass.
-func withRequiredOutcomeGaps(outcomes []coop.RequiredOutcome, results []coop.CheckResult, observedAt time.Time) []coop.CheckResult {
-	next := make([]coop.CheckResult, 0, len(results)+len(outcomes))
-	for _, result := range results {
-		if strings.HasPrefix(result.ID, coop.ApplicationOutcomeResultPrefix) {
-			continue
-		}
-		next = append(next, result)
-	}
-	for _, outcome := range outcomes {
-		next = append(next, coop.CheckResult{
-			ID:         coop.ApplicationOutcomeResultPrefix + outcome.ID,
-			Kind:       coop.CheckCoverage,
-			Importance: coop.CheckRequired,
-			Status:     coop.CheckUnavailable,
-			Detail:     "Required application outcome is not independently verified.",
-			Expected:   outcome.Statement,
-			Observed:   "No trusted application observation is configured.",
-			Repair:     "Implement and exercise this outcome; Co-op cannot automatically confirm it yet.",
-			UpdatedAt:  observedAt,
-		})
-	}
-	return next
 }
 
 type evaluationBegin struct {
@@ -728,7 +691,6 @@ func protectCandidateCompletion(session *coop.Session, nodeNumber int, attempt *
 	// autonomously close non-UI work or be presented to the agent as completed.
 	if stepHasHumanReview(session, nodeNumber) {
 		policy.decision = decisionNeedsHuman
-		policy.requiresOverride = true
 		return
 	}
 	policy.decision = decisionPending
@@ -746,7 +708,6 @@ func normalizeEvaluationPolicy(session *coop.Session, node *coop.SessionNode, no
 	protectCandidateCompletion(session, nodeNumber, attempt, policy)
 	if policy.decision == decisionUnverified && len(policy.unavailable) > 0 && stepHasHumanReview(session, nodeNumber) {
 		policy.decision = decisionNeedsHuman
-		policy.requiresOverride = true
 	}
 }
 

@@ -352,7 +352,7 @@ func TestRenderSummaryDetailShowsRequiredApplicationOutcomesCompactly(t *testing
 	assertNotContainsPlain(t, detail, "This fact belongs to another node")
 }
 
-func TestRenderRequiredApplicationOutcomesDoesNotDuplicateChecksEvidence(t *testing.T) {
+func TestRenderRequiredApplicationOutcomesDoNotInventAutomaticEvidence(t *testing.T) {
 	m := testModel()
 	m.selectionCursor = 0
 	m.expanded = true
@@ -362,29 +362,17 @@ func TestRenderRequiredApplicationOutcomesDoesNotDuplicateChecksEvidence(t *test
 		Statement: "Persist the application user to Stripe Customer mapping.",
 		FactRefs:  []string{"customer_identity"},
 	}}
-	testPresentationAttempt(node).Results = []coop.CheckResult{{
-		ID:         "application.outcome.persist_customer_mapping",
-		Kind:       coop.CheckCoverage,
-		Importance: coop.CheckRequired,
-		Status:     coop.CheckUnavailable,
-		Detail:     "Required application outcome is not independently verified.",
-		Expected:   "Persist the application user to Stripe Customer mapping.",
-		Observed:   "No trusted application observation is configured.",
-		Repair:     "Implement and exercise this outcome; Co-op cannot automatically confirm it yet.",
-	}}
 
 	m.detailTab = 0
 	summary := m.renderDetail()
 	assertContainsPlain(t, summary, "Required application outcomes")
 	assertContainsPlain(t, summary, "Persist the application user")
-	assertNotContainsPlain(t, summary, "Automatic check unavailable")
 
 	m.detailTab = 2
 	checks := m.renderDetail()
 	plainChecks := strings.Join(strings.Fields(strings.ReplaceAll(ansi.Strip(checks), "│", " ")), " ")
-	assert.Contains(t, plainChecks, "Limited automatic coverage")
-	assert.NotContains(t, plainChecks, "! Automatic check unavailable")
-	assert.Contains(t, plainChecks, "No trusted application observation is configured")
+	assert.NotContains(t, plainChecks, "Limited automatic coverage")
+	assert.NotContains(t, plainChecks, "Persist the application user")
 	assert.NotContains(t, plainChecks, "Required application outcomes")
 }
 
@@ -591,11 +579,6 @@ func TestRenderReviewCardGroupsAutomaticAndSupportingEvidence(t *testing.T) {
 			{ID: "resource.exists", Kind: coop.CheckResource, Importance: coop.CheckRequired, Status: coop.CheckPassed, UpdatedAt: now},
 			{ID: "request.observed", Kind: coop.CheckRequest, Importance: coop.CheckAdvisory, Status: coop.CheckObserved, UpdatedAt: now},
 			{ID: "state.unavailable", Kind: coop.CheckState, Importance: coop.CheckRequired, Status: coop.CheckUnavailable, UpdatedAt: now},
-			{
-				ID: "application.outcome.server_authorized_access", Kind: coop.CheckCoverage,
-				Importance: coop.CheckRequired, Status: coop.CheckUnavailable,
-				Expected: "Gate protected application data from durable subscription state.", UpdatedAt: now,
-			},
 		},
 	}}
 
@@ -606,8 +589,6 @@ func TestRenderReviewCardGroupsAutomaticAndSupportingEvidence(t *testing.T) {
 	assertContainsPlain(t, card, "Co-op checked:")
 	assertContainsPlain(t, card, "Stripe observed:")
 	assertContainsPlain(t, card, "Limited automatic coverage:")
-	assertContainsPlain(t, card, "Unverified application outcome:")
-	assertContainsPlain(t, card, "Gate protected application data")
 	assertContainsPlain(t, card, "You can confirm now")
 }
 
@@ -834,7 +815,7 @@ func TestCompletedUnavailableOutlineIsNonActionableAndWordSafe(t *testing.T) {
 		EndReason: coop.AttemptCompletedUnverified,
 		Results: []coop.CheckResult{
 			{ID: "resource.exists", Kind: coop.CheckResource, Importance: coop.CheckRequired, Status: coop.CheckPassed},
-			{ID: "application.outcome", Kind: coop.CheckCoverage, Importance: coop.CheckRequired, Status: coop.CheckUnavailable},
+			{ID: "automatic.account-scope", Kind: coop.CheckCoverage, Importance: coop.CheckRequired, Status: coop.CheckUnavailable},
 		},
 	}}
 

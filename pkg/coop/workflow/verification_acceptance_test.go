@@ -172,12 +172,11 @@ func TestVerificationAcceptanceRequiredPassAutoCompletesNonUI(t *testing.T) {
 	assert.Equal(t, "cus_acceptance", attempt.Resources[0].ID)
 }
 
-func TestVerificationAcceptanceApplicationOutcomeCompletesNonUIExplicitlyUnverified(t *testing.T) {
+func TestVerificationAcceptanceApplicationGuidanceDoesNotDowngradeDirectPass(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeCLICommand)
 	addAcceptanceOutcome(t, store, session.ID)
 	evaluator := &acceptanceEvaluator{evaluations: []Evaluation{{Results: []coop.CheckResult{
 		requiredAcceptanceResult("resource.customer.exists", coop.CheckResource, coop.CheckPassed),
-		requiredAcceptanceResult(coop.ApplicationOutcomeResultPrefix+"durable-access", coop.CheckCoverage, coop.CheckPassed),
 	}}}}
 	service := newVerificationAcceptanceService(store, evaluator, newAcceptanceClock())
 
@@ -198,18 +197,17 @@ func TestVerificationAcceptanceApplicationOutcomeCompletesNonUIExplicitlyUnverif
 	require.NoError(t, err)
 	response, err := service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
 	require.NoError(t, err)
-	assert.Equal(t, string(decisionUnverified), response.Decision)
-	assert.Equal(t, string(decisionUnverified), response.State)
-	outcome := acceptanceResult(t, response.Verification, coop.ApplicationOutcomeResultPrefix+"durable-access")
-	assert.Equal(t, coop.CheckUnavailable, outcome.Status, "an evaluator cannot mask the core-owned application outcome")
-	assert.Equal(t, "Persist subscription state and gate access server-side.", outcome.Expected)
-	assert.Contains(t, outcome.Observed, "No trusted application observation")
+	assert.Equal(t, string(decisionConfirmed), response.Decision)
+	assert.Equal(t, "confirmed", response.State)
+	require.Len(t, response.Verification, 1)
+	assert.Equal(t, "resource.customer.exists", response.Verification[0].ID)
 	node := acceptanceNode(t, readAcceptanceSession(t, store, session.ID))
 	assert.Equal(t, coop.NodeDone, node.State)
-	assert.Equal(t, coop.AttemptCompletedUnverified, node.Attempts[0].EndReason)
+	assert.Equal(t, coop.AttemptConfirmed, node.Attempts[0].EndReason)
+	require.Len(t, node.RequiredOutcomes, 1)
 }
 
-func TestVerificationAcceptanceEvaluatorCannotMutateAwayApplicationOutcome(t *testing.T) {
+func TestVerificationAcceptanceEvaluatorCannotMutatePersistedApplicationGuidance(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeCLICommand)
 	addAcceptanceOutcome(t, store, session.ID)
 	evaluator := &acceptanceEvaluator{evaluate: func(_ context.Context, input EvaluationInput) (Evaluation, error) {
@@ -235,9 +233,8 @@ func TestVerificationAcceptanceEvaluatorCannotMutateAwayApplicationOutcome(t *te
 	require.NoError(t, err)
 	response, err := service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
 	require.NoError(t, err)
-	assert.Equal(t, string(decisionUnverified), response.Decision)
-	outcome := acceptanceResult(t, response.Verification, coop.ApplicationOutcomeResultPrefix+"durable-access")
-	assert.Equal(t, coop.CheckUnavailable, outcome.Status)
+	assert.Equal(t, string(decisionConfirmed), response.Decision)
+	require.Len(t, response.Verification, 1)
 	persisted := acceptanceNode(t, readAcceptanceSession(t, store, session.ID))
 	require.Len(t, persisted.RequiredOutcomes, 1)
 }
@@ -276,48 +273,6 @@ func TestVerificationAcceptanceCorrectionAttemptRetainsApplicationContract(t *te
 	require.Len(t, correction.RequiredOutcomes, 1)
 	assert.Equal(t, "durable-access", correction.RequiredOutcomes[0].ID)
 	assert.Contains(t, correction.Message, failure.Repair)
-}
-
-func TestVerificationAcceptanceUIOutcomeRecordsLimitedCoverageOnFirstConfirm(t *testing.T) {
-	store, session := newVerificationAcceptanceStore(t, coop.NodeUIComponent)
-	addAcceptanceOutcome(t, store, session.ID)
-	evaluator := &acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) (Evaluation, error) {
-		return Evaluation{Results: []coop.CheckResult{
-			requiredAcceptanceResult("resource.checkout.exists", coop.CheckResource, coop.CheckPassed),
-		}}, nil
-	}}
-	clock := newAcceptanceClock()
-	service := newVerificationAcceptanceService(store, evaluator, clock)
-	started, err := service.StartWork(session.ID, 1, "Building subscription UI")
-	require.NoError(t, err)
-	_, err = reportAcceptanceWork(service,
-		context.Background(),
-		session.ID,
-		1,
-		started.Attempt,
-		ReportWorkInput{
-			File: "checkout.tsx", Note: "Built subscription UI",
-			AppURL: "http://localhost:4242/checkout",
-		},
-	)
-	require.NoError(t, err)
-	reported, err := service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
-	require.NoError(t, err)
-	assert.Equal(t, string(decisionNeedsHuman), reported.Decision)
-	outcome := acceptanceResult(t, reported.Verification, coop.ApplicationOutcomeResultPrefix+"durable-access")
-	assert.Equal(t, coop.CheckUnavailable, outcome.Status)
-	refs := []AttemptRef{{Node: 1, Attempt: started.Attempt}}
-	confirmed, err := service.ConfirmReviewAttempts(session.ID, refs)
-	require.NoError(t, err)
-	node := acceptanceNode(t, confirmed)
-	assert.Equal(t, coop.NodeDone, node.State)
-	require.NotNil(t, node.Attempts[0].Override)
-	assert.Contains(t, node.Attempts[0].Override.Reason, "automatic verification was incomplete")
-	assert.Equal(t, coop.CheckUnavailable, acceptanceResult(
-		t,
-		node.Attempts[0].Results,
-		coop.ApplicationOutcomeResultPrefix+"durable-access",
-	).Status)
 }
 
 func TestVerificationAcceptanceCandidateCannotAutoCompleteNonUI(t *testing.T) {

@@ -26,7 +26,7 @@ func TestSplitWorkspaceOutlineFitsLeftColumn(t *testing.T) {
 		Number: 1, StartedAt: now.Add(-time.Minute), EndedAt: &now,
 		EndReason: coop.AttemptCompletedUnverified,
 		Results: []coop.CheckResult{{
-			ID: "application.outcome", Kind: coop.CheckCoverage,
+			ID: "automatic.account-scope", Kind: coop.CheckCoverage,
 			Importance: coop.CheckRequired, Status: coop.CheckUnavailable,
 		}},
 	}}

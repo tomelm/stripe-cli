@@ -6,12 +6,11 @@ import (
 )
 
 const (
-	MaxLifecycleFactsPerBlueprint  = 32
-	MaxRequiredOutcomesPerNode     = 8
-	MaxFactRefsPerOutcome          = 8
-	MaxLifecycleIDBytes            = 64
-	MaxLifecycleStatementBytes     = MaxCheckResultDetailBytes
-	ApplicationOutcomeResultPrefix = "application.outcome."
+	MaxLifecycleFactsPerBlueprint = 32
+	MaxRequiredOutcomesPerNode    = 8
+	MaxFactRefsPerOutcome         = 8
+	MaxLifecycleIDBytes           = 64
+	MaxLifecycleStatementBytes    = MaxCheckResultDetailBytes
 )
 
 // validateBlueprintOutcomes rejects malformed or unbounded application
