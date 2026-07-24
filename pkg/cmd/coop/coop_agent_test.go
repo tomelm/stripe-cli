@@ -1,8 +1,12 @@
 package coopcmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -86,6 +90,94 @@ func TestNewAgentWorkflowServiceDoesNotReadCredentialsOrPinAccount(t *testing.T)
 	assert.Empty(t, unchanged.StripeAccountID)
 	assert.Equal(t, 0, credentialReads)
 	assert.Equal(t, 1, unchanged.Version)
+}
+
+func TestAgentProcessPulseCommandOwnsDistinctLeaseUntilCanceled(t *testing.T) {
+	previousOptions := options
+	configDir := t.TempDir()
+	options = Options{ConfigFolder: func() string { return configDir }}
+	t.Cleanup(func() { options = previousOptions })
+
+	store, err := coop.NewStore(configDir)
+	require.NoError(t, err)
+	session := &coop.Session{ID: "agent_process_pulse", Status: coop.SessionActive}
+	require.NoError(t, store.Write(session))
+	require.NoError(t, store.WriteHeartbeat(session.ID))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := newCoopAgentProcessPulseCmd().cmd
+	require.True(t, cmd.Hidden)
+	cmd.SetArgs([]string{
+		"--session", session.ID,
+		"--owner-pid", strconv.Itoa(os.Getppid()),
+	})
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.ExecuteContext(ctx)
+	}()
+
+	require.Eventually(t, func() bool {
+		age, pulseErr := store.AgentProcessPulseAge(session.ID)
+		return pulseErr == nil && age >= 0 && age < coop.AgentProcessPulseFreshFor
+	}, time.Second, 5*time.Millisecond)
+
+	cancel()
+	require.NoError(t, <-done)
+	age, err := store.AgentProcessPulseAge(session.ID)
+	require.NoError(t, err)
+	assert.Equal(t, time.Duration(-1), age)
+	heartbeatAge, err := store.HeartbeatAge(session.ID)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, heartbeatAge, time.Duration(0),
+		"the process pulse command must not remove await-review's heartbeat")
+}
+
+func TestRunAgentProcessPulseStopsWhenLauncherOwnerChanges(t *testing.T) {
+	store, err := coop.NewStoreAt(t.TempDir())
+	require.NoError(t, err)
+
+	const ownerPID = 4242
+	var parent atomic.Int64
+	parent.Store(ownerPID)
+	done := make(chan error, 1)
+	go func() {
+		done <- runAgentProcessPulse(
+			context.Background(),
+			store,
+			"owner_change",
+			ownerPID,
+			func() int { return int(parent.Load()) },
+			time.Millisecond,
+		)
+	}()
+
+	require.Eventually(t, func() bool {
+		age, pulseErr := store.AgentProcessPulseAge("owner_change")
+		return pulseErr == nil && age >= 0
+	}, time.Second, 5*time.Millisecond)
+	parent.Store(ownerPID + 1)
+	require.NoError(t, <-done)
+	age, err := store.AgentProcessPulseAge("owner_change")
+	require.NoError(t, err)
+	assert.Equal(t, time.Duration(-1), age)
+}
+
+func TestRunAgentProcessPulseRejectsDetachedOwner(t *testing.T) {
+	store, err := coop.NewStoreAt(t.TempDir())
+	require.NoError(t, err)
+
+	err = runAgentProcessPulse(
+		context.Background(),
+		store,
+		"detached",
+		4242,
+		func() int { return 1 },
+		time.Millisecond,
+	)
+	require.ErrorContains(t, err, "started by its launcher owner")
+	age, ageErr := store.AgentProcessPulseAge("detached")
+	require.NoError(t, ageErr)
+	assert.Equal(t, time.Duration(-1), age)
 }
 
 func TestCoopAgentStartWorkCommand(t *testing.T) {

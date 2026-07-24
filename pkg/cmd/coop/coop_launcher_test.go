@@ -259,7 +259,7 @@ func TestAgentPaneCommandShellQuotesLauncherPath(t *testing.T) {
 	t.Setenv("TEMP", tmp)
 
 	rc := &coopRunCmd{}
-	build := rc.agentPaneCommandBuilder(&agentInfo{name: "claude", path: "/usr/local/bin/claude"}, "discovery prompt", false)
+	build := rc.agentPaneCommandBuilder("/stripe", &agentInfo{name: "claude", path: "/usr/local/bin/claude"}, "discovery prompt", false)
 	paneCmd, cleanup, err := build(nil)
 	require.NoError(t, err)
 	require.NotNil(t, cleanup)
@@ -273,6 +273,91 @@ func TestAgentPaneCommandShellQuotesLauncherPath(t *testing.T) {
 	// The pane command must be exactly the single-quoted launcher path, so
 	// `bash -c` executes the launcher instead of parsing the path.
 	assert.Equal(t, shellQuote(matches[0]), paneCmd)
+
+	script, err := os.ReadFile(matches[0])
+	require.NoError(t, err)
+	assert.NotContains(t, string(script), "process-pulse",
+		"discovery mode has no session to associate with an agent process pulse")
+}
+
+func TestAgentLauncherRunsSessionScopedProcessPulse(t *testing.T) {
+	promptPath := filepath.Join(t.TempDir(), "prompt.txt")
+	require.NoError(t, os.WriteFile(promptPath, []byte("test prompt"), 0o600))
+
+	rc := &coopRunCmd{}
+	launcherPath, err := rc.buildAgentCmd(
+		&agentInfo{name: "custom", path: "/agent with spaces"},
+		promptPath,
+		false,
+		"/stripe with spaces",
+		"coop_pulse",
+	)
+	require.NoError(t, err)
+
+	script, err := os.ReadFile(launcherPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(script),
+		`'/stripe with spaces' coop agent process-pulse --session='coop_pulse' --owner-pid="$$"`)
+	assert.Contains(t, string(script), "stop_agent_pulse")
+	assert.Contains(t, string(script), `kill -TERM "$agent_pulse_pid"`)
+	stopIndex := strings.Index(string(script), "stop_agent_pulse\ntrap - EXIT")
+	diagnosticIndex := strings.Index(string(script), "Agent exited with status")
+	require.GreaterOrEqual(t, stopIndex, 0)
+	require.GreaterOrEqual(t, diagnosticIndex, 0)
+	assert.Less(t,
+		stopIndex,
+		diagnosticIndex,
+		"the pulse must stop as soon as the foreground agent returns, before the pane waits for input")
+}
+
+func TestAgentLauncherPulseMatchesForegroundAgentLifetime(t *testing.T) {
+	dir := t.TempDir()
+	markerPath := filepath.Join(dir, "agent.pulse")
+	pulsePath := filepath.Join(dir, "stripe pulse")
+	agentPath := filepath.Join(dir, "agent")
+	promptPath := filepath.Join(dir, "prompt.txt")
+
+	require.NoError(t, os.WriteFile(pulsePath, []byte(`#!/bin/bash
+marker="${AGENT_PULSE_MARKER:?}"
+cleanup() {
+  rm -f "$marker"
+}
+trap 'cleanup; exit 0' HUP INT TERM
+trap cleanup EXIT
+printf 'running\n' > "$marker"
+while true; do
+  sleep 0.01
+done
+`), 0o700))
+	require.NoError(t, os.WriteFile(agentPath, []byte(`#!/bin/bash
+marker="${AGENT_PULSE_MARKER:?}"
+for _ in {1..200}; do
+  if [[ -f "$marker" ]]; then
+    exit 0
+  fi
+  sleep 0.01
+done
+exit 42
+`), 0o700))
+	require.NoError(t, os.WriteFile(promptPath, []byte("test prompt"), 0o600))
+
+	rc := &coopRunCmd{}
+	launcherPath, err := rc.buildAgentCmd(
+		&agentInfo{name: "custom", path: agentPath},
+		promptPath,
+		false,
+		pulsePath,
+		"coop_pulse",
+	)
+	require.NoError(t, err)
+
+	cmd := exec.Command("bash", launcherPath)
+	cmd.Env = append(os.Environ(), "AGENT_PULSE_MARKER="+markerPath)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(output))
+	_, err = os.Stat(markerPath)
+	assert.ErrorIs(t, err, os.ErrNotExist,
+		"the launcher must stop and reap the pulse before it exits")
 }
 
 func TestAgentLauncherPreservesFailureDiagnostics(t *testing.T) {
@@ -283,7 +368,7 @@ func TestAgentLauncherPreservesFailureDiagnostics(t *testing.T) {
 	require.NoError(t, os.WriteFile(promptPath, []byte("test prompt"), 0o600))
 
 	rc := &coopRunCmd{}
-	launcherPath, err := rc.buildAgentCmd(&agentInfo{name: "custom", path: falsePath}, promptPath, false)
+	launcherPath, err := rc.buildAgentCmd(&agentInfo{name: "custom", path: falsePath}, promptPath, false, "", "")
 	require.NoError(t, err)
 
 	cmd := exec.Command("bash", launcherPath)
@@ -305,7 +390,7 @@ func TestAgentLauncherPreservesSuccessfulTmuxExit(t *testing.T) {
 	require.NoError(t, os.WriteFile(promptPath, []byte("test prompt"), 0o600))
 
 	rc := &coopRunCmd{}
-	launcherPath, err := rc.buildAgentCmd(&agentInfo{name: "custom", path: truePath}, promptPath, false)
+	launcherPath, err := rc.buildAgentCmd(&agentInfo{name: "custom", path: truePath}, promptPath, false, "", "")
 	require.NoError(t, err)
 
 	cmd := exec.Command("bash", launcherPath)

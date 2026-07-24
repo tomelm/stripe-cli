@@ -128,6 +128,94 @@ func TestObserverLeaseRenewsItsFallbackLivenessTimestamp(t *testing.T) {
 	require.ErrorIs(t, err, ErrObserverLeaseHeld)
 }
 
+func TestAgentProcessPulseIsExclusiveOwnerSafeAndReadable(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStoreAt(dir)
+	require.NoError(t, err)
+
+	age, err := store.AgentProcessPulseAge("session")
+	require.NoError(t, err)
+	assert.Equal(t, time.Duration(-1), age)
+
+	firstRelease, err := store.AcquireAgentProcessPulse("session")
+	require.NoError(t, err)
+	_, err = store.AcquireAgentProcessPulse("session")
+	require.ErrorIs(t, err, ErrAgentProcessPulseHeld)
+
+	age, err = store.AgentProcessPulseAge("session")
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, age, time.Duration(0))
+	assert.Less(t, age, AgentProcessPulseFreshFor)
+
+	leasePath := filepath.Join(dir, "session.json.agent-pulse")
+	info, err := os.Stat(leasePath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+
+	firstRelease()
+	age, err = store.AgentProcessPulseAge("session")
+	require.NoError(t, err)
+	assert.Equal(t, time.Duration(-1), age)
+
+	secondRelease, err := store.AcquireAgentProcessPulse("session")
+	require.NoError(t, err)
+	firstRelease()
+	_, err = store.AcquireAgentProcessPulse("session")
+	require.ErrorIs(t, err, ErrAgentProcessPulseHeld, "an old release must not remove a newer pulse")
+	secondRelease()
+}
+
+func TestAgentProcessPulseRenewsWithoutTouchingAwaitHeartbeat(t *testing.T) {
+	originalInterval := agentPulseLeaseHeartbeatInterval
+	agentPulseLeaseHeartbeatInterval = 5 * time.Millisecond
+	t.Cleanup(func() { agentPulseLeaseHeartbeatInterval = originalInterval })
+
+	dir := t.TempDir()
+	store, err := NewStoreAt(dir)
+	require.NoError(t, err)
+	require.NoError(t, store.WriteHeartbeat("session"))
+
+	release, err := store.AcquireAgentProcessPulse("session")
+	require.NoError(t, err)
+	leasePath := filepath.Join(dir, "session.json.agent-pulse")
+	initial, err := os.Stat(leasePath)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		current, statErr := os.Stat(leasePath)
+		return statErr == nil && current.ModTime().After(initial.ModTime())
+	}, time.Second, 5*time.Millisecond)
+
+	release()
+	heartbeatAge, err := store.HeartbeatAge("session")
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, heartbeatAge, time.Duration(0),
+		"releasing the agent pulse must not remove await-review's heartbeat")
+
+	release, err = store.AcquireAgentProcessPulse("session")
+	require.NoError(t, err)
+	require.NoError(t, store.RemoveHeartbeat("session"))
+	pulseAge, err := store.AgentProcessPulseAge("session")
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, pulseAge, time.Duration(0),
+		"removing await-review's heartbeat must not remove the agent pulse")
+	release()
+}
+
+func TestAgentProcessPulseRejectsInvalidSessionID(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStoreAt(dir)
+	require.NoError(t, err)
+
+	_, err = store.AcquireAgentProcessPulse("../bad")
+	require.ErrorIs(t, err, ErrInvalidSessionID)
+	_, err = store.AgentProcessPulseAge("../bad")
+	require.ErrorIs(t, err, ErrInvalidSessionID)
+
+	_, err = os.Stat(filepath.Join(dir, "bad.json.agent-pulse"))
+	assert.True(t, errors.Is(err, os.ErrNotExist))
+}
+
 func TestStorePersistsCompleteAttemptHistory(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewStoreAt(dir)

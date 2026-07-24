@@ -118,7 +118,13 @@ func (rc *coopRunCmd) promptAutoApprove(agent *agentInfo) (bool, error) {
 	return choice == "auto", nil
 }
 
-func (rc *coopRunCmd) buildAgentCmd(agent *agentInfo, promptPath string, autoApprove bool) (string, error) {
+func (rc *coopRunCmd) buildAgentCmd(
+	agent *agentInfo,
+	promptPath string,
+	autoApprove bool,
+	stripeBin string,
+	sessionID string,
+) (string, error) {
 	launcherPath := promptPath + ".sh"
 	flags := ""
 
@@ -134,21 +140,62 @@ func (rc *coopRunCmd) buildAgentCmd(agent *agentInfo, promptPath string, autoApp
 		}
 	}
 
+	pulseStart := ""
+	pulseStop := ""
+	if sessionID != "" {
+		pulseStart = fmt.Sprintf(`
+agent_pulse_pid=
+stop_agent_pulse() {
+  if [[ -z "${agent_pulse_pid:-}" ]]; then
+    return
+  fi
+  case " $(jobs -pr) " in
+    *" ${agent_pulse_pid} "*) kill -TERM "$agent_pulse_pid" 2>/dev/null || true ;;
+  esac
+  wait "$agent_pulse_pid" 2>/dev/null || true
+  agent_pulse_pid=
+}
+stop_agent_launcher() {
+  trap - EXIT HUP INT TERM
+  stop_agent_pulse
+  exit 1
+}
+trap stop_agent_pulse EXIT
+trap stop_agent_launcher HUP INT TERM
+%s coop agent process-pulse --session=%s --owner-pid="$$" >/dev/null &
+agent_pulse_pid=$!
+`, shellQuote(stripeBin), shellQuote(sessionID))
+		pulseStop = `
+stop_agent_pulse
+trap - EXIT HUP INT TERM
+`
+	}
+
 	script := fmt.Sprintf(`#!/bin/bash
 prompt=$(cat %s)
 rm -f %s %s
+%s
 if %s%s "$prompt"; then
   status=0
 else
   status=$?
 fi
+%s
 if [[ -n "${TMUX:-}" || $status -ne 0 ]]; then
   printf '\nAgent exited with status %%s.\n' "$status"
   printf 'Press Enter to close this pane.\n'
   IFS= read -r _
 fi
 exit "$status"
-`, shellQuote(promptPath), shellQuote(promptPath), shellQuote(launcherPath), shellQuote(agent.path), flags)
+`,
+		shellQuote(promptPath),
+		shellQuote(promptPath),
+		shellQuote(launcherPath),
+		pulseStart,
+		shellQuote(agent.path),
+		flags,
+		pulseStop,
+	)
 
 	if err := os.WriteFile(launcherPath, []byte(script), 0700); err != nil {
 		return "", fmt.Errorf("creating agent launcher: %w", err)
@@ -161,22 +208,29 @@ func (rc *coopRunCmd) hasTmux() bool {
 	return err == nil
 }
 
-func (rc *coopRunCmd) agentPaneCommandBuilder(agent *agentInfo, discoveryPrompt string, autoApprove bool) coopPaneCommandBuilder {
+func (rc *coopRunCmd) agentPaneCommandBuilder(
+	stripeBin string,
+	agent *agentInfo,
+	discoveryPrompt string,
+	autoApprove bool,
+) coopPaneCommandBuilder {
 	return func(session *coop.Session) (string, func(), error) {
 		prompt := discoveryPrompt
+		sessionID := ""
 		if session != nil {
 			var err error
 			prompt, err = rc.buildAgentPromptForSession(session)
 			if err != nil {
 				return "", nil, err
 			}
+			sessionID = session.ID
 		}
 		promptPath, err := writePromptFile(prompt)
 		if err != nil {
 			return "", nil, err
 		}
 
-		agentCmd, err := rc.buildAgentCmd(agent, promptPath, autoApprove)
+		agentCmd, err := rc.buildAgentCmd(agent, promptPath, autoApprove, stripeBin, sessionID)
 		if err != nil {
 			os.Remove(promptPath)
 			return "", nil, err
@@ -211,7 +265,7 @@ func shellCommandWithCoopEnv(cmd string) string {
 }
 
 func (rc *coopRunCmd) runInTmuxSplit(stripeBin string, agent *agentInfo, agentPrompt string, autoApprove bool, blueprintID string) error {
-	return rc.runInTmuxSplitWithCommand(stripeBin, blueprintID, rc.agentPaneCommandBuilder(agent, agentPrompt, autoApprove))
+	return rc.runInTmuxSplitWithCommand(stripeBin, blueprintID, rc.agentPaneCommandBuilder(stripeBin, agent, agentPrompt, autoApprove))
 }
 
 func (rc *coopRunCmd) runInTmuxSplitWithCommand(stripeBin string, blueprintID string, buildPaneCmd coopPaneCommandBuilder) error {
@@ -256,7 +310,7 @@ func (rc *coopRunCmd) runInTmuxSplitWithCommand(stripeBin string, blueprintID st
 }
 
 func (rc *coopRunCmd) runInNewTmux(stripeBin string, agent *agentInfo, agentPrompt string, autoApprove bool, blueprintID string) error {
-	return rc.runInNewTmuxWithCommand(stripeBin, blueprintID, rc.agentPaneCommandBuilder(agent, agentPrompt, autoApprove))
+	return rc.runInNewTmuxWithCommand(stripeBin, blueprintID, rc.agentPaneCommandBuilder(stripeBin, agent, agentPrompt, autoApprove))
 }
 
 func (rc *coopRunCmd) runInNewTmuxWithCommand(stripeBin string, blueprintID string, buildPaneCmd coopPaneCommandBuilder) error {
@@ -355,7 +409,7 @@ func normalizeCoopTmuxSessionDimensions(width, height int, err error) (int, int)
 }
 
 func (rc *coopRunCmd) runFallback(stripeBin string, agent *agentInfo, agentPrompt string, autoApprove bool, blueprintID string) error {
-	return rc.runFallbackWithCommand(stripeBin, blueprintID, rc.agentPaneCommandBuilder(agent, agentPrompt, autoApprove))
+	return rc.runFallbackWithCommand(stripeBin, blueprintID, rc.agentPaneCommandBuilder(stripeBin, agent, agentPrompt, autoApprove))
 }
 
 func (rc *coopRunCmd) runFallbackWithCommand(stripeBin string, blueprintID string, buildPaneCmd coopPaneCommandBuilder) error {

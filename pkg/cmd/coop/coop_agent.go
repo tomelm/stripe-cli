@@ -1,9 +1,14 @@
 package coopcmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -34,6 +39,7 @@ type coopAgentActionCmd struct {
 	completed string
 	action    string
 	target    string
+	ownerPID  int
 }
 
 func newCoopAgentCmd() *coopAgentCmd {
@@ -48,6 +54,7 @@ func newCoopAgentCmd() *coopAgentCmd {
 	ac.cmd.AddCommand(newCoopAgentReportCheckCmd().cmd)
 	ac.cmd.AddCommand(newCoopAgentSkipCmd().cmd)
 	ac.cmd.AddCommand(newCoopAgentAwaitReviewCmd().cmd)
+	ac.cmd.AddCommand(newCoopAgentProcessPulseCmd().cmd)
 	ac.cmd.AddCommand(newCoopAgentNextActionCmd().cmd)
 	ac.cmd.AddCommand(newCoopAgentStartFollowupCmd().cmd)
 	return ac
@@ -164,6 +171,81 @@ func newCoopAgentAwaitReviewCmd() *coopAgentActionCmd {
 	c.addSessionNodeFlags()
 	c.addAttemptFlag()
 	return c
+}
+
+const agentProcessOwnerPollInterval = 250 * time.Millisecond
+
+func newCoopAgentProcessPulseCmd() *coopAgentActionCmd {
+	c := &coopAgentActionCmd{}
+	c.cmd = &cobra.Command{
+		Use:    "process-pulse",
+		Short:  "Maintain the launcher-owned agent process pulse",
+		Hidden: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := coop.NewStore(coopConfigFolder())
+			if err != nil {
+				return err
+			}
+			if _, err := store.Read(c.session); err != nil {
+				return err
+			}
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			return runAgentProcessPulse(
+				ctx,
+				store,
+				c.session,
+				c.ownerPID,
+				os.Getppid,
+				agentProcessOwnerPollInterval,
+			)
+		},
+	}
+	c.cmd.Flags().StringVar(&c.session, "session", "", "Session ID")
+	c.cmd.Flags().IntVar(&c.ownerPID, "owner-pid", 0, "Agent launcher process ID")
+	mustMarkFlagRequired(c.cmd, "session")
+	mustMarkFlagRequired(c.cmd, "owner-pid")
+	return c
+}
+
+func runAgentProcessPulse(
+	ctx context.Context,
+	store *coop.Store,
+	sessionID string,
+	ownerPID int,
+	parentPID func() int,
+	pollEvery time.Duration,
+) error {
+	if ownerPID <= 1 {
+		return errors.New("agent launcher owner PID must be greater than 1")
+	}
+	if parentPID == nil || parentPID() != ownerPID {
+		return errors.New("agent process pulse must be started by its launcher owner")
+	}
+	if pollEvery <= 0 {
+		pollEvery = agentProcessOwnerPollInterval
+	}
+	release, err := store.AcquireAgentProcessPulse(sessionID)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	ticker := time.NewTicker(pollEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			// A pulse is meaningful only while the wrapper synchronously owns
+			// the foreground agent invocation. If the wrapper crashes, this
+			// background command is reparented and releases its lease promptly.
+			if parentPID() != ownerPID {
+				return nil
+			}
+		}
+	}
 }
 
 func newCoopAgentNextActionCmd() *coopAgentActionCmd {

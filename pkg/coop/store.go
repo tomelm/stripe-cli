@@ -25,12 +25,13 @@ type Store struct {
 const MaxSessionFileBytes = 4 << 20
 
 var (
-	ErrInvalidSessionID  = errors.New("invalid session id")
-	ErrSessionNotFound   = errors.New("session not found")
-	ErrVersionConflict   = errors.New("version conflict")
-	ErrLockTimeout       = errors.New("timed out waiting for session lock")
-	ErrCorruptSession    = errors.New("corrupt session")
-	ErrObserverLeaseHeld = errors.New("session observer lease is already held")
+	ErrInvalidSessionID      = errors.New("invalid session id")
+	ErrSessionNotFound       = errors.New("session not found")
+	ErrVersionConflict       = errors.New("version conflict")
+	ErrLockTimeout           = errors.New("timed out waiting for session lock")
+	ErrCorruptSession        = errors.New("corrupt session")
+	ErrObserverLeaseHeld     = errors.New("session observer lease is already held")
+	ErrAgentProcessPulseHeld = errors.New("session agent process pulse is already held")
 )
 
 var (
@@ -44,8 +45,14 @@ var (
 	// observerLeaseHeartbeatInterval is capped below relative to
 	// sessionLockStale so platforms without process-liveness support never
 	// reclaim a healthy, long-lived observer.
-	observerLeaseHeartbeatInterval = 10 * time.Second
+	observerLeaseHeartbeatInterval   = 10 * time.Second
+	agentPulseLeaseHeartbeatInterval = 2 * time.Second
 )
+
+// AgentProcessPulseFreshFor is the bounded window in which a TUI may present
+// the launcher-owned process pulse as fresh. It is deliberately distinct from
+// await-review's heartbeat, which means only that a review waiter is running.
+const AgentProcessPulseFreshFor = 10 * time.Second
 
 // NewStore creates a Store, ensuring the coop directory exists.
 func NewStore(configFolder string) (*Store, error) {
@@ -570,51 +577,98 @@ func (s *Store) Delete(id string) error {
 // AcquireObserverLease gives one TUI process ownership of a session's passive
 // streams. A lease abandoned by a dead process is reclaimed on the next join.
 func (s *Store) AcquireObserverLease(id string) (func(), error) {
+	return s.acquireRenewedLease(
+		id,
+		".observer",
+		"observer",
+		ErrObserverLeaseHeld,
+		observerLeaseHeartbeatInterval,
+	)
+}
+
+// AcquireAgentProcessPulse gives one launcher sidecar ownership of a session's
+// agent-process pulse. The generated launcher holds this lease only while the
+// foreground agent command is running. It never creates, updates, or removes
+// await-review's separate heartbeat file.
+func (s *Store) AcquireAgentProcessPulse(id string) (func(), error) {
+	return s.acquireRenewedLease(
+		id,
+		".agent-pulse",
+		"agent process pulse",
+		ErrAgentProcessPulseHeld,
+		agentPulseLeaseHeartbeatInterval,
+	)
+}
+
+// AgentProcessPulseAge returns the age of the launcher-owned agent process
+// pulse. It returns -1 when no pulse lease exists.
+func (s *Store) AgentProcessPulseAge(id string) (time.Duration, error) {
+	path, err := s.sessionPath(id)
+	if err != nil {
+		return 0, err
+	}
+	info, err := os.Stat(path + ".agent-pulse")
+	if err != nil {
+		if os.IsNotExist(err) {
+			return -1, nil
+		}
+		return 0, err
+	}
+	return time.Since(info.ModTime()), nil
+}
+
+func (s *Store) acquireRenewedLease(
+	id string,
+	suffix string,
+	label string,
+	heldErr error,
+	renewEvery time.Duration,
+) (func(), error) {
 	path, err := s.sessionPath(id)
 	if err != nil {
 		return nil, err
 	}
-	leasePath := path + ".observer"
+	leasePath := path + suffix
 	unlock, err := s.acquireSessionLock(leasePath)
 	if err != nil {
-		return nil, fmt.Errorf("locking observer lease: %w", err)
+		return nil, fmt.Errorf("locking %s lease: %w", label, err)
 	}
 	if _, statErr := os.Stat(leasePath); statErr == nil {
 		if !s.lockAbandoned(leasePath) {
 			unlock()
-			return nil, fmt.Errorf("%w: %s", ErrObserverLeaseHeld, id)
+			return nil, fmt.Errorf("%w: %s", heldErr, id)
 		}
 		if removeErr := os.Remove(leasePath); removeErr != nil && !os.IsNotExist(removeErr) {
 			unlock()
-			return nil, fmt.Errorf("reclaiming observer lease: %w", removeErr)
+			return nil, fmt.Errorf("reclaiming %s lease: %w", label, removeErr)
 		}
 	} else if !os.IsNotExist(statErr) {
 		unlock()
-		return nil, fmt.Errorf("reading observer lease: %w", statErr)
+		return nil, fmt.Errorf("reading %s lease: %w", label, statErr)
 	}
 
 	contents := fmt.Sprintf("%d\n%d\n", os.Getpid(), time.Now().UnixNano())
 	file, err := os.OpenFile(leasePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		unlock()
-		return nil, fmt.Errorf("creating observer lease: %w", err)
+		return nil, fmt.Errorf("creating %s lease: %w", label, err)
 	}
 	if _, writeErr := file.WriteString(contents); writeErr != nil {
 		_ = file.Close()
 		_ = os.Remove(leasePath)
 		unlock()
-		return nil, fmt.Errorf("writing observer lease: %w", writeErr)
+		return nil, fmt.Errorf("writing %s lease: %w", label, writeErr)
 	}
 	if closeErr := file.Close(); closeErr != nil {
 		_ = os.Remove(leasePath)
 		unlock()
-		return nil, fmt.Errorf("closing observer lease: %w", closeErr)
+		return nil, fmt.Errorf("closing %s lease: %w", label, closeErr)
 	}
 	unlock()
 
 	stop := make(chan struct{})
 	done := make(chan struct{})
-	go s.renewObserverLease(leasePath, contents, stop, done)
+	go s.renewLease(leasePath, contents, renewEvery, stop, done)
 	var releaseOnce sync.Once
 	return func() {
 		releaseOnce.Do(func() {
@@ -632,9 +686,14 @@ func (s *Store) AcquireObserverLease(id string) (func(), error) {
 	}, nil
 }
 
-func (s *Store) renewObserverLease(leasePath, contents string, stop <-chan struct{}, done chan<- struct{}) {
+func (s *Store) renewLease(
+	leasePath string,
+	contents string,
+	interval time.Duration,
+	stop <-chan struct{},
+	done chan<- struct{},
+) {
 	defer close(done)
-	interval := observerLeaseHeartbeatInterval
 	if sessionLockStale > 0 {
 		maxInterval := sessionLockStale / 3
 		if maxInterval > 0 && (interval <= 0 || interval > maxInterval) {
