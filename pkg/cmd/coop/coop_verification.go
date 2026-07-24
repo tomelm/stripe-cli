@@ -29,10 +29,12 @@ func newCoopPlanner() (*coopPlanner, error) {
 	return &coopPlanner{catalog: catalog}, nil
 }
 
-// coopEvaluator is TUI-owned glue around the pure planner and bounded reader.
+// coopEvaluator is trusted Stripe CLI glue around the pure planner and bounded
+// reader. Both the TUI observer and agent-facing commands use this same type.
 type coopEvaluator struct {
 	*coopPlanner
 	runner    *checkrun.Evaluator
+	reader    *checkrun.StripeReader
 	accountID string
 	now       func() time.Time
 }
@@ -42,18 +44,22 @@ func newCoopEvaluator(apiKey, accountID string) (*coopEvaluator, error) {
 	if err != nil {
 		return nil, err
 	}
-	var reader checkrun.Reader
+	var (
+		reader       checkrun.Reader
+		stripeReader *checkrun.StripeReader
+	)
 	apiKey = strings.TrimSpace(apiKey)
 	accountID = strings.TrimSpace(accountID)
 	if apiKey != "" && accountID != "" {
 		candidate, readerErr := newCoopStripeReader(apiKey, accountID)
 		if readerErr == nil {
 			reader = candidate
+			stripeReader = candidate
 		}
 	}
 	return &coopEvaluator{
 		coopPlanner: planner, runner: checkrun.NewEvaluator(reader, planner.catalog),
-		accountID: strings.TrimSpace(accountID), now: time.Now,
+		reader: stripeReader, accountID: strings.TrimSpace(accountID), now: time.Now,
 	}, nil
 }
 
@@ -137,13 +143,13 @@ func (e *coopEvaluator) Evaluate(ctx context.Context, input workflow.EvaluationI
 	if input.Session == nil || input.Session.StripeAccountID == "" {
 		return e.accountUnavailable(
 			"Automatic verification is unavailable because this session has no pinned Stripe account.",
-			"Configure test-mode Stripe authentication in the attached Co-op TUI.",
+			"Configure test-mode Stripe authentication and retry.",
 		), nil
 	}
 	if e.accountID == "" {
 		return e.accountUnavailable(
 			"Automatic verification is unavailable because the active Stripe account could not be identified.",
-			"Configure test-mode Stripe authentication in the attached Co-op TUI.",
+			"Configure test-mode Stripe authentication and retry.",
 		), nil
 	}
 	if input.Session.StripeAccountID != e.accountID {

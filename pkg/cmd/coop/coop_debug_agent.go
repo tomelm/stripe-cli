@@ -189,8 +189,7 @@ func (a *coopDebugAgent) completeActiveStep(ctx context.Context, step int) error
 	if attempt == nil {
 		return fmt.Errorf("active step %d has no current attempt", step)
 	}
-	// report-work is submission-only. Once submitted, the debug harness runs
-	// its deterministic evaluator exactly once through the normal workflow
+	// report-work runs the deterministic evaluator through the normal workflow
 	// boundary; it must not submit a second report while the node is active.
 	if attempt.ReportedAt != nil {
 		return a.sleep(ctx, a.pollInterval)
@@ -213,13 +212,6 @@ func (a *coopDebugAgent) completeActiveStep(ctx context.Context, step int) error
 		input.AppURL = "http://localhost:3000"
 	}
 	resp, err = service.ReportWorkAttempt(ctx, a.sessionID, step, attempt.Number, input)
-	if err != nil {
-		return err
-	}
-	if !resp.OK {
-		return fmt.Errorf("%s", resp.Error)
-	}
-	resp, err = service.Reevaluate(ctx, a.sessionID, step, attempt.Number, workflow.TriggerPoll)
 	if err != nil {
 		return err
 	}

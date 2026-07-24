@@ -60,7 +60,9 @@ type ObservedCandidateProvider interface {
 	) (coop.ResourceRequirement, bool, error)
 }
 
-// Evaluator is the trusted read-only boundary owned by the TUI coordinator.
+// Evaluator is the trusted read-only boundary shared by the TUI observer and
+// agent-facing Co-op commands. The coding agent supplies only typed bindings;
+// evaluator credentials and reads remain inside the Stripe CLI process.
 type Evaluator interface {
 	Evaluate(context.Context, EvaluationInput) (Evaluation, error)
 }
@@ -332,8 +334,8 @@ func (s *Service) evaluateAndApplyObservation(ctx context.Context, sessionID str
 		return coop.CommandResponse{}, ctx.Err()
 	}
 	if evalErr != nil {
-		// The TUI coordinator is the only evaluator. Any bounded timeout or
-		// local contract error is disclosed as unavailable, never as a pass.
+		// Any bounded timeout or local contract error is disclosed as
+		// unavailable, never as a pass.
 		evaluation = Evaluation{Results: []coop.CheckResult{{
 			ID: "automatic.verification", Kind: coop.CheckCoverage,
 			Importance: coop.CheckRequired, Status: coop.CheckUnavailable,
@@ -852,7 +854,7 @@ func (s *Service) evaluationResponse(session *coop.Session, nodeNumber, attemptN
 		response.Next = fmt.Sprintf("stripe coop agent start-work --session=%s --node=%d --note=%s", session.ID, nodeNumber, quoteArg("Fixing automatic verification findings"))
 	case decisionPending:
 		response.State = string(node.State)
-		response.Message = "Implementation recorded. Exercise the required Stripe flow while the attached Co-op TUI verifies it."
+		response.Message = "Implementation is not verified yet. Exercise the required Stripe flow while Co-op checks it."
 		response.Next = fmt.Sprintf("stripe coop agent await-review --session=%s --node=%d --attempt=%d", session.ID, nodeNumber, attemptNumber)
 	case decisionNeedsHuman:
 		response.State = string(coop.NodeReview)

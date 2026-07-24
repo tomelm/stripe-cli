@@ -36,7 +36,7 @@ func TestStartWorkTransitionsNodeAndReturnsTypedNextCommand(t *testing.T) {
 	assert.Equal(t, "Scanning", node.Activity)
 }
 
-func TestReportWorkExposesHumanReviewBeforeObserverRuns(t *testing.T) {
+func TestReportWorkEvaluatesWhileHumanReviewStaysVisible(t *testing.T) {
 	store, session := workflowTestStore(t)
 	service := newPassingWorkflowService(store)
 
@@ -46,18 +46,12 @@ func TestReportWorkExposesHumanReviewBeforeObserverRuns(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, resp.OK)
 	assert.Equal(t, "review", resp.State)
-	assert.Equal(t, "pending", resp.Decision)
-	assert.Contains(t, resp.Message, "attached Co-op TUI")
-	assert.Contains(t, resp.Next, "await-review")
-
-	observed, err := service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
-	require.NoError(t, err)
-	assert.Equal(t, "review", observed.State)
-	assert.Contains(t, observed.Message, "Continue the remaining work")
-	assert.Contains(t, observed.Next, "--node=2")
+	assert.Equal(t, "needs_human", resp.Decision)
+	assert.Contains(t, resp.Message, "Continue the remaining work")
+	assert.Contains(t, resp.Next, "--node=2")
 }
 
-func TestObserverRoutesToAwaitReviewWhenStepReady(t *testing.T) {
+func TestReportWorkRoutesToAwaitReviewWhenStepReady(t *testing.T) {
 	store, session := workflowTestStore(t)
 	service := newPassingWorkflowService(store)
 
@@ -65,20 +59,14 @@ func TestObserverRoutesToAwaitReviewWhenStepReady(t *testing.T) {
 	require.NoError(t, err)
 	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, first.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented first node"})
 	require.NoError(t, err)
-	_, err = service.Reevaluate(context.Background(), session.ID, 1, first.Attempt, TriggerPoll)
-	require.NoError(t, err)
 	second, err := service.StartWork(session.ID, 2, "Second")
 	require.NoError(t, err)
 	resp, err := service.ReportWorkAttempt(context.Background(), session.ID, 2, second.Attempt, ReportWorkInput{File: "client.go", Note: "Implemented second node"})
 	require.NoError(t, err)
 	require.True(t, resp.OK)
 	assert.Contains(t, resp.Next, "stripe coop agent await-review")
-	assert.Equal(t, "pending", resp.Decision)
-
-	observed, err := service.Reevaluate(context.Background(), session.ID, 2, second.Attempt, TriggerPoll)
-	require.NoError(t, err)
-	assert.Contains(t, observed.Message, "ready for developer review")
-	assert.Contains(t, observed.Next, "stripe coop agent await-review")
+	assert.Equal(t, "needs_human", resp.Decision)
+	assert.Contains(t, resp.Message, "ready for developer review")
 }
 
 func TestAgentWorkflowRequiresPlannerButNotEvaluator(t *testing.T) {

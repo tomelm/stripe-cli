@@ -147,7 +147,7 @@ func TestVerificationAcceptanceRequiredPassAutoCompletesNonUI(t *testing.T) {
 	started, err := service.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
 
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
 		File: "server.go", Note: "Created customer",
 		StripeResources: map[string]string{"customer": "cus_acceptance"},
 	})
@@ -188,7 +188,7 @@ func TestVerificationAcceptanceApplicationOutcomeCompletesNonUIExplicitlyUnverif
 	require.Len(t, started.RequiredOutcomes, 1)
 	assert.Equal(t, "durable-access", started.RequiredOutcomes[0].ID)
 
-	_, err = service.ReportWorkAttempt(
+	_, err = reportAcceptanceWork(service,
 		context.Background(),
 		session.ID,
 		1,
@@ -225,7 +225,7 @@ func TestVerificationAcceptanceEvaluatorCannotMutateAwayApplicationOutcome(t *te
 	started, err := service.StartWork(session.ID, 1, "Building durable access")
 	require.NoError(t, err)
 
-	_, err = service.ReportWorkAttempt(
+	_, err = reportAcceptanceWork(service,
 		context.Background(),
 		session.ID,
 		1,
@@ -255,7 +255,7 @@ func TestVerificationAcceptanceCorrectionAttemptRetainsApplicationContract(t *te
 	)
 	started, err := service.StartWork(session.ID, 1, "Building durable access")
 	require.NoError(t, err)
-	_, err = service.ReportWorkAttempt(
+	_, err = reportAcceptanceWork(service,
 		context.Background(),
 		session.ID,
 		1,
@@ -290,7 +290,7 @@ func TestVerificationAcceptanceUIOutcomeRecordsLimitedCoverageOnFirstConfirm(t *
 	service := newVerificationAcceptanceService(store, evaluator, clock)
 	started, err := service.StartWork(session.ID, 1, "Building subscription UI")
 	require.NoError(t, err)
-	_, err = service.ReportWorkAttempt(
+	_, err = reportAcceptanceWork(service,
 		context.Background(),
 		session.ID,
 		1,
@@ -333,7 +333,7 @@ func TestVerificationAcceptanceCandidateCannotAutoCompleteNonUI(t *testing.T) {
 	started, err := service.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
 
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
 
 	require.NoError(t, err)
 	response, err := service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
@@ -358,7 +358,7 @@ func TestVerificationAcceptanceAsyncHandlerPassCompletesWithoutAutomaticConfirma
 	_, err = service.ReportCheckAttempt(session.ID, 1, started.Attempt, "Observed the handler side effect", true)
 	require.NoError(t, err)
 
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "webhook.go", Note: "Implemented webhook"})
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "webhook.go", Note: "Implemented webhook"})
 
 	require.NoError(t, err)
 	response, err := service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
@@ -393,7 +393,7 @@ func TestVerificationAcceptanceRequiredFailureCreatesCorrectionAttempt(t *testin
 	started, err := service.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
 
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
 		File: "server.go", Note: "Created the wrong customer",
 	})
 	require.NoError(t, err)
@@ -434,7 +434,7 @@ func TestVerificationAcceptanceAgentReportedFailureRequiresCorrection(t *testing
 	assert.Empty(t, reportedCheck.Next)
 	assert.Contains(t, reportedCheck.NextTemplate, "report-work")
 
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
 	require.NoError(t, err)
 	response, err := service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
 	require.NoError(t, err)
@@ -456,7 +456,7 @@ func TestVerificationAcceptanceNoDirectVerifierCompletesUnverified(t *testing.T)
 	started, err := service.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
 
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
 	require.NoError(t, err)
 	response, err := service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
 	require.NoError(t, err)
@@ -484,7 +484,7 @@ func TestVerificationAcceptancePassiveFailureCannotBlameOrWakeAgent(t *testing.T
 	require.NoError(t, err)
 	require.NoError(t, service.RecordSupportingResult(session.ID, 1, started.Attempt, observedFailure))
 
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
 
 	require.NoError(t, err)
 	response, err := service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
@@ -507,7 +507,7 @@ func TestVerificationAcceptanceObserverPollsSameEvaluatorUntilPass(t *testing.T)
 	started, err := service.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
 
-	reported, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
+	reported, err := reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
 	require.NoError(t, err)
 	assert.Equal(t, string(decisionPending), reported.Decision)
 	assert.Equal(t, coop.NodeActive, acceptanceNode(t, readAcceptanceSession(t, store, session.ID)).State)
@@ -560,7 +560,7 @@ func TestVerificationAcceptanceBusyRequestCoalescesOneFollowUpRead(t *testing.T)
 	service := newVerificationAcceptanceService(store, evaluator, clock)
 	started, err := service.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
 		File: "server.go", Note: "Implemented node",
 	})
 	require.NoError(t, err)
@@ -628,7 +628,7 @@ func TestVerificationAcceptanceEventWaitsBehindPollWithExactIdentity(t *testing.
 	service := NewService(store, WithEvaluator(evaluator))
 	started, err := service.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
 		File: "server.go", Note: "Implemented node",
 	})
 	require.NoError(t, err)
@@ -698,7 +698,7 @@ func TestVerificationAcceptanceExpiredOwnerCannotLandAfterLeaseReclaimed(t *test
 	service := newVerificationAcceptanceService(store, evaluator, clock)
 	started, err := service.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
 		File: "server.go", Note: "Implemented node",
 	})
 	require.NoError(t, err)
@@ -779,7 +779,7 @@ func TestVerificationAcceptanceBasisMismatchSalvagesCandidateForNextPoll(t *test
 	service := newVerificationAcceptanceService(store, evaluator, clock)
 	started, err := service.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
 		File: "server.go", Note: "Implemented node",
 	})
 	require.NoError(t, err)
@@ -846,7 +846,7 @@ func TestVerificationAcceptanceLateFailureWakesAgentWithRepairEvidence(t *testin
 	service := newVerificationAcceptanceService(store, evaluator, newAcceptanceClock())
 	started, err := service.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
-	response, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
+	response, err := reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
 	require.NoError(t, err)
 	assert.Equal(t, string(decisionPending), response.Decision)
 	response, err = service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
@@ -880,7 +880,7 @@ func TestVerificationAcceptanceStaleAsyncResultCannotLand(t *testing.T) {
 	setupService := newVerificationAcceptanceService(store, setupAcceptanceEvaluator(), clock)
 	started, err := setupService.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
-	_, err = setupService.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
+	_, err = reportAcceptanceWork(setupService, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
 	require.NoError(t, err)
 	_, err = setupService.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
 	require.NoError(t, err)
@@ -961,7 +961,7 @@ func TestVerificationAcceptanceHumanRejectionCannotRaceInflightInitialEvaluation
 	started, err := service.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
 
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
 	require.NoError(t, err)
 
 	type evaluationResult struct {
@@ -1013,24 +1013,27 @@ func TestVerificationAcceptanceUIConfirmationWinsDuringInitialEvaluation(t *test
 	started, err := service.StartWork(session.ID, 1, "Building UI")
 	require.NoError(t, err)
 
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
-		File: "checkout.tsx", Note: "Built checkout UI", AppURL: "http://localhost:3000/checkout",
-	})
-	require.NoError(t, err)
-
 	type evaluationResult struct {
 		response coop.CommandResponse
 		err      error
 	}
 	done := make(chan evaluationResult, 1)
 	go func() {
-		response, evaluateErr := service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
+		response, evaluateErr := service.ReportWorkAttempt(
+			context.Background(),
+			session.ID,
+			1,
+			started.Attempt,
+			ReportWorkInput{
+				File: "checkout.tsx", Note: "Built checkout UI", AppURL: "http://localhost:3000/checkout",
+			},
+		)
 		done <- evaluationResult{response: response, err: evaluateErr}
 	}()
 	select {
 	case <-entered:
 	case <-time.After(time.Second):
-		t.Fatal("observer evaluator did not start")
+		t.Fatal("report-work evaluator did not start")
 	}
 
 	inFlight := readAcceptanceSession(t, store, session.ID)
@@ -1071,7 +1074,7 @@ func TestVerificationAcceptanceBasisChangesDiscardInflightEvaluationAndPreserveS
 			if nodeType == coop.NodeUIComponent {
 				input.AppURL = "http://localhost:4242/checkout"
 			}
-			_, err = setup.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, input)
+			_, err = reportAcceptanceWork(setup, context.Background(), session.ID, 1, started.Attempt, input)
 			require.NoError(t, err)
 			_, err = setup.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
 			require.NoError(t, err)
@@ -1200,7 +1203,7 @@ func TestVerificationAcceptanceObservationCannotFinishUnreportedWork(t *testing.
 	require.Len(t, node.CurrentAttempt().Results, 1)
 	assert.Equal(t, coop.CheckPassed, node.CurrentAttempt().Results[0].Status)
 
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
 	require.NoError(t, err)
 	reported, err := service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
 	require.NoError(t, err)
@@ -1220,7 +1223,7 @@ func TestVerificationAcceptanceUIRequiresAppURL(t *testing.T) {
 	assert.Contains(t, started.NextTemplate, "--app-url=<absolute-app-url>")
 	assert.Contains(t, started.RequiredInputs, "app-url")
 
-	response, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "checkout.tsx", Note: "Built checkout UI"})
+	response, err := reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "checkout.tsx", Note: "Built checkout UI"})
 
 	require.NoError(t, err)
 	assert.False(t, response.OK)
@@ -1238,7 +1241,7 @@ func TestVerificationAcceptanceRevalidatesStoredAppURLAtOpenBoundary(t *testing.
 	service := newVerificationAcceptanceService(store, setupAcceptanceEvaluator(), newAcceptanceClock())
 	started, err := service.StartWork(session.ID, 1, "Building UI")
 	require.NoError(t, err)
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
 		File: "checkout.tsx", Note: "Built checkout UI", AppURL: "http://localhost:4242/checkout",
 	})
 	require.NoError(t, err)
@@ -1272,7 +1275,7 @@ func TestVerificationAcceptanceUIOpenIsStableButOptionalForConfirm(t *testing.T)
 	started, err := service.StartWork(session.ID, 1, "Building UI")
 	require.NoError(t, err)
 	clock.Set(time.Date(2026, 7, 21, 18, 1, 0, 0, time.UTC))
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
 		File: "checkout.tsx", Note: "Built checkout UI", AppURL: "http://localhost:4242/checkout",
 	})
 	require.NoError(t, err)
@@ -1330,7 +1333,7 @@ func TestVerificationAcceptancePendingEventStateDoesNotBlockHumanReview(t *testi
 	service := newVerificationAcceptanceService(store, evaluator, clock)
 	started, err := service.StartWork(session.ID, 1, "Building subscription checkout")
 	require.NoError(t, err)
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
 		File: "checkout.tsx", Note: "Built checkout UI", AppURL: "http://localhost:4242/checkout",
 	})
 	require.NoError(t, err)
@@ -1364,7 +1367,7 @@ func TestVerificationAcceptanceUnavailableRecordsOnePressHumanDecision(t *testin
 	service := newVerificationAcceptanceService(store, evaluator, clock)
 	started, err := service.StartWork(session.ID, 1, "Building UI")
 	require.NoError(t, err)
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
 		File: "checkout.tsx", Note: "Built checkout UI", AppURL: "http://localhost:4242/checkout",
 	})
 	require.NoError(t, err)
@@ -1407,7 +1410,7 @@ func TestVerificationAcceptanceHumanReviewCannotOverrideChangedFailure(t *testin
 	)
 	started, err := service.StartWork(session.ID, 1, "Building UI")
 	require.NoError(t, err)
-	_, err = service.ReportWorkAttempt(
+	_, err = reportAcceptanceWork(service,
 		context.Background(),
 		session.ID,
 		1,
@@ -1460,7 +1463,7 @@ func TestVerificationAcceptanceCandidateRecordsLimitedCoverageDecision(t *testin
 	service := newVerificationAcceptanceService(store, evaluator, clock)
 	started, err := service.StartWork(session.ID, 1, "Building UI")
 	require.NoError(t, err)
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
 		File: "checkout.tsx", Note: "Built checkout UI", AppURL: "http://localhost:4242/checkout",
 	})
 	require.NoError(t, err)
@@ -1491,7 +1494,7 @@ func TestVerificationAcceptanceRecoveredEmptySnapshotAvoidsLimitedCoverageDecisi
 	service := newVerificationAcceptanceService(store, evaluator, clock)
 	started, err := service.StartWork(session.ID, 1, "Building UI")
 	require.NoError(t, err)
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
 		File: "checkout.tsx", Note: "Built checkout UI", AppURL: "http://localhost:4242/checkout",
 	})
 	require.NoError(t, err)
@@ -1539,7 +1542,7 @@ func TestVerificationAcceptanceUnavailableBackendJoinsContainingUIReview(t *test
 
 	ui, err := service.StartWork(session.ID, 1, "Building UI")
 	require.NoError(t, err)
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, ui.Attempt, ReportWorkInput{
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, ui.Attempt, ReportWorkInput{
 		File: "checkout.tsx", Note: "Built checkout UI", AppURL: "http://localhost:3000/checkout",
 	})
 	require.NoError(t, err)
@@ -1547,7 +1550,7 @@ func TestVerificationAcceptanceUnavailableBackendJoinsContainingUIReview(t *test
 	require.NoError(t, err)
 	state, err := service.StartWork(session.ID, 2, "Checking state")
 	require.NoError(t, err)
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 2, state.Attempt, ReportWorkInput{File: "webhook.go", Note: "Implemented webhook"})
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 2, state.Attempt, ReportWorkInput{File: "webhook.go", Note: "Implemented webhook"})
 	require.NoError(t, err)
 	reported, err := service.Reevaluate(context.Background(), session.ID, 2, state.Attempt, TriggerPoll)
 	require.NoError(t, err)
@@ -1580,7 +1583,7 @@ func TestVerificationAcceptanceHumanRejectionPreservesHistory(t *testing.T) {
 	service := newVerificationAcceptanceService(store, evaluator, newAcceptanceClock())
 	started, err := service.StartWork(session.ID, 1, "Building UI")
 	require.NoError(t, err)
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
 		File: "checkout.tsx", Note: "Built first UI", AppURL: "http://localhost:4242/checkout",
 	})
 	require.NoError(t, err)
@@ -1629,7 +1632,7 @@ func TestVerificationAcceptanceAwaitWakesForHumanRejectionAndReusesCorrectionAtt
 
 	started, err := service.StartWork(session.ID, 1, "Building UI")
 	require.NoError(t, err)
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
 		File: "checkout.tsx", Note: "Built first UI", AppURL: "http://localhost:4242/checkout",
 	})
 	require.NoError(t, err)
@@ -1683,7 +1686,7 @@ func TestVerificationAcceptanceAwaitWakesForHumanRejectionAndReusesCorrectionAtt
 	assert.Equal(t, 2, continued.Attempt, "start-work must reuse the correction attempt created by rejection")
 	assert.Contains(t, continued.Message, "Make the payment error state clearer.")
 
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, continued.Attempt, ReportWorkInput{
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, continued.Attempt, ReportWorkInput{
 		File: "checkout.tsx", Note: "Added the requested error state", AppURL: "http://localhost:4242/checkout",
 	})
 	require.NoError(t, err)
@@ -1745,7 +1748,7 @@ func TestVerificationAcceptanceObserverPollsEveryOpenedUIAttempt(t *testing.T) {
 
 	first, err := service.StartWork(session.ID, 1, "Building checkout UI")
 	require.NoError(t, err)
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, first.Attempt, ReportWorkInput{
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, first.Attempt, ReportWorkInput{
 		File: "checkout.tsx", Note: "Built checkout UI", AppURL: "http://localhost:4242/checkout",
 	})
 	require.NoError(t, err)
@@ -1753,7 +1756,7 @@ func TestVerificationAcceptanceObserverPollsEveryOpenedUIAttempt(t *testing.T) {
 	require.NoError(t, err)
 	second, err := service.StartWork(session.ID, 2, "Building success UI")
 	require.NoError(t, err)
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 2, second.Attempt, ReportWorkInput{
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 2, second.Attempt, ReportWorkInput{
 		File: "success.tsx", Note: "Built success UI", AppURL: "http://localhost:4242/success",
 	})
 	require.NoError(t, err)
@@ -1785,15 +1788,22 @@ func TestVerificationAcceptanceObserverPollsEveryOpenedUIAttempt(t *testing.T) {
 
 func TestVerificationAcceptanceAwaitTimeoutReturnsExactRetryAndCleansHeartbeat(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeUIComponent)
-	passed := requiredAcceptanceResult("resource.checkout.exists", coop.CheckResource, coop.CheckPassed)
+	pending := requiredAcceptanceResult("state.checkout.complete", coop.CheckState, coop.CheckPending)
 	evaluator := &acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) (Evaluation, error) {
-		return Evaluation{Results: []coop.CheckResult{passed}}, nil
+		return Evaluation{Results: []coop.CheckResult{pending}}, nil
 	}}
-	service := newVerificationAcceptanceService(store, evaluator, newAcceptanceClock())
+	clock := newAcceptanceClock()
+	service := NewService(
+		store,
+		WithEvaluator(evaluator),
+		WithClock(clock.Now, clock.Sleep),
+		WithAwaitTimeout(time.Minute),
+		WithEvaluationInterval(time.Millisecond),
+	)
 
 	started, err := service.StartWork(session.ID, 1, "Building UI")
 	require.NoError(t, err)
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
 		File: "checkout.tsx", Note: "Built checkout UI", AppURL: "http://localhost:4242/checkout",
 	})
 	require.NoError(t, err)
@@ -1807,38 +1817,132 @@ func TestVerificationAcceptanceAwaitTimeoutReturnsExactRetryAndCleansHeartbeat(t
 		"stripe coop agent await-review --session=verification_acceptance --node=1 --attempt=1",
 		response.Next,
 	)
+	assert.Equal(t, maxAgentAwaitEvaluations, len(evaluator.Inputs()),
+		"pending human review remains quietly open after its bounded direct-check budget")
 	age, heartbeatErr := store.HeartbeatAge(session.ID)
 	require.NoError(t, heartbeatErr)
 	assert.Equal(t, time.Duration(-1), age)
 }
 
-func TestVerificationAcceptanceSubmissionAndAwaitNeverInvokeEvaluatorWithoutTUI(t *testing.T) {
+func TestVerificationAcceptanceReportPassesAndCompletesWithoutTUI(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeCLICommand)
-	panicEvaluator := &acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) (Evaluation, error) {
-		panic("agent submission/watch path invoked the trusted evaluator")
-	}}
-	service := NewService(
+	passed := requiredAcceptanceResult("resource.customer.exists", coop.CheckResource, coop.CheckPassed)
+	evaluator := &acceptanceEvaluator{evaluations: []Evaluation{{Results: []coop.CheckResult{passed}}}}
+	directService := NewService(
 		store,
-		WithRequirementProvider(panicEvaluator),
-		WithAwaitTimeout(time.Millisecond),
+		WithEvaluator(evaluator),
+	)
+	started, err := directService.StartWork(session.ID, 1, "Building")
+	require.NoError(t, err)
+	reported, err := directService.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
+		File: "server.go", Note: "Implemented node",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, string(decisionConfirmed), reported.Decision)
+	assert.Equal(t, "confirmed", reported.State)
+	assert.Equal(t, coop.CheckPassed, acceptanceResult(t, reported.Verification, passed.ID).Status)
+	require.Len(t, evaluator.Inputs(), 1)
+	assert.Equal(t, TriggerPoll, evaluator.Inputs()[0].Trigger)
+	node := acceptanceNode(t, readAcceptanceSession(t, store, session.ID))
+	assert.Equal(t, coop.NodeDone, node.State)
+	require.Len(t, node.Attempts, 1)
+	assert.Equal(t, coop.AttemptConfirmed, node.Attempts[0].EndReason)
+	assert.Equal(t, coop.CheckPassed, acceptanceResult(t, node.Attempts[0].Results, passed.ID).Status)
+}
+
+func TestVerificationAcceptanceAwaitRerunsPendingAndWakesForFailureWithoutTUI(t *testing.T) {
+	store, session := newVerificationAcceptanceStore(t, coop.NodeCLICommand)
+	pending := requiredAcceptanceResult("state.checkout.complete", coop.CheckState, coop.CheckPending)
+	failed := requiredAcceptanceResult("state.checkout.complete", coop.CheckState, coop.CheckFailed)
+	failed.Detail = "The Checkout Session expired."
+	failed.Expected = "complete"
+	failed.Observed = "expired"
+	failed.Repair = "Create and exercise a new Checkout Session."
+	evaluator := &acceptanceEvaluator{evaluations: []Evaluation{
+		{Results: []coop.CheckResult{pending}},
+		{Results: []coop.CheckResult{failed}},
+	}}
+	clock := newAcceptanceClock()
+	directService := NewService(
+		store,
+		WithEvaluator(evaluator),
+		WithClock(clock.Now, clock.Sleep),
+		WithAwaitTimeout(time.Second),
 		WithEvaluationInterval(time.Millisecond),
 	)
-	started, err := service.StartWork(session.ID, 1, "Building")
+	started, err := directService.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
-	reported, err := service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
+	reported, err := directService.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
+		File: "server.go", Note: "Implemented node",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, string(decisionPending), reported.Decision)
+	assert.Equal(t, string(coop.NodeActive), reported.State)
+
+	awaited, err := directService.AwaitReviewAttempt(context.Background(), session.ID, 1, started.Attempt)
+	require.NoError(t, err)
+	assert.Equal(t, string(decisionNeedsAgent), awaited.Decision)
+	assert.Equal(t, string(coop.NodeActive), awaited.State)
+	assert.Equal(t, 2, awaited.Attempt)
+	assert.Contains(t, awaited.Message, "expired")
+	assert.Contains(t, awaited.Message, "Create and exercise a new Checkout Session.")
+	assert.Contains(t, awaited.Next, "stripe coop agent start-work")
+	require.Len(t, evaluator.Inputs(), 2)
+	assert.Equal(t, TriggerPoll, evaluator.Inputs()[0].Trigger)
+	assert.Equal(t, TriggerPoll, evaluator.Inputs()[1].Trigger)
+
+	node := acceptanceNode(t, readAcceptanceSession(t, store, session.ID))
+	require.Len(t, node.Attempts, 2)
+	assert.Equal(t, coop.AttemptVerificationChanges, node.Attempts[0].EndReason)
+	assert.Equal(t, coop.CheckFailed, acceptanceResult(t, node.Attempts[0].Results, failed.ID).Status)
+	assert.Equal(t, 2, node.CurrentAttempt().Number)
+	assert.Contains(t, node.CurrentAttempt().Feedback, "expired")
+	age, heartbeatErr := store.HeartbeatAge(session.ID)
+	require.NoError(t, heartbeatErr)
+	assert.Equal(t, time.Duration(-1), age)
+}
+
+func TestVerificationAcceptanceAwaitBoundsPendingReadsAndReturnsAgentAction(t *testing.T) {
+	store, session := newVerificationAcceptanceStore(t, coop.NodeCLICommand)
+	pending := requiredAcceptanceResult("state.checkout.complete", coop.CheckState, coop.CheckPending)
+	pending.Detail = "Checkout has not completed yet."
+	pending.Repair = "Exercise Checkout, then check again."
+	evaluator := &acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) (Evaluation, error) {
+		return Evaluation{Results: []coop.CheckResult{pending}}, nil
+	}}
+	clock := newAcceptanceClock()
+	directService := NewService(
+		store,
+		WithEvaluator(evaluator),
+		WithClock(clock.Now, clock.Sleep),
+		WithAwaitTimeout(5*time.Second),
+		WithEvaluationInterval(time.Millisecond),
+	)
+	started, err := directService.StartWork(session.ID, 1, "Building")
+	require.NoError(t, err)
+	reported, err := directService.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
 		File: "server.go", Note: "Implemented node",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, string(decisionPending), reported.Decision)
 
-	awaited, err := service.AwaitReviewAttempt(context.Background(), session.ID, 1, started.Attempt)
+	awaitStartedAt := clock.Now()
+	awaited, err := directService.AwaitReviewAttempt(context.Background(), session.ID, 1, started.Attempt)
 	require.NoError(t, err)
-	assert.Equal(t, "timeout", awaited.State)
-	assert.Contains(t, awaited.Message, "attached Co-op TUI")
-	assert.Empty(t, panicEvaluator.Inputs())
+	assert.Equal(t, string(decisionPending), awaited.Decision)
+	assert.NotEqual(t, "timeout", awaited.State)
+	assert.Contains(t, awaited.Message, "pending after bounded checks")
+	assert.Contains(t, awaited.Next, "stripe coop agent await-review")
+	assert.Equal(t, 1+maxAgentAwaitEvaluations, len(evaluator.Inputs()),
+		"report-work performs one read and one await invocation has a fixed retry budget")
+	assert.True(t, clock.Now().Before(awaitStartedAt.Add(5*time.Second)))
+
 	node := acceptanceNode(t, readAcceptanceSession(t, store, session.ID))
 	assert.Equal(t, coop.NodeActive, node.State)
-	assert.Empty(t, node.CurrentAttempt().Results)
+	assert.Equal(t, coop.CheckPending, acceptanceResult(t, node.CurrentAttempt().Results, pending.ID).Status)
+	age, heartbeatErr := store.HeartbeatAge(session.ID)
+	require.NoError(t, heartbeatErr)
+	assert.Equal(t, time.Duration(-1), age)
 }
 
 func TestVerificationAcceptanceReportRefreshesPreReportObservation(t *testing.T) {
@@ -1868,7 +1972,7 @@ func TestVerificationAcceptanceReportRefreshesPreReportObservation(t *testing.T)
 	require.NotNil(t, before.AutomaticResultsAt)
 	assert.False(t, AttemptNeedsReevaluation(before))
 
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
 		File: "server.go", Note: "Created and persisted the Customer",
 		StripeResources: map[string]string{"customer": "cus_acceptance"},
 	})
@@ -1910,7 +2014,7 @@ func TestVerificationAcceptanceCanceledTriggerDoesNotBlockHumanConfirmation(t *t
 	service := newVerificationAcceptanceService(store, evaluator, clock)
 	started, err := service.StartWork(session.ID, 1, "Building UI")
 	require.NoError(t, err)
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
 		File: "checkout.tsx", Note: "Built checkout UI", AppURL: "http://localhost:4242/checkout",
 	})
 	require.NoError(t, err)
@@ -1991,7 +2095,7 @@ func TestVerificationAcceptanceEvaluatorTimeoutDisclosesUnavailableAndReleasesLe
 	service.evalTimeout = 5 * time.Millisecond
 	started, err := service.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
-	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
+	_, err = reportAcceptanceWork(service, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
 		File: "server.go", Note: "Implemented node",
 	})
 	require.NoError(t, err)
@@ -2015,7 +2119,7 @@ func TestVerificationAcceptanceRejoinRecoversPersistedExpiredLease(t *testing.T)
 	agent := NewService(store, WithRequirementProvider(evaluator), WithClock(clock.Now, clock.Sleep))
 	started, err := agent.StartWork(session.ID, 1, "Building")
 	require.NoError(t, err)
-	_, err = agent.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
+	_, err = reportAcceptanceWork(agent, context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{
 		File: "server.go", Note: "Implemented node",
 	})
 	require.NoError(t, err)
@@ -2140,6 +2244,25 @@ func newVerificationAcceptanceService(store Store, evaluator Evaluator, clock *a
 		WithAwaitTimeout(time.Second),
 		WithEvaluationInterval(time.Millisecond),
 	)
+}
+
+// Most acceptance cases below isolate observer-triggered evaluation, lease,
+// and reconciliation behavior. Build their reported-at fixture through a
+// planner-only service so the separately asserted Reevaluate call remains the
+// first read. Agent-driven evaluation has dedicated end-to-end cases.
+func reportAcceptanceWork(
+	service *Service,
+	ctx context.Context,
+	sessionID string,
+	nodeNumber, attemptNumber int,
+	input ReportWorkInput,
+) (coop.CommandResponse, error) {
+	submission := NewService(
+		service.store,
+		WithRequirementProvider(service.requirementProvider),
+		WithClock(service.now, service.sleep),
+	)
+	return submission.ReportWorkAttempt(ctx, sessionID, nodeNumber, attemptNumber, input)
 }
 
 func setupAcceptanceEvaluator() Evaluator {

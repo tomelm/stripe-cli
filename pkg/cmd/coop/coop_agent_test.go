@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -83,13 +86,73 @@ func TestNewAgentWorkflowServiceDoesNotReadCredentialsOrPinAccount(t *testing.T)
 	session := &coop.Session{ID: "agent_submission_only", Status: coop.SessionActive}
 	require.NoError(t, store.Write(session))
 
-	_, err = newAgentWorkflowService(session.ID)
+	_, err = newAgentWorkflowService(context.Background(), session.ID)
 	require.NoError(t, err)
 	unchanged, err := store.Read(session.ID)
 	require.NoError(t, err)
 	assert.Empty(t, unchanged.StripeAccountID)
 	assert.Equal(t, 0, credentialReads)
 	assert.Equal(t, 1, unchanged.Version)
+}
+
+func TestNewAgentWorkflowServiceAuthorizesAndPinsTestAccount(t *testing.T) {
+	previousOptions := options
+	t.Cleanup(func() { options = previousOptions })
+	configDir := t.TempDir()
+	performer := &agentAccountPerformer{}
+	options = Options{
+		ConfigFolder:   func() string { return configDir },
+		TestModeAPIKey: func() (string, error) { return "sk_test_agent", nil },
+		AccountID:      func() (string, error) { return "acct_agent123", nil },
+		DeviceName:     func() (string, error) { return "agent-device", nil },
+		StripeClient:   performer,
+	}
+	store, err := coop.NewStore(configDir)
+	require.NoError(t, err)
+	session := &coop.Session{ID: "agent_direct_verification", Status: coop.SessionActive}
+	require.NoError(t, store.Write(session))
+
+	_, err = newAgentWorkflowService(context.Background(), session.ID)
+	require.NoError(t, err)
+	pinned, err := store.Read(session.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "acct_agent123", pinned.StripeAccountID)
+	assert.Equal(t, int32(1), performer.calls.Load())
+
+	// Once a trusted account is pinned, later agent commands do not perform an
+	// extra identity read merely to construct their workflow service.
+	_, err = newAgentWorkflowService(context.Background(), session.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), performer.calls.Load())
+}
+
+type agentAccountPerformer struct {
+	calls atomic.Int32
+}
+
+func (performer *agentAccountPerformer) PerformRequest(
+	ctx context.Context,
+	method, path, _ string,
+	configure func(*http.Request) error,
+) (*http.Response, error) {
+	performer.calls.Add(1)
+	request, err := http.NewRequestWithContext(ctx, method, "https://api.stripe.test"+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := configure(request); err != nil {
+		return nil, err
+	}
+	if path != "/v1/account" || request.Header.Get("Authorization") != "Bearer sk_test_agent" {
+		return &http.Response{
+			StatusCode: http.StatusUnauthorized,
+			Body:       io.NopCloser(strings.NewReader(`{"error":"unauthorized"}`)),
+		}, nil
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{"id":"acct_agent123"}`)),
+	}, nil
 }
 
 func TestAgentProcessPulseCommandOwnsDistinctLeaseUntilCanceled(t *testing.T) {

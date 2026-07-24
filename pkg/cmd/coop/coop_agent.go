@@ -70,7 +70,7 @@ func newCoopAgentStartWorkCmd() *coopAgentActionCmd {
 		Use:   "start-work",
 		Short: "Mark a node as active",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			service, err := newAgentWorkflowService(c.session)
+			service, err := newAgentWorkflowService(cmd.Context(), c.session)
 			if err != nil {
 				return outputAgentError(err)
 			}
@@ -93,7 +93,7 @@ func newCoopAgentReportWorkCmd() *coopAgentActionCmd {
 			if err != nil {
 				return outputAgentError(err)
 			}
-			service, err := newAgentWorkflowService(c.session)
+			service, err := newAgentWorkflowService(cmd.Context(), c.session)
 			if err != nil {
 				return outputAgentError(err)
 			}
@@ -123,7 +123,7 @@ func newCoopAgentReportCheckCmd() *coopAgentActionCmd {
 			if !cmd.Flags().Changed("passed") {
 				return outputAgentError(errors.New("--passed must be explicit; use --passed or --passed=false"))
 			}
-			service, err := newAgentWorkflowService(c.session)
+			service, err := newAgentWorkflowService(cmd.Context(), c.session)
 			if err != nil {
 				return outputAgentError(err)
 			}
@@ -144,7 +144,7 @@ func newCoopAgentSkipCmd() *coopAgentActionCmd {
 		Use:   "skip",
 		Short: "Skip a node",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			service, err := newAgentWorkflowService(c.session)
+			service, err := newAgentWorkflowService(cmd.Context(), c.session)
 			if err != nil {
 				return outputAgentError(err)
 			}
@@ -164,7 +164,7 @@ func newCoopAgentAwaitReviewCmd() *coopAgentActionCmd {
 		Use:   "await-review",
 		Short: "Block until the developer confirms or requests changes",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			service, err := newAgentWorkflowService(c.session)
+			service, err := newAgentWorkflowService(cmd.Context(), c.session)
 			if err != nil {
 				return outputAgentError(err)
 			}
@@ -377,16 +377,49 @@ func validResourceRole(role string) bool {
 	return true
 }
 
-func newAgentWorkflowService(_ string) (*workflow.Service, error) {
+func newAgentWorkflowService(ctx context.Context, sessionID string) (*workflow.Service, error) {
 	store, err := coop.NewStore(coopConfigFolder())
 	if err != nil {
 		return nil, fmt.Errorf("creating store: %w", err)
 	}
-	planner, err := newCoopPlanner()
+	credentials, _ := configuredObserverCredentials()
+	evaluator, err := newCoopEvaluator(credentials.APIKey, credentials.AccountID)
 	if err != nil {
 		return nil, fmt.Errorf("loading verification catalog: %w", err)
 	}
-	return workflow.NewService(store, workflow.WithRequirementProvider(planner)), nil
+	if err := pinAgentVerificationAccount(ctx, store, sessionID, evaluator); err != nil {
+		return nil, err
+	}
+	return workflow.NewService(
+		store,
+		workflow.WithEvaluator(evaluator),
+	), nil
+}
+
+func pinAgentVerificationAccount(
+	ctx context.Context,
+	store *coop.Store,
+	sessionID string,
+	evaluator *coopEvaluator,
+) error {
+	session, err := store.Read(sessionID)
+	if err != nil {
+		return err
+	}
+	if session.Status != coop.SessionActive || session.StripeAccountID != "" || evaluator == nil ||
+		evaluator.reader == nil || evaluator.accountID == "" {
+		return nil
+	}
+	authorizeCtx, cancel := context.WithTimeout(ctx, workflow.AutomaticEvaluationTimeout)
+	defer cancel()
+	if err := evaluator.reader.Authorize(authorizeCtx); err != nil {
+		// The evaluator will persist a typed unavailable result at report time.
+		// Authentication failure must never cause the agent command to pin an
+		// untrusted account identity.
+		return nil
+	}
+	_, err = store.PinStripeAccount(sessionID, evaluator.accountID)
+	return err
 }
 
 func runCoopNextAction(sessionID, completed string) error {
