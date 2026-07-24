@@ -44,7 +44,7 @@ func MatchSession(session *coop.Session, fact Fact) SessionMatch {
 		return match
 	}
 
-	match.Attribution = &Attribution{Target: match.Triggers[0], Fact: cloneFact(fact)}
+	match.Attribution = &Attribution{Target: match.Triggers[0], Fact: fact}
 	return match
 }
 
@@ -111,16 +111,6 @@ func reportedOpenedUIAttempt(node *coop.SessionNode) *coop.NodeAttempt {
 		return nil
 	}
 	return attempt
-}
-
-func cloneFact(fact Fact) Fact {
-	if fact.Request != nil {
-		request := *fact.Request
-		return Fact{Request: &request}
-	}
-	event := *fact.Event
-	event.Discoveries = append([]Discovery(nil), event.Discoveries...)
-	return Fact{Event: &event}
 }
 
 func nodeMatches(step *coop.SessionStep, node *coop.SessionNode, attempt *coop.NodeAttempt, fact Fact) bool {

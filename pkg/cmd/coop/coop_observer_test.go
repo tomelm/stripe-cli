@@ -146,6 +146,31 @@ func TestObserverPersistsSupportingFactsAndTriggersAuthoritativeChecks(t *testin
 	}, eventCall)
 }
 
+func TestObserverConsumesOnlyStockTypedValueElements(t *testing.T) {
+	store := writeObserverSession(t, []coop.SessionNode{observerRequestNode("/v1/customers", 1)})
+	service := newRecordingObserverWorkflow()
+	controller := &coopObserverController{store: store, now: time.Now}
+	stream := make(chan websocket.IElement, 3)
+	payload := logtailing.EventPayload{Method: "POST", URL: "/v1/customers", Status: 200}
+
+	stream <- websocket.DataElement{Marshaled: `{"method":"POST","url":"/v1/customers","status":200}`}
+	stream <- &websocket.DataElement{Data: payload}
+	stream <- websocket.DataElement{Data: payload}
+	close(stream)
+
+	done := make(chan struct{})
+	go func() {
+		controller.consume(context.Background(), service, "observer_session", stream)
+		close(done)
+	}()
+	receive(t, done)
+
+	receive(t, service.evidence)
+	receive(t, service.calls)
+	assertNoValue(t, service.evidence)
+	assertNoValue(t, service.calls)
+}
+
 func TestObserverPersistsThroughWorkflowBoundary(t *testing.T) {
 	store := writeObserverSession(t, []coop.SessionNode{observerRequestNode("/v1/customers", 1)})
 	stream := make(chan websocket.IElement, 1)
@@ -218,9 +243,9 @@ func TestObserverDispatchesAdmittedAmbiguousFactDuringShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	controller.observe(ctx, service, "observer_session", websocket.DataElement{Data: logtailing.EventPayload{
+	controller.observe(ctx, service, "observer_session", logtailing.EventPayload{
 		Method: "POST", URL: "/v1/payment_intents", Status: 200,
-	}})
+	})
 
 	first := receive(t, service.calls)
 	second := receive(t, service.calls)

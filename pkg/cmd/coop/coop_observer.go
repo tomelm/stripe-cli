@@ -63,21 +63,13 @@ type observerStreamConfig struct {
 	observerPlan
 }
 
-type observerStreamOutcome uint8
-
-const (
-	observerStreamStop observerStreamOutcome = iota
-	observerStreamRetry
-)
-
 type observerStreamFactory func(context.Context, observerStreamConfig) ([]<-chan websocket.IElement, error)
-type observerAuthorizer func(context.Context, observerCredentials) error
 
 type coopObserverController struct {
 	store           observerStore
 	newWorkflow     func(observerCredentials) observerWorkflow
 	credentials     func() (observerCredentials, bool)
-	authorize       observerAuthorizer
+	authorize       func(context.Context, observerCredentials) error
 	streams         observerStreamFactory
 	pollEvery       time.Duration
 	standbyEvery    time.Duration
@@ -135,34 +127,10 @@ func (controller *coopObserverController) workflowFor(credentials observerCreden
 }
 
 func coopTUIOptions(store *coop.Store) []tui.Option {
-	claim := &sandboxClaimState{url: coopSandboxClaimURL()}
-	observer := newCoopObserver(store)
-	observer.sandboxClaimURL = func() string {
-		claimURL := coopSandboxClaimURL()
-		claim.set(claimURL)
-		return claimURL
-	}
 	return []tui.Option{
-		tui.WithSandboxClaimURLProvider(claim.get),
-		tui.WithObserver(observer),
+		tui.WithSandboxClaimURLProvider(coopSandboxClaimURL),
+		tui.WithObserver(newCoopObserver(store)),
 	}
-}
-
-type sandboxClaimState struct {
-	mu  sync.RWMutex
-	url string
-}
-
-func (state *sandboxClaimState) get() string {
-	state.mu.RLock()
-	defer state.mu.RUnlock()
-	return state.url
-}
-
-func (state *sandboxClaimState) set(claimURL string) {
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	state.url = strings.TrimSpace(claimURL)
 }
 
 func (controller *coopObserverController) Start(sessionID string) {
@@ -296,7 +264,7 @@ func (controller *coopObserverController) stream(ctx context.Context, sessionID 
 			}
 			continue
 		}
-		if controller.runStreamAttempt(ctx, sessionID, session, credentials, service) == observerStreamStop {
+		if !controller.consumeStreamAttempt(ctx, sessionID, session, credentials, service) {
 			return
 		}
 		retryEvery = nextObserverBackoff(retryEvery, baseRetry, coopObserverMaxStreamRetry)
@@ -333,35 +301,27 @@ func (controller *coopObserverController) prepareStream(
 	return session, credentials, true
 }
 
-func (controller *coopObserverController) runStreamAttempt(
+// consumeStreamAttempt runs all configured stock streams until shutdown or
+// until one closes. It reports whether a lost or failed stream should retry.
+func (controller *coopObserverController) consumeStreamAttempt(
 	ctx context.Context,
 	sessionID string,
 	session *coop.Session,
 	credentials observerCredentials,
 	service observerWorkflow,
-) observerStreamOutcome {
+) bool {
 	config := observerStreamConfig{observerCredentials: credentials, observerPlan: planObservation(session)}
 	streamCtx, stopStreams := context.WithCancel(ctx)
 	streams, err := controller.streams(streamCtx, config)
 	if err != nil {
 		stopStreams()
-		return observerStreamRetry
+		return true
 	}
 	if len(streams) == 0 {
 		stopStreams()
-		return observerStreamStop
+		return false
 	}
-	return controller.consumeStreams(ctx, streamCtx, stopStreams, service, sessionID, streams)
-}
 
-func (controller *coopObserverController) consumeStreams(
-	ctx context.Context,
-	streamCtx context.Context,
-	stopStreams context.CancelFunc,
-	service observerWorkflow,
-	sessionID string,
-	streams []<-chan websocket.IElement,
-) observerStreamOutcome {
 	var consumers sync.WaitGroup
 	closed := make(chan struct{}, len(streams))
 	for _, source := range streams {
@@ -373,15 +333,13 @@ func (controller *coopObserverController) consumeStreams(
 		}(source)
 	}
 
-	outcome := observerStreamRetry
 	select {
 	case <-ctx.Done():
-		outcome = observerStreamStop
 	case <-closed:
 	}
 	stopStreams()
 	consumers.Wait()
-	return outcome
+	return ctx.Err() == nil
 }
 
 func waitObserverRetry(ctx context.Context, retryEvery time.Duration) bool {
@@ -427,11 +385,7 @@ func (controller *coopObserverController) consume(
 			}
 			switch data := element.(type) {
 			case websocket.DataElement:
-				controller.observe(ctx, service, sessionID, data)
-			case *websocket.DataElement:
-				if data != nil {
-					controller.observe(ctx, service, sessionID, *data)
-				}
+				controller.observe(ctx, service, sessionID, data.Data)
 			}
 		}
 	}
@@ -441,7 +395,7 @@ func (controller *coopObserverController) observe(
 	ctx context.Context,
 	service observerWorkflow,
 	sessionID string,
-	data websocket.DataElement,
+	data any,
 ) {
 	fact, ok := observe.Normalize(data)
 	if !ok {

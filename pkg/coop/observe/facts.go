@@ -4,14 +4,12 @@
 package observe
 
 import (
-	"encoding/json"
 	"net/url"
 	"strings"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
 	"github.com/stripe/stripe-cli/pkg/logtailing"
 	"github.com/stripe/stripe-cli/pkg/proxy"
-	"github.com/stripe/stripe-cli/pkg/websocket"
 )
 
 const (
@@ -20,7 +18,6 @@ const (
 	maxURLBytes        = 4 << 10
 	maxIdentifierBytes = 128
 	maxErrorCodeBytes  = 64
-	maxPayloadBytes    = 1 << 20
 )
 
 // RequestFact is the bounded, non-sensitive portion of a request-log event.
@@ -53,31 +50,18 @@ type Fact struct {
 	Event   *EventFact
 }
 
-// Normalize converts the three stream payloads consumed by co-op. It accepts
-// their value and pointer forms and falls back to DataElement.Marshaled when
-// a caller retained only JSON. Unknown or unsafe payloads are ignored.
-func Normalize(element websocket.DataElement) (Fact, bool) {
-	switch value := element.Data.(type) {
+// Normalize converts the three typed stream payloads emitted by the stock
+// request and event producers. Unknown or unsafe payloads are ignored.
+func Normalize(data any) (Fact, bool) {
+	switch value := data.(type) {
 	case logtailing.EventPayload:
 		return requestFact(value)
-	case *logtailing.EventPayload:
-		if value != nil {
-			return requestFact(*value)
-		}
 	case proxy.StripeEvent:
 		return v1EventFact(value)
-	case *proxy.StripeEvent:
-		if value != nil {
-			return v1EventFact(*value)
-		}
 	case proxy.V2EventPayload:
 		return v2EventFact(value)
-	case *proxy.V2EventPayload:
-		if value != nil {
-			return v2EventFact(*value)
-		}
 	}
-	return normalizeJSON(element.Marshaled)
+	return Fact{}, false
 }
 
 func requestFact(payload logtailing.EventPayload) (Fact, bool) {
@@ -138,34 +122,6 @@ func discoveryFrom(rawType, rawID interface{}) []Discovery {
 		return nil
 	}
 	return []Discovery{{Type: resourceType, ID: resourceID}}
-}
-
-func normalizeJSON(raw string) (Fact, bool) {
-	if len(raw) == 0 || len(raw) > maxPayloadBytes || strings.TrimSpace(raw) == "" {
-		return Fact{}, false
-	}
-	var shape map[string]json.RawMessage
-	if json.Unmarshal([]byte(raw), &shape) != nil {
-		return Fact{}, false
-	}
-	switch {
-	case shape["method"] != nil && shape["url"] != nil:
-		var payload logtailing.EventPayload
-		if json.Unmarshal([]byte(raw), &payload) == nil {
-			return requestFact(payload)
-		}
-	case shape["related_object"] != nil:
-		var payload proxy.V2EventPayload
-		if json.Unmarshal([]byte(raw), &payload) == nil {
-			return v2EventFact(payload)
-		}
-	case shape["type"] != nil && shape["data"] != nil:
-		var payload proxy.StripeEvent
-		if json.Unmarshal([]byte(raw), &payload) == nil {
-			return v1EventFact(payload)
-		}
-	}
-	return Fact{}, false
 }
 
 func normalizePath(raw string) (string, bool) {
