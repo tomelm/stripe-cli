@@ -61,6 +61,9 @@ func (m Model) renderHeader() string {
 	if lang, ok := m.session.Settings["language"]; ok {
 		right += " · " + lang
 	}
+	if m.agentProcessActive {
+		right += " · agent running"
+	}
 
 	summary := m.session.NodeSummary()
 	done := summary[coop.NodeDone]

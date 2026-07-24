@@ -68,6 +68,8 @@ type Model struct {
 	existingSessionIDs map[string]bool
 	lastUpdateTime     time.Time
 	agentIsIdle        bool
+	agentPulseSeen     bool
+	agentProcessActive bool
 	observer           ObserverController
 
 	isDark bool
@@ -189,6 +191,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.checkForUpdates(), tickCmd())
 
 	case noUpdateMsg:
+		m.updateAgentProcessPulse(msg.agentPulseAge, msg.agentPulseOK)
 		m.updateAgentIdle(msg.heartbeatAge, msg.heartbeatOK, time.Now())
 		return m, nil
 
@@ -408,6 +411,9 @@ func (m *Model) resetSessionViewState() {
 	m.clearRejectionState()
 	m.clearStatus()
 	m.clearSDKSnippetState()
+	m.agentPulseSeen = false
+	m.agentProcessActive = false
+	m.agentIsIdle = false
 }
 
 func (m *Model) resetSelectionState() {
@@ -1336,7 +1342,19 @@ func (m *Model) clearExpiredStatus(now time.Time) {
 }
 
 func (m *Model) updateAgentIdle(heartbeatAge time.Duration, heartbeatOK bool, now time.Time) {
-	if m.session == nil || m.session.IsComplete() || !heartbeatOK {
+	if m.session == nil || m.session.IsComplete() {
+		m.agentIsIdle = false
+		return
+	}
+	if m.agentProcessActive {
+		m.agentIsIdle = false
+		return
+	}
+	if m.agentPulseSeen {
+		m.agentIsIdle = true
+		return
+	}
+	if !heartbeatOK {
 		m.agentIsIdle = false
 		return
 	}
@@ -1349,4 +1367,18 @@ func (m *Model) updateAgentIdle(heartbeatAge time.Duration, heartbeatOK bool, no
 		return
 	}
 	m.agentIsIdle = now.Sub(m.lastUpdateTime) > 2*time.Minute
+}
+
+func (m *Model) updateAgentProcessPulse(age time.Duration, ok bool) {
+	if m.session == nil || m.session.IsComplete() {
+		m.agentProcessActive = false
+		return
+	}
+	if !ok {
+		return
+	}
+	if age >= 0 {
+		m.agentPulseSeen = true
+	}
+	m.agentProcessActive = age >= 0 && age < coop.AgentProcessPulseFreshFor
 }

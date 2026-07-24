@@ -13,8 +13,10 @@ type tickMsg time.Time
 
 // noUpdateMsg means a scheduled poll completed without finding a newer session.
 type noUpdateMsg struct {
-	heartbeatAge time.Duration
-	heartbeatOK  bool
+	heartbeatAge  time.Duration
+	heartbeatOK   bool
+	agentPulseAge time.Duration
+	agentPulseOK  bool
 }
 
 // sessionUpdatedMsg carries a freshly read session.

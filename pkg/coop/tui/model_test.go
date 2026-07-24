@@ -874,13 +874,19 @@ func TestCheckForUpdatesNoChangeReturnsNoUpdate(t *testing.T) {
 	stored, err := store.Read(m.session.ID)
 	require.NoError(t, err)
 	m.lastVersion = stored.Version
+	releasePulse, err := store.AcquireAgentProcessPulse(m.session.ID)
+	require.NoError(t, err)
+	defer releasePulse()
 
 	cmd := m.checkForUpdates()
 	require.NotNil(t, cmd)
 	msg := cmd()
 
-	_, ok := msg.(noUpdateMsg)
+	noUpdate, ok := msg.(noUpdateMsg)
 	require.True(t, ok)
+	assert.True(t, noUpdate.agentPulseOK)
+	assert.GreaterOrEqual(t, noUpdate.agentPulseAge, time.Duration(0))
+	assert.Less(t, noUpdate.agentPulseAge, coop.AgentProcessPulseFreshFor)
 }
 
 func TestDiscoverNewSessionNoChangeReturnsNoUpdate(t *testing.T) {
@@ -1431,6 +1437,26 @@ func TestNoUpdateMsgRefreshesCachedAgentIdle(t *testing.T) {
 	updated := result.(Model)
 
 	assert.True(t, updated.agentIdle())
+}
+
+func TestAgentProcessPulseMakesRunningAndStoppedStateVisible(t *testing.T) {
+	m := readyModel()
+	m.lastUpdateTime = time.Now().Add(-3 * time.Minute)
+
+	m.updateAgentProcessPulse(time.Second, true)
+	m.updateAgentIdle(10*time.Second, true, time.Now())
+
+	assert.True(t, m.agentPulseSeen)
+	assert.True(t, m.agentProcessActive)
+	assert.False(t, m.agentIdle())
+	assertContainsPlain(t, m.renderHeader(), "agent running")
+
+	m.updateAgentProcessPulse(-1, true)
+	m.updateAgentIdle(time.Second, true, time.Now())
+
+	assert.False(t, m.agentProcessActive)
+	assert.True(t, m.agentIdle())
+	assertContainsPlain(t, m.renderFooter(), "Agent stopped")
 }
 
 func TestResizeViewportOnSessionUpdate(t *testing.T) {
