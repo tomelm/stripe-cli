@@ -185,6 +185,7 @@ trap 'interrupt_agent_launcher 130' INT
 trap 'interrupt_agent_launcher 143' TERM
 if ! %s coop agent process-state --session=%s --launch-id=%s --phase=launched >/dev/null; then
   printf 'Could not register the agent process for this Co-op session.\n' >&2
+  wait_for_agent_pane_close 1
   exit 1
 fi
 %s coop agent process-pulse --session=%s --launch-id=%s --owner-pid="$$" >/dev/null 2>&1 &
@@ -210,6 +211,14 @@ trap - EXIT HUP INT TERM
 	script := fmt.Sprintf(`#!/bin/bash
 prompt=$(cat %s)
 rm -f %s %s
+wait_for_agent_pane_close() {
+  local exit_status="$1"
+  if [[ -n "${TMUX:-}" || $exit_status -ne 0 ]]; then
+    printf '\nAgent exited with status %%s.\n' "$exit_status"
+    printf 'Press Enter to close this pane.\n'
+    IFS= read -r _
+  fi
+}
 %s
 if %s%s "$prompt"; then
   status=0
@@ -217,11 +226,7 @@ else
   status=$?
 fi
 %s
-if [[ -n "${TMUX:-}" || $status -ne 0 ]]; then
-  printf '\nAgent exited with status %%s.\n' "$status"
-  printf 'Press Enter to close this pane.\n'
-  IFS= read -r _
-fi
+wait_for_agent_pane_close "$status"
 exit "$status"
 `,
 		shellQuote(promptPath),

@@ -1,6 +1,7 @@
 package coopcmd
 
 import (
+	"bufio"
 	"errors"
 	"os"
 	"os/exec"
@@ -328,13 +329,99 @@ func TestAgentLauncherRunsSessionScopedProcessPulse(t *testing.T) {
 	assert.Contains(t, string(script), "stop_agent_pulse")
 	assert.Contains(t, string(script), `kill -TERM "$agent_pulse_pid"`)
 	stopIndex := strings.Index(string(script), "record_agent_stopped \"$status\"\nstop_agent_pulse")
-	diagnosticIndex := strings.Index(string(script), "Agent exited with status")
+	diagnosticIndex := strings.LastIndex(string(script), "wait_for_agent_pane_close \"$status\"")
 	require.GreaterOrEqual(t, stopIndex, 0)
 	require.GreaterOrEqual(t, diagnosticIndex, 0)
 	assert.Less(t,
 		stopIndex,
 		diagnosticIndex,
 		"the pulse must stop as soon as the foreground agent returns, before the pane waits for input")
+}
+
+func TestAgentLauncherPreservesRegistrationFailureDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	agentMarker := filepath.Join(dir, "agent-ran")
+	stripePath := filepath.Join(dir, "stripe")
+	agentPath := filepath.Join(dir, "agent")
+	promptPath := filepath.Join(dir, "prompt.txt")
+
+	require.NoError(t, os.WriteFile(stripePath, []byte(`#!/bin/bash
+if [[ "$*" == *"--phase=launched"* ]]; then
+  exit 19
+fi
+exit 0
+`), 0o700))
+	require.NoError(t, os.WriteFile(agentPath, []byte(`#!/bin/bash
+touch "${AGENT_MARKER:?}"
+`), 0o700))
+	require.NoError(t, os.WriteFile(promptPath, []byte("test prompt"), 0o600))
+
+	rc := &coopRunCmd{}
+	launcherPath, err := rc.buildAgentCmd(
+		&agentInfo{name: "custom", path: agentPath},
+		promptPath,
+		false,
+		stripePath,
+		"coop_registration_failure",
+	)
+	require.NoError(t, err)
+
+	stdinReader, stdinWriter, err := os.Pipe()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		stdinReader.Close()
+		stdinWriter.Close()
+	})
+	outputReader, outputWriter, err := os.Pipe()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		outputReader.Close()
+		outputWriter.Close()
+	})
+
+	cmd := exec.Command("bash", launcherPath)
+	cmd.Env = append(os.Environ(), "AGENT_MARKER="+agentMarker, "TMUX=test")
+	cmd.Stdin = stdinReader
+	cmd.Stdout = outputWriter
+	cmd.Stderr = outputWriter
+	require.NoError(t, cmd.Start())
+	require.NoError(t, stdinReader.Close())
+	require.NoError(t, outputWriter.Close())
+
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- cmd.Wait()
+	}()
+
+	var output strings.Builder
+	scanner := bufio.NewScanner(outputReader)
+	for scanner.Scan() {
+		output.WriteString(scanner.Text())
+		output.WriteByte('\n')
+		if strings.Contains(scanner.Text(), "Press Enter to close this pane.") {
+			break
+		}
+	}
+	require.NoError(t, scanner.Err())
+	assert.Contains(t, output.String(), "Could not register the agent process for this Co-op session.")
+	assert.Contains(t, output.String(), "Agent exited with status 1.")
+
+	select {
+	case err := <-waitCh:
+		t.Fatalf("agent pane exited before Enter: %v\n%s", err, output.String())
+	default:
+	}
+
+	_, err = stdinWriter.WriteString("\n")
+	require.NoError(t, err)
+	require.NoError(t, stdinWriter.Close())
+
+	err = <-waitCh
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, err, &exitErr)
+	assert.Equal(t, 1, exitErr.ExitCode())
+	_, err = os.Stat(agentMarker)
+	assert.ErrorIs(t, err, os.ErrNotExist)
 }
 
 func TestAgentLauncherPulseMatchesForegroundAgentLifetime(t *testing.T) {
