@@ -37,6 +37,7 @@ var (
 var (
 	sessionLockTimeout      = 5 * time.Second
 	sessionLockPollInterval = 25 * time.Millisecond
+	sessionLockMaxWait      = 30 * time.Second
 	// sessionLockStale bounds how long a lock file may sit untouched before it's
 	// treated as abandoned by a crashed writer and reclaimed. Healthy writers hold
 	// the lock only for the duration of a single write (well under a second), so a
@@ -154,7 +155,8 @@ func replaceSessionFile(tmpPath, path string) error {
 
 func (s *Store) acquireSessionLock(path string) (func(), error) {
 	lockPath := path + ".lock"
-	wait := sessionLockWait{deadline: time.Now().Add(sessionLockTimeout)}
+	started := time.Now()
+	wait := sessionLockWait{deadline: started.Add(sessionLockTimeout), limit: started.Add(sessionLockMaxWait)}
 
 	for {
 		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
@@ -190,11 +192,12 @@ type sessionLockFingerprint struct {
 
 type sessionLockWait struct {
 	deadline    time.Time
+	limit       time.Time
 	fingerprint sessionLockFingerprint
 }
 
 // timedOut treats a new owner/creation pair as progress, so sustained active
-// handoffs may wait longer than one unchanged lock generation.
+// handoffs may extend the inactivity deadline, but never the absolute limit.
 func (wait *sessionLockWait) timedOut(now time.Time, fingerprint sessionLockFingerprint, timeout time.Duration) bool {
 	if fingerprint != (sessionLockFingerprint{}) && fingerprint != wait.fingerprint {
 		if wait.fingerprint != (sessionLockFingerprint{}) {
@@ -202,7 +205,7 @@ func (wait *sessionLockWait) timedOut(now time.Time, fingerprint sessionLockFing
 		}
 		wait.fingerprint = fingerprint
 	}
-	return now.After(wait.deadline)
+	return now.After(wait.deadline) || now.After(wait.limit)
 }
 
 func sessionLockFingerprintFor(lockPath string) sessionLockFingerprint {

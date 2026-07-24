@@ -558,7 +558,7 @@ func TestStoreWriteLockTimeoutIncludesRecoveryHint(t *testing.T) {
 func TestSessionLockWaitAllowsActiveOwnerHandoffs(t *testing.T) {
 	start := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
 	timeout := 5 * time.Second
-	wait := sessionLockWait{deadline: start.Add(timeout)}
+	wait := sessionLockWait{deadline: start.Add(timeout), limit: start.Add(time.Hour)}
 	lockPath := filepath.Join(t.TempDir(), "handoff.lock")
 	fingerprint := func(pid int, created time.Time) sessionLockFingerprint {
 		writeLockFile(t, lockPath, pid, created, created)
@@ -586,19 +586,33 @@ func TestSessionLockWaitTimesOutWithoutOwnerHandoff(t *testing.T) {
 	fingerprint := sessionLockFingerprint{pid: 101, created: 1}
 
 	t.Run("unchanged owner", func(t *testing.T) {
-		wait := sessionLockWait{deadline: start.Add(timeout)}
+		wait := sessionLockWait{deadline: start.Add(timeout), limit: start.Add(time.Hour)}
 		assert.False(t, wait.timedOut(start, fingerprint, timeout))
 		assert.False(t, wait.timedOut(start.Add(timeout), fingerprint, timeout))
 		assert.True(t, wait.timedOut(start.Add(timeout+time.Nanosecond), fingerprint, timeout))
 	})
 
 	t.Run("unreadable owner", func(t *testing.T) {
-		wait := sessionLockWait{deadline: start.Add(timeout)}
+		wait := sessionLockWait{deadline: start.Add(timeout), limit: start.Add(time.Hour)}
 		assert.False(t, wait.timedOut(start, sessionLockFingerprint{}, timeout))
 		assert.False(t, wait.timedOut(start.Add(4*time.Second), fingerprint, timeout))
 		assert.True(t, wait.timedOut(start.Add(timeout+time.Nanosecond), fingerprint, timeout),
 			"an invalid read followed by the first fingerprint must not manufacture progress")
 	})
+}
+
+func TestSessionLockWaitEnforcesAbsoluteLimit(t *testing.T) {
+	start := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	timeout := 5 * time.Second
+	limit := start.Add(10 * time.Second)
+	wait := sessionLockWait{deadline: start.Add(timeout), limit: limit}
+
+	assert.False(t, wait.timedOut(start, sessionLockFingerprint{pid: 101, created: 1}, timeout))
+	assert.False(t, wait.timedOut(start.Add(4*time.Second), sessionLockFingerprint{pid: 102, created: 2}, timeout))
+	assert.False(t, wait.timedOut(start.Add(8*time.Second), sessionLockFingerprint{pid: 103, created: 3}, timeout))
+	assert.False(t, wait.timedOut(limit, sessionLockFingerprint{pid: 104, created: 4}, timeout))
+	assert.True(t, wait.timedOut(limit.Add(time.Nanosecond), sessionLockFingerprint{pid: 105, created: 5}, timeout),
+		"continuous handoffs must not move the absolute ceiling")
 }
 
 func TestStoreListIgnoresTmpFiles(t *testing.T) {
