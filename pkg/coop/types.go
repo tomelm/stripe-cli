@@ -221,13 +221,14 @@ type NodeDefinition struct {
 
 // NodeContract is the bounded, static work specification returned when an
 // agent starts one node. It keeps the protocol incremental without hiding the
-// source blueprint fields needed to implement non-API work.
+// source blueprint fields or referenced lifecycle facts needed for the work.
 type NodeContract struct {
 	NodeDefinition
-	Number    int    `json:"number"`
-	StepKey   string `json:"step_key"`
-	StepTitle string `json:"step_title"`
-	Skippable bool   `json:"skippable"`
+	LifecycleFacts []LifecycleFact `json:"lifecycle_facts,omitempty"`
+	Number         int             `json:"number"`
+	StepKey        string          `json:"step_key"`
+	StepTitle      string          `json:"step_title"`
+	Skippable      bool            `json:"skippable"`
 }
 
 // StepDefinition is the source-derived static definition for a step.
@@ -304,17 +305,15 @@ type CommandResponse struct {
 	// Next is directly executable. NextTemplate requires the agent to fill
 	// every named RequiredInput before execution; shell-shaped placeholders
 	// must never be presented as an exact next command.
-	Next             string                `json:"next,omitempty"`
-	NextTemplate     string                `json:"next_template,omitempty"`
-	RequiredInputs   []string              `json:"required_inputs,omitempty"`
-	AgentPrompt      string                `json:"agent_prompt,omitempty"`
-	APIRequest       *APIRequest           `json:"api_request,omitempty"`
-	SDKExample       string                `json:"sdk_example,omitempty"`
-	NodeContract     *NodeContract         `json:"node_contract,omitempty"`
-	ResourceRoles    []ResourceRequirement `json:"stripe_resource_roles,omitempty"`
-	Verification     []CheckResult         `json:"verification_results,omitempty"`
-	LifecycleFacts   []LifecycleFact       `json:"lifecycle_facts,omitempty"`
-	RequiredOutcomes []RequiredOutcome     `json:"required_outcomes,omitempty"`
-	Error            string                `json:"error,omitempty"`
-	Hint             string                `json:"hint,omitempty"`
+	Next           string                `json:"next,omitempty"`
+	NextTemplate   string                `json:"next_template,omitempty"`
+	RequiredInputs []string              `json:"required_inputs,omitempty"`
+	AgentPrompt    string                `json:"agent_prompt,omitempty"`
+	APIRequest     *APIRequest           `json:"api_request,omitempty"`
+	SDKExample     string                `json:"sdk_example,omitempty"`
+	NodeContract   *NodeContract         `json:"node_contract,omitempty"`
+	ResourceRoles  []ResourceRequirement `json:"stripe_resource_roles,omitempty"`
+	Verification   []CheckResult         `json:"verification_results,omitempty"`
+	Error          string                `json:"error,omitempty"`
+	Hint           string                `json:"hint,omitempty"`
 }

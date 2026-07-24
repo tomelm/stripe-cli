@@ -55,7 +55,7 @@ active ──→ completed    (all nodes done/skipped, or "stripe coop stop")
 | Command | Purpose |
 |---------|---------|
 | `stripe coop run <blueprint>` | Create a session (outputs JSON with instructions) |
-| `stripe coop agent start-work --node <n>` | Mark a node as active |
+| `stripe coop agent start-work --node <n>` | Start a node and return its current work contract |
 | `stripe coop agent report-work --node <n> --attempt <a>` | Submit an attempt with implementation evidence, requested resource IDs, and an app URL for UI work |
 | `stripe coop agent report-check --node <n> --attempt <a>` | Add an agent-reported check to the current attempt |
 | `stripe coop agent skip --node <n> --attempt <a>` | Skip an attempt in an explicitly optional step, with a bounded reason |
@@ -63,7 +63,7 @@ active ──→ completed    (all nodes done/skipped, or "stripe coop stop")
 | `stripe coop agent next-action` | Show post-completion options (blocks until selection) |
 | `stripe coop agent start-followup` | Start an internal guided follow-up session selected from next actions |
 
-All agent commands output JSON with an `ok` field. Successful workflow responses use `next` only for a directly executable continuation. `next_template` is intentionally incomplete and names every value the agent must supply in `required_inputs`; angle-bracket examples are never represented as executable commands. Errors have guidance but no fake continuation. `start-work` creates or returns the open append-only attempt. Later mutations must carry that attempt number, so delayed writes cannot modify a correction attempt. `report-check` requires an explicit `--passed` or `--passed=false`. `--node` is the 1-based node number across the session.
+All agent commands output JSON with an `ok` field. Successful workflow responses use `next` only for a directly executable continuation. `next_template` is intentionally incomplete and names every value the agent must supply in `required_inputs`; angle-bracket examples are never represented as executable commands. Errors have guidance but no fake continuation. `start-work` creates or returns the open append-only attempt and returns one `node_contract` for the current work. That contract includes its node-relevant `lifecycle_facts` and `required_outcomes`; neither is duplicated at the response top level. Later mutations must carry the attempt number, so delayed writes cannot modify a correction attempt. `report-check` requires an explicit `--passed` or `--passed=false`. `--node` is the 1-based node number across the session.
 
 `stripe coop run` also reports blueprint-level automatic coverage: the number of direct cataloged checks, unsupported facts, and app surfaces with observation triggers. This is a preflight disclosure, not a claim of production completeness. Per-attempt results remain the authoritative record of what actually ran.
 

@@ -68,7 +68,7 @@ func newCoopAgentStartWorkCmd() *coopAgentActionCmd {
 	c := &coopAgentActionCmd{}
 	c.cmd = &cobra.Command{
 		Use:   "start-work",
-		Short: "Mark a node as active",
+		Short: "Start a node and return its work contract",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			service, err := newAgentWorkflowService(cmd.Context(), c.session)
 			if err != nil {

@@ -138,6 +138,7 @@ func (s *Service) StartWork(sessionID string, nodeNumber int, note string) (coop
 	definition.RequiredOutcomes = coop.RequiredOutcomesForNode(frozenNode)
 	nodeContract := &coop.NodeContract{
 		NodeDefinition: definition,
+		LifecycleFacts: coop.LifecycleFactsForNode(frozen, frozenNode),
 		Number:         nodeNumber,
 		StepKey:        frozenStep.Key,
 		StepTitle:      frozenStep.Title,
@@ -186,18 +187,16 @@ func (s *Service) StartWork(sessionID string, nodeNumber int, note string) (coop
 	node, _ := session.NodeByNumber(nodeNumber)
 	nextTemplate, requiredInputs := reportWorkAction(session.ID, nodeNumber, attemptNumber, roles, node.Type)
 	resp := coop.CommandResponse{
-		OK:               true,
-		SessionID:        session.ID,
-		Node:             nodeNumber,
-		Attempt:          attemptNumber,
-		State:            string(coop.NodeActive),
-		Message:          fmt.Sprintf("Started attempt %d: %s", attemptNumber, node.Title),
-		NextTemplate:     nextTemplate,
-		RequiredInputs:   requiredInputs,
-		NodeContract:     nodeContract,
-		ResourceRoles:    roles,
-		LifecycleFacts:   coop.LifecycleFactsForNode(session, node),
-		RequiredOutcomes: coop.RequiredOutcomesForNode(node),
+		OK:             true,
+		SessionID:      session.ID,
+		Node:           nodeNumber,
+		Attempt:        attemptNumber,
+		State:          string(coop.NodeActive),
+		Message:        fmt.Sprintf("Started attempt %d: %s", attemptNumber, node.Title),
+		NextTemplate:   nextTemplate,
+		RequiredInputs: requiredInputs,
+		NodeContract:   nodeContract,
+		ResourceRoles:  roles,
 	}
 	if attempt := node.CurrentAttempt(); attempt != nil && attempt.Feedback != "" {
 		resp.Message += "\nFeedback: " + attempt.Feedback

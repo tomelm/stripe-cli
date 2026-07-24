@@ -93,6 +93,7 @@ func TestCoopRunResponseIsIncrementalAndBounded(t *testing.T) {
 		"agent_instructions",
 		"nodes",
 		"steps",
+		"node_contract",
 		"lifecycle_facts",
 		"required_outcomes",
 		"verification_coverage",

@@ -182,10 +182,11 @@ func TestVerificationAcceptanceApplicationGuidanceDoesNotDowngradeDirectPass(t *
 
 	started, err := service.StartWork(session.ID, 1, "Building durable access")
 	require.NoError(t, err)
-	require.Len(t, started.LifecycleFacts, 1)
-	assert.Equal(t, "subscription-state", started.LifecycleFacts[0].ID)
-	require.Len(t, started.RequiredOutcomes, 1)
-	assert.Equal(t, "durable-access", started.RequiredOutcomes[0].ID)
+	require.NotNil(t, started.NodeContract)
+	require.Len(t, started.NodeContract.LifecycleFacts, 1)
+	assert.Equal(t, "subscription-state", started.NodeContract.LifecycleFacts[0].ID)
+	require.Len(t, started.NodeContract.RequiredOutcomes, 1)
+	assert.Equal(t, "durable-access", started.NodeContract.RequiredOutcomes[0].ID)
 
 	_, err = reportAcceptanceWork(service,
 		context.Background(),
@@ -268,10 +269,11 @@ func TestVerificationAcceptanceCorrectionAttemptRetainsApplicationContract(t *te
 
 	require.NoError(t, err)
 	assert.Equal(t, 2, correction.Attempt)
-	require.Len(t, correction.LifecycleFacts, 1)
-	assert.Equal(t, "subscription-state", correction.LifecycleFacts[0].ID)
-	require.Len(t, correction.RequiredOutcomes, 1)
-	assert.Equal(t, "durable-access", correction.RequiredOutcomes[0].ID)
+	require.NotNil(t, correction.NodeContract)
+	require.Len(t, correction.NodeContract.LifecycleFacts, 1)
+	assert.Equal(t, "subscription-state", correction.NodeContract.LifecycleFacts[0].ID)
+	require.Len(t, correction.NodeContract.RequiredOutcomes, 1)
+	assert.Equal(t, "durable-access", correction.NodeContract.RequiredOutcomes[0].ID)
 	assert.Contains(t, correction.Message, failure.Repair)
 }
 

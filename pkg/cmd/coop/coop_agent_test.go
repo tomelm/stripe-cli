@@ -291,6 +291,27 @@ func TestRunAgentProcessPulseRejectsDetachedOwner(t *testing.T) {
 
 func TestCoopAgentStartWorkCommand(t *testing.T) {
 	store, session := setupAgentCommandTest(t)
+	_, err := store.Update(session.ID, func(session *coop.Session) error {
+		session.LifecycleFacts = []coop.LifecycleFact{{
+			ID:        "provider-state",
+			Statement: "Provider state may change asynchronously.",
+		}, {
+			ID:        "unrelated-state",
+			Statement: "An unrelated provider state may also change.",
+		}}
+		node, nodeErr := session.NodeByNumber(1)
+		if nodeErr != nil {
+			return nodeErr
+		}
+		node.RequiredOutcomes = []coop.RequiredOutcome{{
+			ID:        "durable-state",
+			FactRefs:  []string{"provider-state"},
+			Statement: "Persist provider state in the application.",
+		}}
+		return nil
+	})
+	require.NoError(t, err)
+
 	cmd := newCoopAgentStartWorkCmd().cmd
 	cmd.SetArgs([]string{"--session", session.ID, "--node", "1", "--note", "Starting"})
 
@@ -304,6 +325,21 @@ func TestCoopAgentStartWorkCommand(t *testing.T) {
 	assert.Empty(t, resp.Next)
 	assert.Contains(t, resp.NextTemplate, "stripe coop agent report-work")
 	assert.Equal(t, []string{"note"}, resp.RequiredInputs)
+	require.NotNil(t, resp.NodeContract)
+	require.Len(t, resp.NodeContract.LifecycleFacts, 1)
+	assert.Equal(t, "provider-state", resp.NodeContract.LifecycleFacts[0].ID)
+	require.Len(t, resp.NodeContract.RequiredOutcomes, 1)
+	assert.Equal(t, "durable-state", resp.NodeContract.RequiredOutcomes[0].ID)
+
+	var payload map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(output), &payload))
+	assert.NotContains(t, payload, "lifecycle_facts")
+	assert.NotContains(t, payload, "required_outcomes")
+	require.Contains(t, payload, "node_contract")
+	var contract map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(payload["node_contract"], &contract))
+	assert.Contains(t, contract, "lifecycle_facts")
+	assert.Contains(t, contract, "required_outcomes")
 
 	loaded, err := store.Read(session.ID)
 	require.NoError(t, err)
@@ -440,7 +476,9 @@ func TestCoopAgentStartFollowupCreatesGuidedSession(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(output), &payload))
 	assert.NotContains(t, payload, "agent_instructions")
 	assert.NotContains(t, payload, "nodes")
+	assert.NotContains(t, payload, "node_contract")
 	assert.NotContains(t, payload, "lifecycle_facts")
+	assert.NotContains(t, payload, "required_outcomes")
 	assert.NotContains(t, payload, "verification_coverage")
 
 	ids, err := store.List()

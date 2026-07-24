@@ -158,7 +158,7 @@ func coopAgentOperatingContract() string {
 	return `Co-op operating contract:
 - Run each executable "next" command unchanged. For "next_template", fill every named "required_inputs" value; never run placeholders.
 - Save the attempt from start-work and include it in later mutations for that work.
-- Treat node_contract, lifecycle_facts, and required_outcomes as the current contract. Build and exercise the behavior in the user's app; Stripe CLI calls are only setup or test tools unless the node is a cliCommand.
+- Treat node_contract as the current work contract, including its lifecycle_facts and required_outcomes. Build and exercise the behavior in the user's app; Stripe CLI calls are only setup or test tools unless the node is a cliCommand.
 - Write and run working code, then report meaningful observed checks. An agent-authored report-check is useful context, not independent proof.
 - Never hardcode secret or restricted keys or webhook secrets, and never send raw card numbers; use the app's secret management and official Stripe collection or test PaymentMethod IDs.
 - Follow needs_agent findings directly. Run await-review or next-action as the sole foreground waiter when instructed; do not background it or replace it with status polling.`
