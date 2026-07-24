@@ -31,8 +31,6 @@ type recordedCandidate struct {
 type observerEvaluationCall struct {
 	node, attempt int
 	trigger       workflow.EvaluationTrigger
-	eventType     string
-	resourceID    string
 }
 
 type observerPassingEvaluator struct{}
@@ -96,11 +94,6 @@ func (recorder *recordingObserverWorkflow) Reevaluate(_ context.Context, _ strin
 	return coop.CommandResponse{}, nil
 }
 
-func (recorder *recordingObserverWorkflow) ReevaluateState(_ context.Context, _ string, node, attempt int, eventType, resourceID string) (coop.CommandResponse, error) {
-	recorder.calls <- observerEvaluationCall{node: node, attempt: attempt, trigger: workflow.TriggerEvent, eventType: eventType, resourceID: resourceID}
-	return coop.CommandResponse{}, nil
-}
-
 func TestObserverPersistsSupportingFactsAndTriggersAuthoritativeChecks(t *testing.T) {
 	store := writeObserverSession(t, []coop.SessionNode{
 		observerRequestNode("/v1/payment_intents", 1),
@@ -150,7 +143,6 @@ func TestObserverPersistsSupportingFactsAndTriggersAuthoritativeChecks(t *testin
 	eventCall := receive(t, service.calls)
 	assert.Equal(t, observerEvaluationCall{
 		node: 2, attempt: 2, trigger: workflow.TriggerEvent,
-		eventType: "checkout.session.completed", resourceID: "cs_123",
 	}, eventCall)
 }
 
@@ -259,8 +251,6 @@ func TestObserverAmbiguousEventTriggersEveryStateRuleWithoutAttribution(t *testi
 	first := receive(t, service.calls)
 	second := receive(t, service.calls)
 	assert.Equal(t, []int{1, 2}, []int{first.node, second.node})
-	assert.Empty(t, first.resourceID, "ambiguous events may trigger existing bindings but cannot propose a new one")
-	assert.Empty(t, second.resourceID)
 	assertNoValue(t, service.evidence)
 }
 
@@ -296,7 +286,6 @@ func TestObserverProposesUniqueEventBindingDuringOpenAppReview(t *testing.T) {
 	call := receive(t, service.calls)
 	assert.Equal(t, observerEvaluationCall{
 		node: 1, attempt: 1, trigger: workflow.TriggerEvent,
-		eventType: "checkout.session.completed", resourceID: "cs_new",
 	}, call)
 }
 
@@ -337,7 +326,6 @@ func TestObserverRoutesDeclaredCheckoutEventToOpenSubscriptionUI(t *testing.T) {
 	call := receive(t, service.calls)
 	assert.Equal(t, observerEvaluationCall{
 		node: uiNumber, attempt: 1, trigger: workflow.TriggerEvent,
-		eventType: "checkout.session.completed", resourceID: "cs_exercised",
 	}, call)
 
 	unchanged, err := store.Read(session.ID)

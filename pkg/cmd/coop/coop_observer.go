@@ -44,7 +44,6 @@ type observerWorkflow interface {
 	RecordObservedCandidate(string, int, int, string, string, string) error
 	RecordSupportingResult(string, int, int, coop.CheckResult) error
 	Reevaluate(context.Context, string, int, int, workflow.EvaluationTrigger) (coop.CommandResponse, error)
-	ReevaluateState(context.Context, string, int, int, string, string) (coop.CommandResponse, error)
 }
 
 type observerPlan struct {
@@ -469,17 +468,13 @@ func (controller *coopObserverController) observe(
 		_ = service.RecordSupportingResult(sessionID, match.Attribution.Target.NodeNumber, match.Attribution.Target.AttemptNumber, result)
 	}
 
-	resourceID := ""
-	if fact.Event != nil && match.Attribution != nil && len(fact.Event.Discoveries) == 1 {
-		resourceID = fact.Event.Discoveries[0].ID
-	}
 	for _, target := range match.Triggers {
 		// Dispatch an already-admitted fact even when shutdown has canceled the
 		// context. The workflow will not perform a network read, but acquiring
 		// and invalidating (or finding a busy lease) durably coalesces one
 		// refresh for the next observer owner.
 		if fact.Event != nil {
-			_, _ = service.ReevaluateState(ctx, sessionID, target.NodeNumber, target.AttemptNumber, fact.Event.Type, resourceID)
+			_, _ = service.Reevaluate(ctx, sessionID, target.NodeNumber, target.AttemptNumber, workflow.TriggerEvent)
 		} else {
 			_, _ = service.Reevaluate(ctx, sessionID, target.NodeNumber, target.AttemptNumber, workflow.TriggerRequest)
 		}

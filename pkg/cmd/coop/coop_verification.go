@@ -174,7 +174,6 @@ func (e *coopEvaluator) Evaluate(ctx context.Context, input workflow.EvaluationI
 	base := checkrun.Input{
 		Plan: plan, Session: input.Session, NodeNumber: input.NodeNumber,
 		AttemptNumber: input.Attempt, ObservedAt: observedAt,
-		State: &checkrun.StateObservation{EventType: input.EventType, ResourceID: input.ResourceID},
 	}
 	report, err := e.runner.Evaluate(ctx, base)
 	if err != nil {
@@ -187,7 +186,7 @@ func (e *coopEvaluator) Evaluate(ctx context.Context, input workflow.EvaluationI
 			Repair: boundedVerificationText(gap.Repair), UpdatedAt: observedAt,
 		})
 	}
-	return workflow.Evaluation{Results: report.Results, Bindings: report.Bindings}, nil
+	return workflow.Evaluation{Results: report.Results}, nil
 }
 
 func (e *coopEvaluator) accountUnavailable(detail, repair string) workflow.Evaluation {

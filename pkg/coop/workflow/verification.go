@@ -29,16 +29,13 @@ type EvaluationInput struct {
 	NodeNumber int
 	Attempt    int
 	Trigger    EvaluationTrigger
-	EventType  string
-	ResourceID string
 }
 
 // Evaluation is one complete bounded snapshot of the node's direct resource,
 // state, and coverage findings. Supporting request/event evidence is recorded
 // through RecordSupportingResult instead.
 type Evaluation struct {
-	Results  []coop.CheckResult
-	Bindings []coop.ResourceBinding
+	Results []coop.CheckResult
 }
 
 // RequirementProvider is the pure catalog/blueprint planning boundary used by
@@ -271,17 +268,6 @@ func reportWorkAction(sessionID string, nodeNumber, attempt int, requirements []
 // triggers are intentionally ignored: a result for an ended attempt must not
 // land on the next attempt.
 func (s *Service) Reevaluate(ctx context.Context, sessionID string, nodeNumber, attemptNumber int, trigger EvaluationTrigger) (coop.CommandResponse, error) {
-	return s.reevaluate(ctx, sessionID, nodeNumber, attemptNumber, trigger, "", "")
-}
-
-// ReevaluateState carries the minimal identity extracted from an observed
-// event. The event remains supporting evidence; only the ensuing direct read
-// can pass or fail the state rule.
-func (s *Service) ReevaluateState(ctx context.Context, sessionID string, nodeNumber, attemptNumber int, eventType, resourceID string) (coop.CommandResponse, error) {
-	return s.reevaluate(ctx, sessionID, nodeNumber, attemptNumber, TriggerEvent, eventType, resourceID)
-}
-
-func (s *Service) reevaluate(ctx context.Context, sessionID string, nodeNumber, attemptNumber int, trigger EvaluationTrigger, eventType, resourceID string) (coop.CommandResponse, error) {
 	if err := s.requireEvaluator(); err != nil {
 		return coop.CommandResponse{}, err
 	}
@@ -297,12 +283,11 @@ func (s *Service) reevaluate(ctx context.Context, sessionID string, nodeNumber, 
 	if attempt == nil || attempt.Number != attemptNumber {
 		return responseForChangedAttempt(session, nodeNumber), nil
 	}
-	return s.evaluateAndApplyObservation(ctx, sessionID, nodeNumber, attemptNumber, trigger, eventType, resourceID, true)
+	return s.evaluateAndApplyObservation(ctx, sessionID, nodeNumber, attemptNumber, trigger, true)
 }
 
-func (s *Service) evaluateAndApplyObservation(ctx context.Context, sessionID string, nodeNumber, attemptNumber int, trigger EvaluationTrigger, eventType, resourceID string, ignoreStale bool) (coop.CommandResponse, error) {
+func (s *Service) evaluateAndApplyObservation(ctx context.Context, sessionID string, nodeNumber, attemptNumber int, trigger EvaluationTrigger, ignoreStale bool) (coop.CommandResponse, error) {
 	session, started, err := s.acquireAutomaticEvaluation(
-		ctx,
 		sessionID,
 		nodeNumber,
 		attemptNumber,
@@ -320,7 +305,6 @@ func (s *Service) evaluateAndApplyObservation(ctx context.Context, sessionID str
 	}
 	evaluation, evalErr := s.evaluateBounded(ctx, EvaluationInput{
 		Session: session, NodeNumber: nodeNumber, Attempt: attemptNumber, Trigger: trigger,
-		EventType: eventType, ResourceID: resourceID,
 	})
 	if ctx.Err() != nil {
 		s.invalidateCanceledEvaluation(sessionID, nodeNumber, attemptNumber, started.snapshotAt)
@@ -360,66 +344,45 @@ func (s *Service) evaluateAndApplyObservation(ctx context.Context, sessionID str
 }
 
 func (s *Service) acquireAutomaticEvaluation(
-	ctx context.Context,
 	sessionID string,
 	nodeNumber, attemptNumber int,
 	trigger EvaluationTrigger,
 	ignoreStale bool,
 ) (*coop.Session, evaluationBegin, error) {
-	acquireDeadline := s.now().UTC().Add(s.eventWait)
-	var (
-		started evaluationBegin
-		session *coop.Session
-		err     error
-	)
-	for {
-		started = evaluationBegin{}
-		session, err = s.store.Update(sessionID, func(session *coop.Session) error {
-			if err := requireActiveSession(session); err != nil {
-				return err
-			}
-			node, err := session.NodeByNumber(nodeNumber)
-			if err != nil {
-				return err
-			}
-			attempt, err := node.AttemptByNumber(attemptNumber)
-			if err != nil || node.CurrentAttempt() != attempt {
-				if ignoreStale {
-					started.stale = true
-					return nil
-				}
-				return fmt.Errorf("%w: node %d attempt %d", coop.ErrAttemptNotCurrent, nodeNumber, attemptNumber)
-			}
-			started.snapshotAt, err = node.BeginAutomaticCheck(attemptNumber, s.nextEvaluationTime())
-			if errors.Is(err, coop.ErrAutomaticCheckBusy) {
-				started.busy = true
-				if trigger == TriggerRequest || trigger == TriggerEvent {
-					if refreshErr := node.MarkAutomaticRefresh(attemptNumber); refreshErr != nil {
-						return refreshErr
-					}
-				}
+	var started evaluationBegin
+	session, err := s.store.Update(sessionID, func(session *coop.Session) error {
+		if err := requireActiveSession(session); err != nil {
+			return err
+		}
+		node, err := session.NodeByNumber(nodeNumber)
+		if err != nil {
+			return err
+		}
+		attempt, err := node.AttemptByNumber(attemptNumber)
+		if err != nil || node.CurrentAttempt() != attempt {
+			if ignoreStale {
+				started.stale = true
 				return nil
 			}
-			if err != nil {
-				return err
+			return fmt.Errorf("%w: node %d attempt %d", coop.ErrAttemptNotCurrent, nodeNumber, attemptNumber)
+		}
+		started.snapshotAt, err = node.BeginAutomaticCheck(attemptNumber, s.nextEvaluationTime())
+		if errors.Is(err, coop.ErrAutomaticCheckBusy) {
+			started.busy = true
+			if trigger == TriggerRequest || trigger == TriggerEvent {
+				if refreshErr := node.MarkAutomaticRefresh(attemptNumber); refreshErr != nil {
+					return refreshErr
+				}
 			}
-			started.basis = captureEvaluationBasis(session, attempt)
 			return nil
-		})
+		}
 		if err != nil {
-			return nil, evaluationBegin{}, err
+			return err
 		}
-		if !started.busy || started.stale {
-			return session, started, nil
-		}
-		if trigger != TriggerEvent || !s.now().UTC().Before(acquireDeadline) {
-			return session, started, nil
-		}
-		if err := ctx.Err(); err != nil {
-			return nil, evaluationBegin{}, err
-		}
-		s.sleep(automaticEvaluationAcquirePoll)
-	}
+		started.basis = captureEvaluationBasis(session, attempt)
+		return nil
+	})
+	return session, started, err
 }
 
 func (s *Service) invalidateCanceledEvaluation(sessionID string, nodeNumber, attemptNumber int, token time.Time) {
@@ -592,9 +555,6 @@ func (s *Service) applyEvaluation(session *coop.Session, nodeNumber, attemptNumb
 			applied.lostLease = true
 			return nil
 		}
-		if _, err := salvageObservedCandidates(node, attemptNumber, evaluation.Bindings); err != nil {
-			return err
-		}
 		if err := node.InvalidateAutomaticCheck(attemptNumber, snapshotAt); err != nil {
 			if errors.Is(err, coop.ErrStaleResultSnapshot) {
 				applied.lostLease = true
@@ -722,39 +682,7 @@ func (s *Service) mergeEvaluation(node *coop.SessionNode, attemptNumber int, sna
 		}
 		return false, err
 	}
-	for _, binding := range evaluation.Bindings {
-		if err := node.UpsertResource(attemptNumber, binding); err != nil {
-			return false, err
-		}
-	}
 	return true, nil
-}
-
-// salvageObservedCandidates retains only a safe, replaceable identity proposed
-// by an exact lease owner. This preserves a one-shot event across a concurrent
-// basis change without persisting raw observations or trusting the event as
-// proof.
-func salvageObservedCandidates(node *coop.SessionNode, attemptNumber int, bindings []coop.ResourceBinding) (bool, error) {
-	attempt, err := node.AttemptByNumber(attemptNumber)
-	if err != nil || node.CurrentAttempt() != attempt {
-		return false, fmt.Errorf("%w: attempt %d", coop.ErrAttemptNotCurrent, attemptNumber)
-	}
-	salvaged := false
-	boundRoles := make(map[string]bool, len(attempt.Resources))
-	for _, binding := range attempt.Resources {
-		boundRoles[binding.Role] = true
-	}
-	for _, binding := range bindings {
-		if binding.Source != coop.BindingObservedCandidate || boundRoles[binding.Role] {
-			continue
-		}
-		if err := node.UpsertResource(attemptNumber, binding); err != nil {
-			return false, err
-		}
-		boundRoles[binding.Role] = true
-		salvaged = true
-	}
-	return salvaged, nil
 }
 
 func (s *Service) applyEvaluationPolicy(session *coop.Session, node *coop.SessionNode, nodeNumber, attemptNumber int, applied *evaluationApply) error {

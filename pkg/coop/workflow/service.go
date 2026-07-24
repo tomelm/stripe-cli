@@ -15,12 +15,10 @@ import (
 )
 
 const (
-	AwaitTimeout                   = 10 * time.Minute
-	AutomaticEvaluationTimeout     = 15 * time.Second
-	AutomaticEventAcquireTimeout   = 25 * time.Second
-	automaticEvaluationAcquirePoll = 100 * time.Millisecond
-	maxAgentAwaitEvaluations       = 10
-	maxAgentEvaluationInterval     = 30 * time.Second
+	AwaitTimeout               = 10 * time.Minute
+	AutomaticEvaluationTimeout = 15 * time.Second
+	maxAgentAwaitEvaluations   = 10
+	maxAgentEvaluationInterval = 30 * time.Second
 )
 
 type Store interface {
@@ -36,7 +34,6 @@ type Service struct {
 	awaitTimeout        time.Duration
 	evalInterval        time.Duration
 	evalTimeout         time.Duration
-	eventWait           time.Duration
 	requirementProvider RequirementProvider
 	evaluator           Evaluator
 	evaluationMu        sync.Mutex
@@ -111,15 +108,9 @@ func NewService(store Store, opts ...Option) *Service {
 		awaitTimeout: AwaitTimeout,
 		evalInterval: 2 * time.Second,
 		evalTimeout:  AutomaticEvaluationTimeout,
-		eventWait:    AutomaticEventAcquireTimeout,
 	}
 	for _, opt := range opts {
 		opt(s)
-	}
-	// An event keeps its one-shot identity in the waiting call. Its acquisition
-	// window must outlive every possible remaining evaluator lease.
-	if s.eventWait <= coop.AutomaticCheckLease {
-		s.eventWait = coop.AutomaticCheckLease + 5*time.Second
 	}
 	return s
 }

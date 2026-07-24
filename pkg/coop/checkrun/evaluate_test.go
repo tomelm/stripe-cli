@@ -60,7 +60,6 @@ func TestEvaluateResourceUsesAttemptInputsAndLiveSourceBindings(t *testing.T) {
 	assert.Equal(t, before, after, "evaluation must not mutate the frozen session")
 	assert.Equal(t, []string{"/v1/checkout/sessions/cs_target123", "/v1/customers/cus_source123"}, reader.paths,
 		"equals_binding must read the referenced resource live")
-	assert.Empty(t, report.Bindings, "agent bindings are input, not newly discovered observations")
 	require.Len(t, report.Results, 5)
 	for _, result := range report.Results {
 		assert.Equal(t, coop.CheckPassed, result.Status, result.ID)
@@ -135,7 +134,6 @@ func TestEvaluateUIUsesExactSiblingBindingAndItsActionWindow(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, before, after, "projecting checks must not mutate either sibling attempt")
 	assert.Equal(t, []string{"/v1/checkout/sessions/cs_source123"}, reader.paths)
-	assert.Empty(t, report.Bindings, "an inherited sibling binding must not be copied to the UI attempt")
 	assert.Equal(t, coop.CheckPassed, resultWithSuffix(t, report, ".exists").Status)
 	assert.Equal(t, coop.CheckPassed, resultWithSuffix(t, report, ".action-window").Status,
 		"resource creation is judged against the source attempt, not the later UI attempt")
@@ -213,7 +211,6 @@ func TestEvaluateCombinesResourceAndStateChecksInOneCachedRun(t *testing.T) {
 
 	report, err := NewEvaluator(reader, checks.Catalog{}).Evaluate(context.Background(), Input{
 		Plan: plan, Session: session, NodeNumber: 1, AttemptNumber: 1, ObservedAt: started,
-		State: &StateObservation{EventType: "payment_intent.succeeded"},
 	})
 
 	require.NoError(t, err)
@@ -234,42 +231,31 @@ func TestEvaluateStateUsesOnePathForEventsAndPolling(t *testing.T) {
 		"status": "processing", "amount": json.Number("1000"),
 	}}}
 	evaluator := NewEvaluator(reader, catalog)
-	missing, err := evaluator.Evaluate(context.Background(), Input{Plan: plan, Session: session, NodeNumber: 1, AttemptNumber: 1, ObservedAt: started, State: &StateObservation{EventType: "payment_intent.succeeded"}})
+	missing, err := evaluator.Evaluate(context.Background(), Input{
+		Plan: plan, Session: session, NodeNumber: 1, AttemptNumber: 1, ObservedAt: started,
+	})
 	require.NoError(t, err)
 	require.Len(t, missing.Results, 1)
 	assert.Equal(t, coop.CheckPending, missing.Results[0].Status)
 	assert.Empty(t, reader.paths)
 
-	invalidDiscovery, err := evaluator.Evaluate(context.Background(), Input{
-		Plan: plan, Session: session, NodeNumber: 1, AttemptNumber: 1, ObservedAt: started,
-		State: &StateObservation{EventType: "payment_intent.succeeded", ResourceID: "cs_unrelated123"},
-	})
-	require.NoError(t, err)
-	require.Len(t, invalidDiscovery.Results, 1)
-	assert.Equal(t, coop.CheckPending, invalidDiscovery.Results[0].Status,
-		"an event discovery is a trigger and cannot become an agent-attributed failure")
-	assert.Empty(t, reader.paths)
-
-	unwindowedDiscovery, err := evaluator.Evaluate(context.Background(), Input{
-		Plan: plan, Session: session, NodeNumber: 1, AttemptNumber: 1, ObservedAt: started,
-		State: &StateObservation{EventType: "payment_intent.succeeded", ResourceID: "pi_state123"},
-	})
-	require.NoError(t, err)
-	assert.Equal(t, coop.CheckPending, resultWithSuffix(t, unwindowedDiscovery, ".observation-window").Status)
-	assert.Empty(t, reader.paths)
-
 	opened := started.Add(-time.Minute)
 	openAppForStep(session, opened)
+	require.NoError(t, session.Steps[0].Nodes[0].UpsertResource(1, coop.ResourceBinding{
+		Role: "payment_intent", Type: "payment_intent", ID: "pi_state123", Source: coop.BindingObservedCandidate,
+	}))
 
-	eventReport, err := evaluator.Evaluate(context.Background(), Input{Plan: plan, Session: session, NodeNumber: 1, AttemptNumber: 1, ObservedAt: started, State: &StateObservation{EventType: "payment_intent.succeeded", ResourceID: "pi_state123"}})
+	eventReport, err := evaluator.Evaluate(context.Background(), Input{
+		Plan: plan, Session: session, NodeNumber: 1, AttemptNumber: 1, ObservedAt: started,
+	})
 	require.NoError(t, err)
 	assert.Equal(t, coop.CheckUnavailable, resultWithSuffix(t, eventReport, ".state").Status,
 		"an uncorrelated account-wide state cannot be treated as this handler's pending work")
-	require.Equal(t, []coop.ResourceBinding{{Role: "payment_intent", Type: "payment_intent", ID: "pi_state123", Source: coop.BindingObservedCandidate}}, eventReport.Bindings)
 
-	session.Steps[0].Nodes[0].Attempts[0].Resources = append([]coop.ResourceBinding(nil), eventReport.Bindings...)
 	pollReader := &memoryReader{objects: reader.objects}
-	pollReport, err := NewEvaluator(pollReader, catalog).Evaluate(context.Background(), Input{Plan: plan, Session: session, NodeNumber: 1, AttemptNumber: 1, ObservedAt: started, State: &StateObservation{EventType: "payment_intent.succeeded"}})
+	pollReport, err := NewEvaluator(pollReader, catalog).Evaluate(context.Background(), Input{
+		Plan: plan, Session: session, NodeNumber: 1, AttemptNumber: 1, ObservedAt: started,
+	})
 	require.NoError(t, err)
 	assert.Equal(t, resultWithSuffix(t, eventReport, ".state").Status, resultWithSuffix(t, pollReport, ".state").Status)
 	assert.Equal(t, []string{"/v1/payment_intents/pi_state123"}, pollReader.paths)
@@ -278,21 +264,25 @@ func TestEvaluateStateUsesOnePathForEventsAndPolling(t *testing.T) {
 		"id": "pi_state123", "livemode": false, "created": json.Number(strconv.FormatInt(started.Unix(), 10)),
 		"status": "succeeded", "amount": json.Number("1000"),
 	}
-	passed, err := NewEvaluator(pollReader, catalog).Evaluate(context.Background(), Input{Plan: plan, Session: session, NodeNumber: 1, AttemptNumber: 1, ObservedAt: started, State: &StateObservation{EventType: "payment_intent.succeeded"}})
+	passed, err := NewEvaluator(pollReader, catalog).Evaluate(context.Background(), Input{
+		Plan: plan, Session: session, NodeNumber: 1, AttemptNumber: 1, ObservedAt: started,
+	})
 	require.NoError(t, err)
 	assert.Equal(t, coop.CheckPassed, resultWithSuffix(t, passed, ".state").Status)
 	assert.Equal(t, coop.CheckUnavailable, resultWithSuffix(t, passed, ".attribution.payment_intent.payment_intent").Status,
 		"a passing account-wide event cannot autonomously complete non-UI work")
-	require.Equal(t, []coop.ResourceBinding{{Role: "payment_intent", Type: "payment_intent", ID: "pi_state123", Source: coop.BindingObservedCandidate}}, passed.Bindings)
-	trusted := passed.Bindings[0]
-	trusted.Source = coop.BindingAgent
+	trusted := coop.ResourceBinding{
+		Role: "payment_intent", Type: "payment_intent", ID: "pi_state123", Source: coop.BindingAgent,
+	}
 	require.NoError(t, session.Steps[0].Nodes[0].UpsertResource(1, trusted))
 
 	pollReader.objects["/v1/payment_intents/pi_state123"] = map[string]any{
 		"id": "pi_state123", "livemode": false, "created": json.Number(strconv.FormatInt(started.Unix(), 10)),
 		"status": "failed", "amount": json.Number("1000"),
 	}
-	failed, err := NewEvaluator(pollReader, catalog).Evaluate(context.Background(), Input{Plan: plan, Session: session, NodeNumber: 1, AttemptNumber: 1, ObservedAt: started, State: &StateObservation{EventType: "payment_intent.succeeded"}})
+	failed, err := NewEvaluator(pollReader, catalog).Evaluate(context.Background(), Input{
+		Plan: plan, Session: session, NodeNumber: 1, AttemptNumber: 1, ObservedAt: started,
+	})
 	require.NoError(t, err)
 	terminal := resultWithSuffix(t, failed, ".state")
 	assert.Equal(t, coop.CheckFailed, terminal.Status)
@@ -340,19 +330,19 @@ func TestEvaluatePersistsEventCandidateAcrossReadOutageAndRevalidatesWindow(t *t
 	}
 	reader := &scriptedReader{responses: []objectRead{{err: ErrTransient}, {err: ErrTransient}, {object: object}}}
 	evaluator := NewEvaluator(reader, catalog)
+	require.NoError(t, session.Steps[0].Nodes[1].UpsertResource(1, coop.ResourceBinding{
+		Role: "checkout_session", Type: "checkout_session", ID: "cs_human", Source: coop.BindingObservedCandidate,
+	}))
 
 	eventReport, err := evaluator.Evaluate(context.Background(), Input{
 		Plan: plan, Session: session, NodeNumber: 2, AttemptNumber: 1, ObservedAt: eventAt,
-		State: &StateObservation{EventType: "checkout.session.completed", ResourceID: "cs_human"},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, coop.CheckUnavailable, resultWithKindAndSuffix(t, eventReport, coop.CheckState, ".exists").Status)
-	assert.Equal(t, []coop.ResourceBinding{{
-		Role: "checkout_session", Type: "checkout_session", ID: "cs_human", Source: coop.BindingObservedCandidate,
-	}}, eventReport.Bindings, "the event candidate must survive a transient authoritative read outage")
+	assert.Equal(t, "cs_human", session.Steps[0].Nodes[1].Attempts[0].Resources[0].ID,
+		"the collector-owned candidate must survive a transient authoritative read outage")
 	assert.Equal(t, 2, reader.calls)
 
-	session.Steps[0].Nodes[1].Attempts[0].Resources = append([]coop.ResourceBinding(nil), eventReport.Bindings...)
 	pollReport, err := evaluator.Evaluate(context.Background(), Input{
 		Plan: plan, Session: session, NodeNumber: 2, AttemptNumber: 1, ObservedAt: eventAt.Add(time.Second),
 	})
@@ -366,10 +356,6 @@ func TestEvaluatePersistsEventCandidateAcrossReadOutageAndRevalidatesWindow(t *t
 		}
 		assert.Equal(t, coop.CheckPassed, result.Status, result.ID)
 	}
-	assert.Equal(t, []coop.ResourceBinding{{
-		Role: "checkout_session", Type: "checkout_session", ID: "cs_human", Source: coop.BindingObservedCandidate,
-	}}, pollReport.Bindings, "passing object checks alone do not prove an account-wide event belongs to this UI")
-	require.NoError(t, session.Steps[0].Nodes[1].UpsertResource(1, pollReport.Bindings[0]))
 	assert.Equal(t, 3, reader.calls, "resource and state checks share the retried authoritative read")
 
 	oldCreated := uiStarted.Add(-time.Minute)
@@ -388,8 +374,6 @@ func TestEvaluatePersistsEventCandidateAcrossReadOutageAndRevalidatesWindow(t *t
 	assert.Equal(t, coop.CheckUnavailable, resultWithKindAndSuffix(t, oldReport, coop.CheckState, ".observation-window").Status)
 	assert.Equal(t, coop.CheckUnavailable, resultWithSuffix(t, oldReport, ".attribution.checkout_session.checkout_session").Status,
 		"a persisted invalid candidate must become overridable instead of remaining pending forever")
-	require.Len(t, oldReport.Bindings, 1)
-	assert.Equal(t, coop.BindingObservedCandidate, oldReport.Bindings[0].Source)
 	for _, result := range oldReport.Results {
 		assert.NotEqual(t, coop.CheckFailed, result.Status, result.ID)
 		assert.False(t, result.Kind == coop.CheckResource && strings.HasSuffix(result.ID, ".field-mode"), result.ID)
@@ -410,31 +394,34 @@ func TestEvaluatePersistsEventCandidateAcrossReadOutageAndRevalidatesWindow(t *t
 		"mode":    "payment", "status": "complete", "payment_status": "paid",
 	}
 	replacementEvaluator := NewEvaluator(replacementReader, catalog)
+	require.NoError(t, session.Steps[0].Nodes[1].UpsertResource(1, coop.ResourceBinding{
+		Role: "checkout_session", Type: "checkout_session", ID: "cs_old", Source: coop.BindingObservedCandidate,
+	}))
 	candidateA, err := replacementEvaluator.Evaluate(context.Background(), Input{
 		Plan: plan, Session: session, NodeNumber: 2, AttemptNumber: 1, ObservedAt: eventAt.Add(2 * time.Second),
-		State: &StateObservation{EventType: "checkout.session.completed", ResourceID: "cs_old"},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []coop.ResourceBinding{{
-		Role: "checkout_session", Type: "checkout_session", ID: "cs_old", Source: coop.BindingObservedCandidate,
-	}}, candidateA.Bindings)
-	require.NoError(t, session.Steps[0].Nodes[1].UpsertResource(1, candidateA.Bindings[0]))
+	assert.Equal(t, coop.CheckUnavailable,
+		resultWithSuffix(t, candidateA, ".attribution.checkout_session.checkout_session").Status)
 	replacementReader.paths = nil
+	require.NoError(t, session.Steps[0].Nodes[1].UpsertResource(1, coop.ResourceBinding{
+		Role: "checkout_session", Type: "checkout_session", ID: "pi_wrong123", Source: coop.BindingObservedCandidate,
+	}))
 	invalidReplacement, err := replacementEvaluator.Evaluate(context.Background(), Input{
 		Plan: plan, Session: session, NodeNumber: 2, AttemptNumber: 1, ObservedAt: eventAt.Add(2500 * time.Millisecond),
-		State: &StateObservation{EventType: "checkout.session.completed", ResourceID: "pi_wrong123"},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, coop.CheckPending, resultWithKindAndSuffix(t, invalidReplacement, coop.CheckResource, ".exists").Status)
-	assert.Equal(t, coop.CheckPending, resultWithKindAndSuffix(t, invalidReplacement, coop.CheckState, ".exists").Status)
-	assert.Empty(t, invalidReplacement.Bindings)
+	assert.Equal(t, coop.CheckUnavailable, resultWithKindAndSuffix(t, invalidReplacement, coop.CheckResource, ".exists").Status)
+	assert.Equal(t, coop.CheckUnavailable, resultWithKindAndSuffix(t, invalidReplacement, coop.CheckState, ".exists").Status)
 	assert.Empty(t, replacementReader.paths)
 	delete(replacementReader.errs, "/v1/checkout/sessions/cs_old")
 	replacementReader.paths = nil
 
+	require.NoError(t, session.Steps[0].Nodes[1].UpsertResource(1, coop.ResourceBinding{
+		Role: "checkout_session", Type: "checkout_session", ID: "cs_valid", Source: coop.BindingObservedCandidate,
+	}))
 	validEvent, err := replacementEvaluator.Evaluate(context.Background(), Input{
 		Plan: plan, Session: session, NodeNumber: 2, AttemptNumber: 1, ObservedAt: eventAt.Add(3 * time.Second),
-		State: &StateObservation{EventType: "checkout.session.completed", ResourceID: "cs_valid"},
 	})
 	require.NoError(t, err)
 	for _, result := range validEvent.Results {
@@ -447,10 +434,6 @@ func TestEvaluatePersistsEventCandidateAcrossReadOutageAndRevalidatesWindow(t *t
 	}
 	assert.Equal(t, []string{"/v1/checkout/sessions/cs_valid"}, replacementReader.paths,
 		"a replacement snapshot must use one object for resource and state checks")
-	assert.Equal(t, []coop.ResourceBinding{{
-		Role: "checkout_session", Type: "checkout_session", ID: "cs_valid", Source: coop.BindingObservedCandidate,
-	}}, validEvent.Bindings, "a valid event may replace the unvalidated candidate without becoming attributable")
-	require.NoError(t, session.Steps[0].Nodes[1].UpsertResource(1, validEvent.Bindings[0]))
 	assert.Equal(t, "cs_valid", session.Steps[0].Nodes[1].Attempts[0].Resources[0].ID)
 
 	replacementReader.paths = nil
@@ -488,12 +471,10 @@ func TestEvaluateStateEventNeverReplacesExistingBinding(t *testing.T) {
 
 	report, err := NewEvaluator(reader, catalog).Evaluate(context.Background(), Input{
 		Plan: statePlan(), Session: session, NodeNumber: 1, AttemptNumber: 1, ObservedAt: opened.Add(time.Second),
-		State: &StateObservation{EventType: "payment_intent.succeeded", ResourceID: "pi_unrelated123"},
 	})
 
 	require.NoError(t, err)
 	assert.Equal(t, []string{"/v1/payment_intents/pi_bound123"}, reader.paths)
-	assert.Empty(t, report.Bindings)
 	assert.Equal(t, coop.CheckPassed, resultWithSuffix(t, report, ".state").Status)
 }
 
@@ -533,18 +514,17 @@ func TestEvaluateReplacementAppliesAtomicallyAcrossSameRoleStates(t *testing.T) 
 	catalog := checks.Catalog{Resources: []checks.ResourceRule{{
 		Type: "payment_intent", Role: "payment_intent", Retrieve: "/v1/payment_intents/{id}", IDPrefixes: []string{"pi_"},
 	}}}
+	require.NoError(t, node.UpsertResource(1, coop.ResourceBinding{
+		Role: "payment_intent", Type: "payment_intent", ID: "pi_new123", Source: coop.BindingObservedCandidate,
+	}))
 
 	report, err := NewEvaluator(reader, catalog).Evaluate(context.Background(), Input{
 		Plan: plan, Session: session, NodeNumber: 1, AttemptNumber: 1, ObservedAt: observed,
-		State: &StateObservation{EventType: "payment_intent.succeeded", ResourceID: "pi_new123"},
 	})
 
 	require.NoError(t, err)
 	assert.Equal(t, []string{"/v1/payment_intents/pi_new123"}, reader.paths,
 		"every state for one role must use the replacement snapshot")
-	require.Equal(t, []coop.ResourceBinding{{
-		Role: "payment_intent", Type: "payment_intent", ID: "pi_new123", Source: coop.BindingObservedCandidate,
-	}}, report.Bindings)
 	seen := make(map[string]bool)
 	for _, result := range report.Results {
 		key := string(result.Kind) + "\x00" + result.ID
@@ -575,8 +555,6 @@ func TestEvaluatePersistedWrongPrefixCandidateNeverBlamesAgent(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, coop.CheckUnavailable, resultWithSuffix(t, report, ".exists").Status)
-	require.Len(t, report.Bindings, 1)
-	assert.Equal(t, coop.BindingObservedCandidate, report.Bindings[0].Source)
 	for _, result := range report.Results {
 		assert.NotEqual(t, coop.CheckFailed, result.Status, result.ID)
 	}
@@ -607,8 +585,6 @@ func TestEvaluatePersistedCandidateRemainsNonBlamingAfterUIWindowCloses(t *testi
 	assert.Equal(t, coop.CheckUnavailable, resultWithSuffix(t, report, ".state").Status)
 	assert.Equal(t, coop.CheckUnavailable,
 		resultWithSuffix(t, report, ".attribution.payment_intent.payment_intent").Status)
-	require.Len(t, report.Bindings, 1)
-	assert.Equal(t, coop.BindingObservedCandidate, report.Bindings[0].Source)
 }
 
 func TestEvaluateStateEventCannotDiscoverIntoBoundRole(t *testing.T) {
@@ -624,13 +600,11 @@ func TestEvaluateStateEventCannotDiscoverIntoBoundRole(t *testing.T) {
 
 	report, err := NewEvaluator(reader, catalog).Evaluate(context.Background(), Input{
 		Plan: statePlan(), Session: session, NodeNumber: 1, AttemptNumber: 1, ObservedAt: started.Add(time.Second),
-		State: &StateObservation{EventType: "payment_intent.succeeded", ResourceID: "pi_unrelated123"},
 	})
 
 	require.NoError(t, err)
 	assert.Equal(t, coop.CheckPending, resultWithSuffix(t, report, ".exists").Status)
 	assert.Empty(t, reader.paths)
-	assert.Empty(t, report.Bindings)
 }
 
 func TestEvaluateEventDiscoveryRequiresReportedAttempt(t *testing.T) {
@@ -644,13 +618,11 @@ func TestEvaluateEventDiscoveryRequiresReportedAttempt(t *testing.T) {
 
 	report, err := NewEvaluator(reader, catalog).Evaluate(context.Background(), Input{
 		Plan: statePlan(), Session: session, NodeNumber: 1, AttemptNumber: 1, ObservedAt: started.Add(time.Second),
-		State: &StateObservation{EventType: "payment_intent.succeeded", ResourceID: "pi_unreported123"},
 	})
 
 	require.NoError(t, err)
-	assert.Equal(t, coop.CheckPending, resultWithSuffix(t, report, ".observation-window").Status)
+	assert.Equal(t, coop.CheckPending, resultWithSuffix(t, report, ".exists").Status)
 	assert.Empty(t, reader.paths)
-	assert.Empty(t, report.Bindings)
 }
 
 func TestEvaluateEventDiscoveryStartsAtReportedAttemptBoundary(t *testing.T) {
@@ -670,15 +642,16 @@ func TestEvaluateEventDiscoveryStartsAtReportedAttemptBoundary(t *testing.T) {
 	catalog := checks.Catalog{Resources: []checks.ResourceRule{{
 		Type: "payment_intent", Role: "payment_intent", Retrieve: "/v1/payment_intents/{id}", IDPrefixes: []string{"pi_"},
 	}}}
+	require.NoError(t, session.Steps[0].Nodes[0].UpsertResource(1, coop.ResourceBinding{
+		Role: "payment_intent", Type: "payment_intent", ID: "pi_before_report", Source: coop.BindingObservedCandidate,
+	}))
 
 	report, err := NewEvaluator(reader, catalog).Evaluate(context.Background(), Input{
 		Plan: statePlan(), Session: session, NodeNumber: 1, AttemptNumber: 1, ObservedAt: reported.Add(time.Minute),
-		State: &StateObservation{EventType: "payment_intent.succeeded", ResourceID: "pi_before_report"},
 	})
 
 	require.NoError(t, err)
-	assert.Equal(t, coop.CheckPending, resultWithSuffix(t, report, ".observation-window").Status)
-	assert.Empty(t, report.Bindings)
+	assert.Equal(t, coop.CheckUnavailable, resultWithSuffix(t, report, ".observation-window").Status)
 }
 
 func TestEvaluateEventDiscoveryExpires(t *testing.T) {
@@ -688,21 +661,28 @@ func TestEvaluateEventDiscoveryExpires(t *testing.T) {
 	session := oneNodeSession("handler", started)
 	session.Steps[0].Nodes[0].Attempts[0].ReportedAt = &reported
 	openAppForStep(session, opened)
-	reader := &memoryReader{}
+	reader := &memoryReader{objects: map[string]map[string]any{
+		"/v1/payment_intents/pi_expired123": {
+			"id": "pi_expired123", "livemode": false,
+			"created": json.Number(strconv.FormatInt(started.Add(eventDiscoveryWindow+2*time.Second).Unix(), 10)),
+			"status":  "succeeded", "amount": json.Number("1000"),
+		},
+	}}
 	catalog := checks.Catalog{Resources: []checks.ResourceRule{{
 		Type: "payment_intent", Role: "payment_intent", Retrieve: "/v1/payment_intents/{id}", IDPrefixes: []string{"pi_"},
 	}}}
+	require.NoError(t, session.Steps[0].Nodes[0].UpsertResource(1, coop.ResourceBinding{
+		Role: "payment_intent", Type: "payment_intent", ID: "pi_expired123", Source: coop.BindingObservedCandidate,
+	}))
 
 	report, err := NewEvaluator(reader, catalog).Evaluate(context.Background(), Input{
 		Plan: statePlan(), Session: session, NodeNumber: 1, AttemptNumber: 1,
 		ObservedAt: started.Add(eventDiscoveryWindow + time.Second),
-		State:      &StateObservation{EventType: "payment_intent.succeeded", ResourceID: "pi_expired123"},
 	})
 
 	require.NoError(t, err)
-	assert.Equal(t, coop.CheckPending, resultWithSuffix(t, report, ".observation-window").Status)
-	assert.Empty(t, reader.paths, "an expired discovery must be rejected before any remote read")
-	assert.Empty(t, report.Bindings)
+	assert.Equal(t, coop.CheckUnavailable, resultWithSuffix(t, report, ".observation-window").Status)
+	assert.Equal(t, []string{"/v1/payment_intents/pi_expired123"}, reader.paths)
 }
 
 func TestEvaluateOpenedUIWithoutDiscoveryBecomesUnavailable(t *testing.T) {
@@ -761,15 +741,16 @@ func TestEvaluateConsumesCompiledCatalogPlan(t *testing.T) {
 	}}
 	opened := started.Add(-time.Minute)
 	openAppForStep(session, opened)
+	require.NoError(t, session.Steps[0].Nodes[0].UpsertResource(1, coop.ResourceBinding{
+		Role: "checkout_session", Type: "checkout_session", ID: "cs_compiled123", Source: coop.BindingObservedCandidate,
+	}))
 	report, err := NewEvaluator(reader, catalog).Evaluate(context.Background(), Input{
 		Plan: plan, Session: session, NodeNumber: 1, AttemptNumber: 1, ObservedAt: started,
-		State: &StateObservation{EventType: "checkout.session.completed", ResourceID: "cs_compiled123"},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, coop.CheckPassed, resultWithSuffix(t, report, ".state").Status)
 	assert.Equal(t, coop.CheckUnavailable, resultWithSuffix(t, report, ".attribution.checkout_session.checkout_session").Status,
 		"a state-only account-wide event cannot complete an async handler")
-	assert.Equal(t, []coop.ResourceBinding{{Role: "checkout_session", Type: "checkout_session", ID: "cs_compiled123", Source: coop.BindingObservedCandidate}}, report.Bindings)
 }
 
 func TestEvaluateClassifiesMissingNotFoundAndUnavailable(t *testing.T) {
@@ -976,9 +957,6 @@ func TestEvaluateOversizedCandidateEvidenceFailsClosed(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	require.Len(t, report.Bindings, 1)
-	assert.Equal(t, coop.BindingObservedCandidate, report.Bindings[0].Source,
-		"bounded object evidence can never establish attempt attribution")
 	assert.Equal(t, coop.CheckUnavailable,
 		resultWithSuffix(t, report, ".attribution.checkout_session.checkout_session").Status)
 	assert.Equal(t, 1, countKind(report.Results, coop.CheckCoverage))

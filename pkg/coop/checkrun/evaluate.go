@@ -29,26 +29,17 @@ const (
 	eventDiscoveryWindow   = 5 * time.Minute
 )
 
-// StateObservation supplies an event identity to the matching state target.
-// Every evaluation still returns the plan's complete automatic snapshot.
-type StateObservation struct {
-	EventType  string
-	ResourceID string
-}
-
 type Input struct {
 	Plan          checks.StepPlan
 	Session       *coop.Session
 	NodeNumber    int
 	AttemptNumber int
 	ObservedAt    time.Time
-	State         *StateObservation
 }
 
 // Report contains no Stripe payloads or arbitrary response fields.
 type Report struct {
-	Results  []coop.CheckResult
-	Bindings []coop.ResourceBinding
+	Results []coop.CheckResult
 }
 
 // Evaluator applies only the closed checks vocabulary. Catalog must be the
@@ -83,9 +74,6 @@ func (e *Evaluator) Evaluate(ctx context.Context, input Input) (Report, error) {
 	if input.Plan.StepKey != "" && input.Plan.StepKey != step.Key {
 		return Report{}, fmt.Errorf("check plan %q does not belong to step %q", input.Plan.StepKey, step.Key)
 	}
-	if input.State != nil && input.State.ResourceID != "" && input.State.EventType == "" {
-		return Report{}, errors.New("an event type is required with an observed resource ID")
-	}
 	at := input.ObservedAt.UTC()
 	if at.IsZero() {
 		at = time.Now().UTC()
@@ -93,8 +81,9 @@ func (e *Evaluator) Evaluate(ctx context.Context, input Input) (Report, error) {
 	runCtx, cancel := context.WithTimeout(ctx, evaluationTimeout)
 	defer cancel()
 	run := evaluation{ctx: runCtx, evaluator: e, session: input.Session, node: node,
-		attempt: attempt, step: step.Key, at: at, cache: map[string]objectRead{}}
-	targets := run.targets(input.Plan, input.State)
+		attempt: attempt, step: step.Key, at: at, cache: map[string]objectRead{},
+		candidateSeen: map[string]bool{}}
+	targets := run.targets(input.Plan)
 	if len(targets) > MaxTargetsPerRun {
 		run.coverage(fmt.Sprintf("%d compiled checks exceeded the %d-target bound", len(targets), MaxTargetsPerRun))
 		targets = targets[:MaxTargetsPerRun]
@@ -121,7 +110,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, input Input) (Report, error) {
 		run.evaluate(target)
 	}
 	run.finalizeCandidates()
-	return Report{Results: run.results, Bindings: run.bindings}, nil
+	return Report{Results: run.results}, nil
 }
 
 type target struct {
@@ -135,7 +124,7 @@ type target struct {
 	predicates                   []checks.Predicate
 	evidence                     []checks.EvidenceCheck
 	terminalFailures             []checks.TerminalFail
-	created, discovered          bool
+	created                      bool
 	candidateBinding             bool
 	awaitingDiscovery            bool
 	unavailableWithoutDiscovery  bool
@@ -157,43 +146,40 @@ type evaluation struct {
 	at               time.Time
 	cache            map[string]objectRead
 	results          []coop.CheckResult
-	bindings         []coop.ResourceBinding
 	resultCandidates []string
+	candidates       []coop.ResourceBinding
+	candidateSeen    map[string]bool
 	covered          bool
 }
 
-func (run *evaluation) targets(plan checks.StepPlan, state *StateObservation) []target {
-	discovery := run.discoverTargets(plan.States, state)
+func (run *evaluation) targets(plan checks.StepPlan) []target {
+	discovery := run.discoverTargets(plan.States)
 	result := make([]target, 0, len(plan.Resources)+len(plan.States))
 	for _, check := range plan.Resources {
-		result = append(result, run.resourceTarget(check, discovery))
+		candidate := run.resourceTarget(check, discovery)
+		run.registerCandidate(candidate)
+		result = append(result, candidate)
 	}
 	for _, check := range plan.States {
-		result = append(result, run.stateTarget(check, discovery))
+		candidate := run.stateTarget(check, discovery)
+		run.registerCandidate(candidate)
+		result = append(result, candidate)
 	}
 	return result
 }
 
 type targetDiscovery struct {
-	reviewActive    bool
-	eventType       string
-	eventResourceID string
-	window          time.Time
-	uiRoles         map[string]bool
-	replacements    map[string]string
+	reviewActive bool
+	window       time.Time
+	uiRoles      map[string]bool
 }
 
-func (run *evaluation) discoverTargets(states []checks.StateCheck, observation *StateObservation) targetDiscovery {
+func (run *evaluation) discoverTargets(states []checks.StateCheck) targetDiscovery {
 	discovery := targetDiscovery{
-		window:       run.discoveryWindowStart(),
-		uiRoles:      make(map[string]bool),
-		replacements: make(map[string]string),
+		window:  run.discoveryWindowStart(),
+		uiRoles: make(map[string]bool),
 	}
 	discovery.reviewActive = !discovery.window.IsZero()
-	if observation != nil {
-		discovery.eventType = observation.EventType
-		discovery.eventResourceID = strings.TrimSpace(observation.ResourceID)
-	}
 	for _, check := range states {
 		discovery.considerState(run, check)
 	}
@@ -206,24 +192,11 @@ func (discovery targetDiscovery) considerState(run *evaluation, check checks.Sta
 	}
 	key := targetGroup(check.Role, check.ResourceType)
 	discovery.uiRoles[key] = true
-	binding, bound := findBinding(run.attempt, check.Role, check.ResourceType)
-	replaceable := !bound && !hasBindingRole(run.attempt, check.Role)
-	if bound {
-		replaceable = binding.Source == coop.BindingObservedCandidate && binding.ID != discovery.eventResourceID
-	}
-	if discovery.eventType == check.EventType && discovery.eventResourceID != "" && replaceable && discovery.reviewActive {
-		discovery.replacements[key] = discovery.eventResourceID
-	}
 }
 
 func (run *evaluation) resourceTarget(check checks.ResourceCheck, discovery targetDiscovery) target {
 	binding, bindingAttempt, bound := run.binding(check.Source, check.Role, check.ResourceType)
 	group := targetGroup(check.Role, check.ResourceType)
-	replacementID := discovery.replacements[group]
-	if replacementID != "" {
-		binding = coop.ResourceBinding{ID: replacementID, Source: coop.BindingObservedCandidate}
-		bindingAttempt, bound = run.attempt, true
-	}
 	unboundAfterOpen := !bound && run.uiOpened() && !hasBindingRole(run.attempt, check.Role)
 	persistedCandidate := binding.Source == coop.BindingObservedCandidate && bindingAttempt == run.attempt
 	reviewBinding := (binding.Source == coop.BindingObservedCandidate || binding.Source == coop.BindingObserved) &&
@@ -233,8 +206,8 @@ func (run *evaluation) resourceTarget(check checks.ResourceCheck, discovery targ
 		resourceType: check.ResourceType, role: check.Role, path: check.RetrievePath,
 		id: binding.ID, actionAttempt: bindingAttempt, prefixes: check.IDPrefixes,
 		predicates: check.Predicates, evidence: check.Evidence, created: true,
-		discovered: replacementID != "", actionThroughReview: reviewBinding,
-		candidateBinding: persistedCandidate, validateDiscoveryWindow: reviewBinding,
+		actionThroughReview: reviewBinding,
+		candidateBinding:    persistedCandidate, validateDiscoveryWindow: reviewBinding,
 		awaitingDiscovery:           unboundAfterOpen && discovery.uiRoles[group],
 		unavailableWithoutDiscovery: unboundAfterOpen && !discovery.uiRoles[group],
 		discoveryWindow:             discovery.window,
@@ -243,47 +216,37 @@ func (run *evaluation) resourceTarget(check checks.ResourceCheck, discovery targ
 
 func (run *evaluation) stateTarget(check checks.StateCheck, discovery targetDiscovery) target {
 	group := targetGroup(check.Role, check.ResourceType)
-	binding, bound := findBinding(run.attempt, check.Role, check.ResourceType)
-	id, discovered := run.stateTargetID(check, binding, bound, discovery)
-	persistedCandidate := bound && binding.Source == coop.BindingObservedCandidate
-	unboundAfterOpen := id == "" && run.uiOpened() && !hasBindingRole(run.attempt, check.Role)
-	reviewBinding := bound && (binding.Source == coop.BindingObservedCandidate || binding.Source == coop.BindingObserved) && discovery.reviewActive
+	binding, bindingAttempt, bound := run.binding(check.Source, check.Role, check.ResourceType)
+	persistedCandidate := bound && binding.Source == coop.BindingObservedCandidate && bindingAttempt == run.attempt
+	unboundAfterOpen := binding.ID == "" && run.uiOpened() && !hasBindingRole(run.attempt, check.Role)
+	reviewBinding := bound && (binding.Source == coop.BindingObservedCandidate || binding.Source == coop.BindingObserved) &&
+		bindingAttempt == run.attempt && discovery.reviewActive
 	return target{
 		meta: check.CheckMeta, kind: coop.CheckState,
 		resourceType: check.ResourceType, role: check.Role, path: check.RetrievePath,
-		id: id, prefixes: run.evaluator.rulePrefixes(check.ResourceType),
+		id: binding.ID, prefixes: run.evaluator.rulePrefixes(check.ResourceType),
 		predicates: check.Predicates, terminalFailures: check.TerminalFailures,
-		discovered: discovered, candidateBinding: (discovered && discovery.reviewActive) || persistedCandidate,
+		candidateBinding:            persistedCandidate,
 		awaitingDiscovery:           unboundAfterOpen && discovery.uiRoles[group],
 		unavailableWithoutDiscovery: unboundAfterOpen && !discovery.uiRoles[group],
-		validateDiscoveryWindow:     discovered || reviewBinding,
+		validateDiscoveryWindow:     reviewBinding,
 		discoveryWindow:             discovery.window,
 	}
 }
 
-func (run *evaluation) stateTargetID(check checks.StateCheck, binding coop.ResourceBinding, bound bool, discovery targetDiscovery) (string, bool) {
-	replacementID := discovery.replacements[targetGroup(check.Role, check.ResourceType)]
-	observedResourceID := ""
-	if discovery.eventType == check.EventType {
-		observedResourceID = discovery.eventResourceID
+func (run *evaluation) registerCandidate(target target) {
+	if !target.candidateBinding {
+		return
 	}
-	id := binding.ID
-	switch {
-	case replacementID != "":
-		return replacementID, replacementID != binding.ID
-	case bound && binding.Source == coop.BindingObservedCandidate && discovery.reviewActive && observedResourceID != "" && observedResourceID != id:
-		return observedResourceID, true
-	case bound || hasBindingRole(run.attempt, check.Role):
-		return id, false
-	case observedResourceID != "":
-		return observedResourceID, true
-	case !run.uiOpened():
-		sourceBinding, _, sourceBound := run.sourceBinding(check.Source, check.Role, check.ResourceType)
-		if sourceBound {
-			return sourceBinding.ID, false
-		}
+	binding := coop.ResourceBinding{
+		Role: target.role, Type: target.resourceType, ID: target.id, Source: coop.BindingObservedCandidate,
 	}
-	return id, false
+	key := bindingKey(binding.Role, binding.Type, binding.ID)
+	if run.candidateSeen[key] {
+		return
+	}
+	run.candidateSeen[key] = true
+	run.candidates = append(run.candidates, binding)
 }
 
 func targetGroup(role, resourceType string) string {
@@ -320,11 +283,9 @@ func (run *evaluation) sourceBinding(source checks.Source, role, resourceType st
 }
 
 func (run *evaluation) evaluate(target target) {
-	run.prepareCandidate(target)
-	if run.handleMissingBinding(target) || run.handleInvalidBinding(target) || run.handleInvalidObservationWindow(target) {
+	if run.handleMissingBinding(target) || run.handleInvalidBinding(target) {
 		return
 	}
-	run.persistDiscoveredCandidate(target)
 	read, ok := run.readTarget(target)
 	if !ok || !run.verifyReadIdentity(target, read.object) {
 		return
@@ -332,24 +293,9 @@ func (run *evaluation) evaluate(target target) {
 	run.add(target, "exists", coop.CheckPassed, "resource exists in the authorized test account", target.resourceType+" "+target.id, target.meta.Repair)
 	run.testMode(target, read.object)
 	if target.validateDiscoveryWindow && !run.discoveryInWindow(target, read.object["created"]) {
-		// A newly proposed event may be discarded and replaced. A candidate
-		// already persisted on the attempt cannot be deleted by the workflow's
-		// upsert-only merge, so retain it here and let its attribution finding
-		// age to unavailable instead of leaving review pending forever.
-		if target.discovered {
-			run.discardCandidate(target)
-		}
 		return
 	}
 	run.evaluateReadTarget(target, read.object)
-}
-
-func (run *evaluation) prepareCandidate(target target) {
-	if target.candidateBinding && !target.discovered {
-		// A persisted candidate remains non-attributable even if its app
-		// window has ended or its ID is malformed for the compiled role.
-		run.bind(target, coop.BindingObservedCandidate)
-	}
 }
 
 func (run *evaluation) handleMissingBinding(target target) bool {
@@ -358,7 +304,7 @@ func (run *evaluation) handleMissingBinding(target target) bool {
 	}
 	status := coop.CheckFailed
 	repair := "Report the Stripe resource ID observed for this step."
-	if target.kind == coop.CheckState || target.discovered {
+	if target.kind == coop.CheckState {
 		status = coop.CheckPending
 	}
 	if target.awaitingDiscovery {
@@ -383,7 +329,7 @@ func (run *evaluation) handleInvalidBinding(target target) bool {
 	}
 	status := coop.CheckFailed
 	repair := "Report the matching Stripe resource ID."
-	if target.kind == coop.CheckState || target.discovered {
+	if target.kind == coop.CheckState || target.candidateBinding {
 		// Event payloads are triggers, not trusted verification input. A
 		// malformed or unrelated discovery cannot be blamed on the agent or
 		// treated as a terminal contradiction; wait for a usable binding.
@@ -392,33 +338,6 @@ func (run *evaluation) handleInvalidBinding(target target) bool {
 	}
 	run.add(target, "exists", status, "a valid "+target.resourceType+" ID", "no usable resource binding", repair)
 	return true
-}
-
-func (run *evaluation) handleInvalidObservationWindow(target target) bool {
-	if !target.discovered {
-		return false
-	}
-	if target.discoveryWindow.IsZero() {
-		run.add(target, "observation-window", coop.CheckPending, "an event during post-report app review",
-			"no post-report app review window", "Report the resource ID, or report the attempt before the developer opens and exercises the app.")
-		return true
-	}
-	if !run.discoveryWindowActive(target.discoveryWindow) {
-		run.add(target, "observation-window", coop.CheckPending, "an event during the current app review window",
-			"event observed outside the current app review window", "Report the matching Stripe resource ID, or start a new attempt and exercise the app again.")
-		return true
-	}
-	return false
-}
-
-func (run *evaluation) persistDiscoveredCandidate(target target) {
-	if target.candidateBinding && target.discovered && !target.discoveryWindow.IsZero() {
-		// Preserve a safe event identity before the read so a
-		// transient outage cannot lose a one-shot event. It remains replaceable
-		// and untrusted; direct reads may verify facts about it, but cannot
-		// attribute the account-wide event to this attempt.
-		run.bind(target, coop.BindingObservedCandidate)
-	}
 }
 
 func (run *evaluation) readTarget(target target) (objectRead, bool) {
@@ -580,10 +499,6 @@ func (run *evaluation) discoveryWindowStart() time.Time {
 		return reported
 	}
 	return opened
-}
-
-func (run *evaluation) discoveryWindowActive(start time.Time) bool {
-	return !run.at.Before(start) && !run.at.After(start.Add(eventDiscoveryWindow))
 }
 
 func (run *evaluation) discoveryInWindow(target target, value any) bool {
@@ -880,11 +795,8 @@ func (run *evaluation) coverage(observed string) {
 // attribution finding keeps automatic completion fail closed while preserving
 // the useful supporting evidence for human review.
 func (run *evaluation) finalizeCandidates() {
-	for bindingIndex := range run.bindings {
-		binding := &run.bindings[bindingIndex]
-		if binding.Source != coop.BindingObservedCandidate {
-			continue
-		}
+	for bindingIndex := range run.candidates {
+		binding := &run.candidates[bindingIndex]
 		key := bindingKey(binding.Role, binding.Type, binding.ID)
 		for resultIndex, resultKey := range run.resultCandidates {
 			if resultKey != key {
@@ -921,35 +833,6 @@ func candidateKey(target target) string {
 
 func bindingKey(role, resourceType, id string) string {
 	return role + "\x00" + resourceType + "\x00" + id
-}
-
-func (run *evaluation) bind(target target, source coop.BindingSource) {
-	for index, existing := range run.bindings {
-		if existing.Role != target.role {
-			continue
-		}
-		if existing.Type == target.resourceType && existing.ID == target.id &&
-			existing.Source == coop.BindingObservedCandidate && source == coop.BindingObserved {
-			run.bindings[index].Source = source
-		}
-		return
-	}
-	if len(run.bindings) < MaxTargetsPerRun {
-		run.bindings = append(run.bindings, coop.ResourceBinding{
-			Role: target.role, Type: target.resourceType, ID: target.id, Source: source,
-		})
-	}
-}
-
-func (run *evaluation) discardCandidate(target target) {
-	for index := range run.bindings {
-		binding := run.bindings[index]
-		if binding.Role == target.role && binding.Type == target.resourceType && binding.ID == target.id &&
-			binding.Source == coop.BindingObservedCandidate {
-			run.bindings = append(run.bindings[:index], run.bindings[index+1:]...)
-			return
-		}
-	}
 }
 
 func (e *Evaluator) rule(resourceType string) *checks.ResourceRule {

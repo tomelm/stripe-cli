@@ -265,16 +265,16 @@ func TestEvaluateSubscriptionEvidenceDuringAppReview(t *testing.T) {
 				objects["/v1/subscriptions/sub_trial"] = subscription
 			}
 			reader := &memoryReader{objects: objects}
+			require.NoError(t, ui.UpsertResource(1, coop.ResourceBinding{
+				Role: "checkout_session", Type: "checkout_session", ID: "cs_subscription",
+				Source: coop.BindingObservedCandidate,
+			}))
 			report, evaluateErr := NewEvaluator(reader, catalog).Evaluate(context.Background(), Input{
 				Plan: plan, Session: session, NodeNumber: uiNumber, AttemptNumber: 1, ObservedAt: eventAt,
-				State: &StateObservation{EventType: "checkout.session.completed", ResourceID: "cs_subscription"},
 			})
 			require.NoError(t, evaluateErr)
 			result := resultWithSuffix(t, report, test.wantSuffix)
 			assert.Equal(t, test.want, result.Status)
-			require.Len(t, report.Bindings, 1)
-			assert.Equal(t, coop.BindingObservedCandidate, report.Bindings[0].Source,
-				"a reusable Price relationship verifies facts but cannot identify this human interaction")
 			assert.Equal(t, coop.CheckUnavailable,
 				resultWithSuffix(t, report, ".attribution.checkout_session.checkout_session").Status)
 			assert.Equal(t, coop.CheckAdvisory, result.Importance,
@@ -290,10 +290,6 @@ func TestEvaluateSubscriptionEvidenceDuringAppReview(t *testing.T) {
 				assert.NotEmpty(t, result.Observed)
 			}
 			if test.name == "different line item Price" {
-				require.Len(t, report.Bindings, 1)
-				assert.Equal(t, coop.BindingObservedCandidate, report.Bindings[0].Source,
-					"an account-wide event must remain replaceable when its blueprint relationship does not match")
-				require.NoError(t, ui.UpsertResource(1, report.Bindings[0]))
 				expired, pollErr := NewEvaluator(&memoryReader{objects: objects}, catalog).Evaluate(context.Background(), Input{
 					Plan: plan, Session: session, NodeNumber: uiNumber, AttemptNumber: 1,
 					ObservedAt: opened.Add(eventDiscoveryWindow + time.Second),
@@ -317,8 +313,6 @@ func TestEvaluateSubscriptionEvidenceDuringAppReview(t *testing.T) {
 				assert.NotEmpty(t, result.Observed)
 			}
 			if test.omitSubscription {
-				require.Len(t, report.Bindings, 1)
-				require.NoError(t, ui.UpsertResource(1, report.Bindings[0]))
 				expired, pollErr := NewEvaluator(&memoryReader{objects: objects}, catalog).Evaluate(context.Background(), Input{
 					Plan: plan, Session: session, NodeNumber: uiNumber, AttemptNumber: 1,
 					ObservedAt: opened.Add(eventDiscoveryWindow + time.Second),
@@ -376,32 +370,31 @@ func TestEvaluateEventReturnsCompleteStateSnapshot(t *testing.T) {
 		{Type: "subscription", Role: "subscription", Retrieve: "/v1/subscriptions/{id}", IDPrefixes: []string{"sub_"}},
 	}}
 	evaluator := NewEvaluator(reader, catalog)
+	require.NoError(t, session.Steps[0].Nodes[0].UpsertResource(1, coop.ResourceBinding{
+		Role: "checkout_session", Type: "checkout_session", ID: "cs_snapshot",
+		Source: coop.BindingObservedCandidate,
+	}))
 
 	checkout, err := evaluator.Evaluate(context.Background(), Input{
 		Plan: plan, Session: session, NodeNumber: 1, AttemptNumber: 1, ObservedAt: eventAt,
-		State: &StateObservation{EventType: "checkout.session.completed", ResourceID: "cs_snapshot"},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, coop.CheckPassed, resultWithKindAndSuffix(t, checkout, coop.CheckState, "state.checkout.state").Status)
 	assert.Equal(t, coop.CheckPending, resultWithKindAndSuffix(t, checkout, coop.CheckState, "state.subscription.exists").Status,
 		"a Checkout event must retain the unresolved Subscription state in the complete snapshot")
-	require.Len(t, checkout.Bindings, 1)
-	assert.Equal(t, coop.BindingObservedCandidate, checkout.Bindings[0].Source)
 	assert.Equal(t, coop.CheckUnavailable,
 		resultWithSuffix(t, checkout, ".attribution.checkout_session.checkout_session").Status)
-	require.NoError(t, session.Steps[0].Nodes[0].UpsertResource(1, checkout.Bindings[0]))
+	require.NoError(t, session.Steps[0].Nodes[0].UpsertResource(1, coop.ResourceBinding{
+		Role: "subscription", Type: "subscription", ID: "sub_snapshot",
+		Source: coop.BindingObservedCandidate,
+	}))
 
 	subscription, err := evaluator.Evaluate(context.Background(), Input{
 		Plan: plan, Session: session, NodeNumber: 1, AttemptNumber: 1, ObservedAt: eventAt.Add(time.Second),
-		State: &StateObservation{EventType: "customer.subscription.created", ResourceID: "sub_snapshot"},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, coop.CheckPassed, resultWithKindAndSuffix(t, subscription, coop.CheckState, "state.checkout.state").Status)
 	assert.Equal(t, coop.CheckPassed, resultWithKindAndSuffix(t, subscription, coop.CheckState, "state.subscription.state").Status)
-	require.Len(t, subscription.Bindings, 2)
-	for _, binding := range subscription.Bindings {
-		assert.Equal(t, coop.BindingObservedCandidate, binding.Source)
-	}
 	assert.Equal(t, coop.CheckUnavailable,
 		resultWithSuffix(t, subscription, ".attribution.checkout_session.checkout_session").Status)
 	assert.Equal(t, coop.CheckUnavailable,

@@ -69,10 +69,13 @@ func TestSubscriptionUIEventEvaluatesCausalResourceGraph(t *testing.T) {
 		accountID:   "acct_subscription123",
 		now:         func() time.Time { return observed },
 	}
+	require.NoError(t, ui.UpsertResource(1, coop.ResourceBinding{
+		Role: "checkout_session", Type: "checkout_session", ID: "cs_exercised",
+		Source: coop.BindingObservedCandidate,
+	}))
 
 	report, err := evaluator.Evaluate(context.Background(), workflow.EvaluationInput{
 		Session: session, NodeNumber: nodeNumber, Attempt: 1,
-		EventType: "checkout.session.completed", ResourceID: "cs_exercised",
 	})
 
 	require.NoError(t, err)
@@ -82,10 +85,6 @@ func TestSubscriptionUIEventEvaluatesCausalResourceGraph(t *testing.T) {
 		"/v1/products/prod_subscription",
 		"/v1/subscriptions/sub_exercised",
 	}, reader.TakePaths(), "one event should evaluate the complete bounded causal graph")
-	require.Len(t, report.Bindings, 1)
-	assert.Equal(t, coop.ResourceBinding{
-		Role: "checkout_session", Type: "checkout_session", ID: "cs_exercised", Source: coop.BindingObservedCandidate,
-	}, report.Bindings[0])
 	statePassed := false
 	relationshipPassed := false
 	attributionUnavailable := false
@@ -163,9 +162,14 @@ func TestSubscriptionUICandidateContradictionDoesNotReturnWorkToAgent(t *testing
 	service := workflow.NewService(store, workflow.WithEvaluator(evaluator), workflow.WithClock(
 		func() time.Time { return observed }, func(time.Duration) {},
 	))
+	require.NoError(t, service.RecordObservedCandidate(
+		session.ID, nodeNumber, 1,
+		"checkout.session.completed", "checkout.session", "cs_wrong_price",
+	))
 
-	response, err := service.ReevaluateState(context.Background(), session.ID, nodeNumber, 1,
-		"checkout.session.completed", "cs_wrong_price")
+	response, err := service.Reevaluate(
+		context.Background(), session.ID, nodeNumber, 1, workflow.TriggerEvent,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, "needs_human", response.Decision)
 	assert.Equal(t, 1, response.Attempt)

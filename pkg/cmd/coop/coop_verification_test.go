@@ -287,7 +287,9 @@ func TestCheckoutVerificationEndToEndHumanAndAgentFlow(t *testing.T) {
 	require.Len(t, candidateNode.CurrentAttempt().Resources, 1)
 	assert.Equal(t, coop.BindingObservedCandidate, candidateNode.CurrentAttempt().Resources[0].Source)
 	assert.Equal(t, "cs_human", candidateNode.CurrentAttempt().Resources[0].ID)
-	stateResult, err := service.ReevaluateState(context.Background(), session.ID, trigger.NodeNumber, trigger.AttemptNumber, "checkout.session.completed", "cs_human")
+	stateResult, err := service.Reevaluate(
+		context.Background(), session.ID, trigger.NodeNumber, trigger.AttemptNumber, workflow.TriggerEvent,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, "needs_human", stateResult.Decision)
 	assertCandidateUIResults(t, stateResult.Verification)
