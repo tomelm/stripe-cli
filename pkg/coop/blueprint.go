@@ -101,7 +101,30 @@ func validateBlueprintReferences(bp *Blueprint) error {
 		}
 	}
 
-	data, err := json.Marshal(bp)
+	metadata := *bp
+	metadata.Steps = append([]BlueprintStep(nil), bp.Steps...)
+	for i := range metadata.Steps {
+		metadata.Steps[i].Nodes = nil
+	}
+	if err := visitBlueprintStrings(&metadata, func(value string) error {
+		if findBlueprintNodeCandidate(value) != -1 {
+			return fmt.Errorf("node references are only supported inside node definitions: %q", value)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	if err := visitBlueprintStrings(bp, func(value string) error {
+		return validateBlueprintReferenceString(value, validRefs)
+	}); err != nil {
+		return err
+	}
+	return validateBlueprintReferenceOrder(bp)
+}
+
+func visitBlueprintStrings(value any, visit func(string) error) error {
+	data, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
@@ -109,20 +132,19 @@ func validateBlueprintReferences(bp *Blueprint) error {
 	for {
 		token, err := decoder.Token()
 		if err == io.EOF {
-			break
+			return nil
 		}
 		if err != nil {
 			return err
 		}
-		value, ok := token.(string)
+		text, ok := token.(string)
 		if !ok {
 			continue
 		}
-		if err := validateBlueprintReferenceString(value, validRefs); err != nil {
+		if err := visit(text); err != nil {
 			return err
 		}
 	}
-	return validateBlueprintReferenceOrder(bp)
 }
 
 func validateBlueprintReferenceOrder(bp *Blueprint) error {

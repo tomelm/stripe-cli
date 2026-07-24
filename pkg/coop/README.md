@@ -90,6 +90,8 @@ stripe coop agent report-work \
 
 Values that are valid JSON retain their type; other values are stored as strings. Co-op resolves `${node.<step>.<node>:<field>}` references from these persisted outputs before returning a later node's request.
 
+Skipping an output-producing node also skips later nodes that directly or transitively reference its outputs. Co-op refuses the skip if one of those dependent nodes is already done.
+
 ## TUI Keybindings
 
 | Key | Action |

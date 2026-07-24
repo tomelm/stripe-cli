@@ -381,3 +381,34 @@ func TestAgentRequiredFlagFailureUsesRecoveryContract(t *testing.T) {
 	assert.Contains(t, resp.Recovery.NextTemplate, "start-work")
 	require.Len(t, resp.Recovery.RequiredInputs, 2)
 }
+
+func TestCoopAgentParentFailuresUseRecoveryContract(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "missing action"},
+		{name: "unexpected action", args: []string{"bogus"}},
+		{name: "unknown flag", args: []string{"--bad-flag"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := newCoopAgentCmd().cmd
+			cmd.SetArgs(tt.args)
+
+			stderr := captureStderr(t, func() {
+				err := cmd.Execute()
+				require.Error(t, err)
+				assert.IsType(t, RenderedError{}, err)
+			})
+
+			var resp coop.CommandResponse
+			require.NoError(t, json.Unmarshal([]byte(stderr), &resp))
+			assert.False(t, resp.OK)
+			require.NotNil(t, resp.Recovery)
+			assert.Equal(t, "stripe coop status", resp.Recovery.Next)
+			require.NoError(t, resp.Validate())
+		})
+	}
+}

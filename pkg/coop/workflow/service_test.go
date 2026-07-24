@@ -124,6 +124,16 @@ func TestReportWorkPersistsOutputsAndStartWorkResolvesLaterRequest(t *testing.T)
 	assert.Empty(t, start.Next)
 	assert.Contains(t, start.NextTemplate, `--output="id=<id>"`)
 
+	missingEverything, err := service.ReportWork(session.ID, 1, ReportWorkInput{}, false)
+	require.NoError(t, err)
+	assert.False(t, missingEverything.OK)
+	assert.Contains(t, missingEverything.Error, "--note flag is required")
+	require.NotNil(t, missingEverything.Recovery)
+	assert.Contains(t, missingEverything.Recovery.NextTemplate, `--note="<what you did>"`)
+	assert.Contains(t, missingEverything.Recovery.NextTemplate, `--output="id=<id>"`)
+	assert.Contains(t, missingEverything.Recovery.NextTemplate, `--output="latest_version=<latest_version>"`)
+	require.Len(t, missingEverything.Recovery.RequiredInputs, 3)
+
 	missing, err := service.ReportWork(session.ID, 1, ReportWorkInput{Note: "Created product"}, false)
 	require.NoError(t, err)
 	assert.False(t, missing.OK)
@@ -202,10 +212,33 @@ func TestAwaitTimeoutContractLeavesHarnessHeadroom(t *testing.T) {
 	assert.Equal(t, 5*time.Minute, AwaitTimeout)
 	assert.Greater(t, AwaitHarnessTimeout, AwaitTimeout)
 
-	resp := timeoutResponse("session_123", 4)
+	resp := timeoutResponse("session_123", 4, AwaitTimeout)
 	require.NoError(t, resp.Validate())
 	assert.Equal(t, int(AwaitTimeout.Seconds()), resp.WaitTimeoutSeconds)
 	assert.Contains(t, resp.Message, AwaitTimeout.String())
+}
+
+func TestConfiguredAwaitTimeoutIsAdvertised(t *testing.T) {
+	store, session := workflowTestStore(t)
+	timeout := 45 * time.Second
+	service := NewService(store, WithAwaitTimeout(timeout))
+
+	_, err := service.StartWork(session.ID, 1, "First")
+	require.NoError(t, err)
+	_, err = service.ReportWork(session.ID, 1, ReportWorkInput{Note: "First done"}, false)
+	require.NoError(t, err)
+	_, err = service.StartWork(session.ID, 2, "Second")
+	require.NoError(t, err)
+	resp, err := service.ReportWork(session.ID, 2, ReportWorkInput{Note: "Second done"}, false)
+	require.NoError(t, err)
+
+	require.True(t, resp.OK)
+	assert.Contains(t, resp.Next, "stripe coop agent await-review")
+	assert.Equal(t, int(timeout.Seconds()), resp.WaitTimeoutSeconds)
+
+	timedOut := timeoutResponse(session.ID, 2, timeout)
+	assert.Equal(t, int(timeout.Seconds()), timedOut.WaitTimeoutSeconds)
+	assert.Contains(t, timedOut.Message, timeout.String())
 }
 
 func TestConfirmAndRequestChangesUseCentralWorkflow(t *testing.T) {
@@ -242,6 +275,72 @@ func TestConfirmReviewTreatsSkippedNodesAsTerminal(t *testing.T) {
 	node, err := updated.NodeByNumber(1)
 	require.NoError(t, err)
 	assert.Equal(t, coop.NodeSkipped, node.State)
+}
+
+func TestSkipCascadesToTransitiveOutputDependents(t *testing.T) {
+	store, err := coop.NewStoreAt(t.TempDir())
+	require.NoError(t, err)
+	session := &coop.Session{
+		SchemaVersion: coop.CurrentSessionSchemaVersion,
+		ID:            "skip_dependencies",
+		Status:        coop.SessionActive,
+		Steps: []coop.SessionStep{{
+			StepDefinition: coop.StepDefinition{Key: "setup", Title: "Setup"},
+			Nodes: []coop.SessionNode{
+				{
+					NodeDefinition: coop.NodeDefinition{Key: "source", Title: "Source"},
+					State:          coop.NodePending,
+				},
+				{
+					NodeDefinition: coop.NodeDefinition{
+						Key:   "direct",
+						Title: "Direct dependent",
+						Request: &coop.APIRequest{
+							Path:   "/v1/direct/${node.setup.source:id}",
+							Method: "get",
+						},
+					},
+					State: coop.NodePending,
+				},
+				{
+					NodeDefinition: coop.NodeDefinition{
+						Key:   "transitive",
+						Title: "Transitive dependent",
+						Request: &coop.APIRequest{
+							Path:   "/v1/transitive/${node.setup.direct:id}",
+							Method: "get",
+						},
+					},
+					State: coop.NodePending,
+				},
+				{
+					NodeDefinition: coop.NodeDefinition{Key: "independent", Title: "Independent"},
+					State:          coop.NodePending,
+				},
+			},
+		}},
+	}
+	require.NoError(t, store.Write(session))
+
+	resp, err := NewService(store).Skip(session.ID, 1, "Does not apply")
+	require.NoError(t, err)
+	require.True(t, resp.OK)
+	assert.Contains(t, resp.Message, "dependent nodes: 2, 3")
+	assert.Contains(t, resp.Next, "--step=4")
+
+	updated, err := store.Read(session.ID)
+	require.NoError(t, err)
+	for _, nodeNumber := range []int{1, 2, 3} {
+		node, err := updated.NodeByNumber(nodeNumber)
+		require.NoError(t, err)
+		assert.Equal(t, coop.NodeSkipped, node.State)
+	}
+	direct, err := updated.NodeByNumber(2)
+	require.NoError(t, err)
+	assert.Contains(t, direct.Activity, "depends on skipped node 1")
+	independent, err := updated.NodeByNumber(4)
+	require.NoError(t, err)
+	assert.Equal(t, coop.NodePending, independent.State)
 }
 
 func TestRequestChangesMovesReviewNodeBackToActive(t *testing.T) {

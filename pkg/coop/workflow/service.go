@@ -4,6 +4,7 @@ package workflow
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -209,18 +210,18 @@ func (s *Service) ReportWork(sessionID string, nodeNumber int, input ReportWorkI
 		if err := requireActiveSession(session); err != nil {
 			return err
 		}
-		if strings.TrimSpace(input.Note) == "" {
-			return fmt.Errorf("--note flag is required")
-		}
 		node, err := session.NodeByNumber(nodeNumber)
 		if err != nil {
 			return err
 		}
-		if err := mergeNodeOutputs(node, input.Outputs); err != nil {
-			return err
-		}
 		requiredOutputs, err = session.RequiredOutputs(nodeNumber)
 		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(input.Note) == "" {
+			return fmt.Errorf("--note flag is required")
+		}
+		if err := mergeNodeOutputs(node, input.Outputs); err != nil {
 			return err
 		}
 		missing, err := session.MissingRequiredOutputs(nodeNumber)
@@ -318,15 +319,40 @@ func (s *Service) ReportCheck(sessionID string, nodeNumber int, check string, pa
 }
 
 func (s *Service) Skip(sessionID string, nodeNumber int, note string) (coop.CommandResponse, error) {
+	var cascaded []int
 	session, err := s.store.Update(sessionID, func(session *coop.Session) error {
 		if err := requireActiveSession(session); err != nil {
 			return err
+		}
+		dependents, err := session.DependentNodeNumbers(nodeNumber)
+		if err != nil {
+			return err
+		}
+		for _, dependentNumber := range dependents {
+			dependent, err := session.NodeByNumber(dependentNumber)
+			if err != nil {
+				return err
+			}
+			if dependent.State == coop.NodeDone {
+				return fmt.Errorf("cannot skip node %d because dependent node %d is already done", nodeNumber, dependentNumber)
+			}
 		}
 		if err := session.TransitionNode(nodeNumber, coop.NodeSkipped); err != nil {
 			return err
 		}
 		node, _ := session.NodeByNumber(nodeNumber)
 		node.Activity = note
+		for _, dependentNumber := range dependents {
+			dependent, _ := session.NodeByNumber(dependentNumber)
+			if dependent.State == coop.NodeSkipped {
+				continue
+			}
+			if err := session.TransitionNode(dependentNumber, coop.NodeSkipped); err != nil {
+				return err
+			}
+			dependent.Activity = fmt.Sprintf("Skipped because it depends on skipped node %d.", nodeNumber)
+			cascaded = append(cascaded, dependentNumber)
+		}
 		if session.IsComplete() {
 			session.Status = coop.SessionCompleted
 		}
@@ -336,12 +362,16 @@ func (s *Service) Skip(sessionID string, nodeNumber int, note string) (coop.Comm
 		return errorResponse(err, exactRecovery("Inspect the session before retrying the skip.", "stripe coop status")), nil
 	}
 	node, _ := session.NodeByNumber(nodeNumber)
+	message := fmt.Sprintf("Skipped: %s", node.Title)
+	if len(cascaded) > 0 {
+		message += fmt.Sprintf(". Also skipped dependent nodes: %s", formatNodeNumbers(cascaded))
+	}
 	return coop.CommandResponse{
 		OK:        true,
 		SessionID: session.ID,
 		Node:      nodeNumber,
 		State:     string(coop.NodeSkipped),
-		Message:   fmt.Sprintf("Skipped: %s", node.Title),
+		Message:   message,
 		Next:      nextAfterNode(session, nodeNumber),
 	}, nil
 }
@@ -434,7 +464,7 @@ func (s *Service) AwaitReview(sessionID string, nodeNumber int) (coop.CommandRes
 	// Node is not in review (auto-confirm handled above, review handled in the
 	// block above): it has already moved on. Review always waits at step
 	// granularity via awaitStepReview.
-	return alreadyMovedResponse(session, nodeNumber, node.State), nil
+	return s.alreadyMovedResponse(session, nodeNumber, node.State), nil
 }
 
 func (s *Service) autoConfirm(sessionID string, nodeNumber int) (coop.CommandResponse, error) {
@@ -450,7 +480,7 @@ func (s *Service) autoConfirm(sessionID string, nodeNumber int) (coop.CommandRes
 		State:              "confirmed",
 		Message:            fmt.Sprintf("Node %d auto-confirmed. Proceed to next node.", nodeNumber),
 		Next:               next,
-		WaitTimeoutSeconds: waitTimeoutForNext(next),
+		WaitTimeoutSeconds: s.waitTimeoutForNext(next),
 	}, nil
 }
 
@@ -465,7 +495,7 @@ func (s *Service) awaitStepReview(sessionID, stepTitle string, stepIndex, nodeNu
 	deadline := s.now().Add(s.awaitTimeout)
 	for {
 		if s.now().After(deadline) {
-			return timeoutResponse(sessionID, nodeNumber), nil
+			return timeoutResponse(sessionID, nodeNumber, s.awaitTimeout), nil
 		}
 		s.sleep(500 * time.Millisecond)
 		if err := s.store.WriteHeartbeat(sessionID); err != nil {
@@ -495,7 +525,7 @@ func (s *Service) awaitStepReview(sessionID, stepTitle string, stepIndex, nodeNu
 		if session.StepHasReview(stepIndex) {
 			continue
 		}
-		return confirmedResponse(session, nodeNumber), nil
+		return s.confirmedResponse(session, nodeNumber), nil
 	}
 }
 
@@ -520,7 +550,7 @@ func (s *Service) reportWorkResponse(session *coop.Session, node *coop.SessionNo
 				State:              string(coop.NodeReview),
 				Message:            fmt.Sprintf("Step ready for review: %s. Run relevant checks, keep useful servers running, share local URLs or test data, then await review.", step.Title),
 				Next:               fmt.Sprintf("stripe coop agent await-review --session=%s --step=%d", session.ID, nodeNumber),
-				WaitTimeoutSeconds: int(AwaitTimeout.Seconds()),
+				WaitTimeoutSeconds: int(s.awaitTimeout.Seconds()),
 			}
 		}
 		return coop.CommandResponse{
@@ -530,7 +560,7 @@ func (s *Service) reportWorkResponse(session *coop.Session, node *coop.SessionNo
 			State:              string(coop.NodeReview),
 			Message:            fmt.Sprintf("Ready for review: %s", node.Title),
 			Next:               fmt.Sprintf("stripe coop agent await-review --session=%s --step=%d", session.ID, nodeNumber),
-			WaitTimeoutSeconds: int(AwaitTimeout.Seconds()),
+			WaitTimeoutSeconds: int(s.awaitTimeout.Seconds()),
 		}
 	}
 
@@ -546,7 +576,7 @@ func (s *Service) reportWorkResponse(session *coop.Session, node *coop.SessionNo
 		State:              string(targetState),
 		Message:            msg,
 		Next:               next,
-		WaitTimeoutSeconds: waitTimeoutForNext(next),
+		WaitTimeoutSeconds: s.waitTimeoutForNext(next),
 	}
 }
 
@@ -572,7 +602,7 @@ func nextInStepOrStatus(session *coop.Session, stepIndex, afterNode int) string 
 	return fmt.Sprintf("stripe coop status --session=%s", session.ID)
 }
 
-func alreadyMovedResponse(session *coop.Session, nodeNumber int, state coop.NodeState) coop.CommandResponse {
+func (s *Service) alreadyMovedResponse(session *coop.Session, nodeNumber int, state coop.NodeState) coop.CommandResponse {
 	msg := fmt.Sprintf("Node %d is already %s.", nodeNumber, state)
 	if session.IsComplete() {
 		msg = fmt.Sprintf("Node %d confirmed. All nodes done. Run next-action now.", nodeNumber)
@@ -585,11 +615,11 @@ func alreadyMovedResponse(session *coop.Session, nodeNumber int, state coop.Node
 		State:              string(state),
 		Message:            msg,
 		Next:               next,
-		WaitTimeoutSeconds: waitTimeoutForNext(next),
+		WaitTimeoutSeconds: s.waitTimeoutForNext(next),
 	}
 }
 
-func confirmedResponse(session *coop.Session, nodeNumber int) coop.CommandResponse {
+func (s *Service) confirmedResponse(session *coop.Session, nodeNumber int) coop.CommandResponse {
 	next := nextAfterNode(session, nodeNumber)
 	return coop.CommandResponse{
 		OK:                 true,
@@ -598,19 +628,19 @@ func confirmedResponse(session *coop.Session, nodeNumber int) coop.CommandRespon
 		State:              "confirmed",
 		Message:            fmt.Sprintf("Node %d confirmed by developer. Proceed to next node.", nodeNumber),
 		Next:               next,
-		WaitTimeoutSeconds: waitTimeoutForNext(next),
+		WaitTimeoutSeconds: s.waitTimeoutForNext(next),
 	}
 }
 
-func timeoutResponse(sessionID string, nodeNumber int) coop.CommandResponse {
+func timeoutResponse(sessionID string, nodeNumber int, timeout time.Duration) coop.CommandResponse {
 	return coop.CommandResponse{
 		OK:                 true,
 		SessionID:          sessionID,
 		Node:               nodeNumber,
 		State:              "timeout",
-		Message:            fmt.Sprintf("Timed out after %s waiting for developer confirmation. Re-run await-review to wait again.", AwaitTimeout),
+		Message:            fmt.Sprintf("Timed out after %s waiting for developer confirmation. Re-run await-review to wait again.", timeout),
 		Next:               fmt.Sprintf("stripe coop agent await-review --session=%s --step=%d", sessionID, nodeNumber),
-		WaitTimeoutSeconds: int(AwaitTimeout.Seconds()),
+		WaitTimeoutSeconds: int(timeout.Seconds()),
 	}
 }
 
@@ -680,15 +710,23 @@ func templateRecovery(hint, nextTemplate string, requiredInputs []coop.CommandIn
 	}
 }
 
-func waitTimeoutForNext(next string) int {
+func (s *Service) waitTimeoutForNext(next string) int {
 	switch {
 	case strings.Contains(next, " coop agent await-review "):
-		return int(AwaitTimeout.Seconds())
+		return int(s.awaitTimeout.Seconds())
 	case strings.Contains(next, " coop agent next-action "):
 		return int(helpers.NextActionSelectionTimeout.Seconds())
 	default:
 		return 0
 	}
+}
+
+func formatNodeNumbers(nodes []int) string {
+	values := make([]string, len(nodes))
+	for i, node := range nodes {
+		values[i] = strconv.Itoa(node)
+	}
+	return strings.Join(values, ", ")
 }
 
 func requireActiveSession(session *coop.Session) error {

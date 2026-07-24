@@ -62,6 +62,47 @@ func (s *Session) RequiredOutputs(nodeNumber int) ([]RequiredOutput, error) {
 	return outputs, nil
 }
 
+// DependentNodeNumbers returns later nodes that directly or transitively
+// reference outputs from nodeNumber.
+func (s *Session) DependentNodeNumbers(nodeNumber int) ([]int, error) {
+	step, _, nodeIndex, err := s.StepByNodeNumber(nodeNumber)
+	if err != nil {
+		return nil, err
+	}
+
+	dependencyBases := map[string]bool{
+		step.Key + "." + step.Nodes[nodeIndex].Key: true,
+	}
+	var dependents []int
+	current := 0
+	for _, candidateStep := range s.Steps {
+		for _, candidateNode := range candidateStep.Nodes {
+			current++
+			if current <= nodeNumber {
+				continue
+			}
+			data, err := json.Marshal(candidateNode.NodeDefinition)
+			if err != nil {
+				return nil, fmt.Errorf("encoding node %d while finding dependents: %w", current, err)
+			}
+			dependent := false
+			for _, match := range nodeReferencePattern.FindAllStringSubmatch(string(data), -1) {
+				base, _, ok := splitNodeReference(match[1])
+				if ok && dependencyBases[base] {
+					dependent = true
+					break
+				}
+			}
+			if !dependent {
+				continue
+			}
+			dependents = append(dependents, current)
+			dependencyBases[candidateStep.Key+"."+candidateNode.Key] = true
+		}
+	}
+	return dependents, nil
+}
+
 // MissingRequiredOutputs returns required values that have not been persisted
 // for nodeNumber.
 func (s *Session) MissingRequiredOutputs(nodeNumber int) ([]RequiredOutput, error) {

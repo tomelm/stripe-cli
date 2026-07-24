@@ -43,6 +43,13 @@ func newCoopAgentCmd() *coopAgentCmd {
 		Use:   "agent",
 		Short: "Agent-facing co-op lifecycle commands",
 		Long:  "Typed commands used by agents to report co-op progress and wait for human review.",
+		Args:  agentNoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return outputAgentFailure(fmt.Errorf("stripe coop agent requires an action"), coop.Recovery{
+				Hint: "Run the agent lifecycle action returned by the previous Co-op response.",
+				Next: "stripe coop status",
+			})
+		},
 	}
 	ac.cmd.AddCommand(newCoopAgentStartWorkCmd().cmd)
 	ac.cmd.AddCommand(newCoopAgentReportWorkCmd().cmd)
@@ -51,6 +58,7 @@ func newCoopAgentCmd() *coopAgentCmd {
 	ac.cmd.AddCommand(newCoopAgentAwaitReviewCmd().cmd)
 	ac.cmd.AddCommand(newCoopAgentNextActionCmd().cmd)
 	ac.cmd.AddCommand(newCoopAgentStartFollowupCmd().cmd)
+	configureAgentCommand(ac.cmd)
 	return ac
 }
 
