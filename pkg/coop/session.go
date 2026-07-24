@@ -59,7 +59,7 @@ func validateSessionText(label, value string, maxBytes int, allowLineFeeds bool)
 		return fmt.Errorf("%s exceeds %d bytes", label, maxBytes)
 	}
 	if strings.IndexFunc(value, func(character rune) bool {
-		return unicode.IsControl(character) && !(allowLineFeeds && character == '\n')
+		return unicode.IsControl(character) && (!allowLineFeeds || character != '\n')
 	}) >= 0 {
 		return fmt.Errorf("%s contains control characters", label)
 	}

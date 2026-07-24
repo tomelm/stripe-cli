@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-// Agent process presence is launcher metadata, so it lives in a small sidecar
-// rather than becoming blueprint work or agent-authored session evidence.
+// AgentProcessPhase records launcher process presence in a small sidecar rather
+// than as blueprint work or agent-authored session evidence.
 type AgentProcessPhase string
 
 const (
