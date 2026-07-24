@@ -64,7 +64,7 @@ type ResourceRule struct {
 	Type       string              `json:"type"`
 	Role       string              `json:"role"`
 	Create     RequestPattern      `json:"create"`
-	Retrieve   string              `json:"retrieve,omitempty"`
+	Retrieve   string              `json:"retrieve"`
 	IDPrefixes []string            `json:"id_prefixes,omitempty"`
 	Predicates []PredicateTemplate `json:"predicates,omitempty"`
 	Evidence   []EvidenceRule      `json:"evidence,omitempty"`
@@ -74,15 +74,17 @@ type ResourceRule struct {
 // resource. When FromField is empty, {id} is the created resource ID (for a
 // child collection). Otherwise {id} is read from that field and validated
 // against IDPrefixes before the related object is fetched. Eventual marks a
-// relation that may not exist until later state is reached. Evidence verifies
-// facts about an object, but it never establishes that an account-wide event
-// belongs to one attempt.
+// relation that may not exist until later state is reached. WhenInput and
+// WhenValue form one bounded exact-match applicability condition on the
+// blueprint request. Evidence verifies facts about an object, but it never
+// establishes that an account-wide event belongs to one attempt.
 type EvidenceRule struct {
 	ID         string              `json:"id"`
 	Retrieve   string              `json:"retrieve"`
 	FromField  string              `json:"from_field,omitempty"`
 	IDPrefixes []string            `json:"id_prefixes,omitempty"`
 	WhenInput  string              `json:"when_input,omitempty"`
+	WhenValue  string              `json:"when_value,omitempty"`
 	Eventual   bool                `json:"eventual,omitempty"`
 	Predicates []PredicateTemplate `json:"predicates"`
 	Repair     string              `json:"repair"`

@@ -118,17 +118,9 @@ func (compiler *stepCompiler) compileRequest(source Source, request coop.APIRequ
 		compiler.addGap(RuleResourceMatches, source, path, fmt.Sprintf("no direct resource rule for %s %s", method, path))
 		return nil
 	}
-	if resource.Retrieve == "" {
-		compiler.addGap(
-			RuleResourceMatches,
-			source,
-			path,
-			fmt.Sprintf("%s has no bounded retrieve path, so automatic resource verification is unavailable", resource.Type),
-		)
-		return nil
-	}
 
-	predicates, gaps, err := compileResourcePredicates(resource.Predicates, flattenRequestInputs(request))
+	inputs := flattenRequestInputs(request)
+	predicates, gaps, err := compileResourcePredicates(resource.Predicates, inputs)
 	if err != nil {
 		return fmt.Errorf("compiling resource check for node %q: %w", sourceKey(source), err)
 	}
@@ -137,7 +129,7 @@ func (compiler *stepCompiler) compileRequest(source Source, request coop.APIRequ
 	if err != nil {
 		return err
 	}
-	evidence, evidenceGaps, err := compileEvidence(resource.Evidence, request)
+	evidence, evidenceGaps, err := compileEvidence(resource.Evidence, inputs)
 	if err != nil {
 		return fmt.Errorf("compiling evidence checks for node %q: %w", sourceKey(source), err)
 	}
@@ -189,15 +181,6 @@ func (compiler *stepCompiler) compileEvent(source Source, eventType string) erro
 		return nil
 	}
 	resource := compiler.resources[eventRule.Resource]
-	if resource.Retrieve == "" {
-		compiler.addGap(
-			RuleStateMatches,
-			source,
-			eventType,
-			fmt.Sprintf("%s has no bounded retrieve path, so automatic state verification is unavailable", resource.Type),
-		)
-		return nil
-	}
 	stateID := checkID(RuleStateMatches, source, eventType)
 	stateMeta, err := compiler.meta(stateID, RuleStateMatches, source)
 	if err != nil {
@@ -252,15 +235,11 @@ type predicateCoverageGap struct {
 	discriminator string
 	input         string
 	interpolated  bool
-	unsupported   bool
 }
 
 func (gap predicateCoverageGap) reason(resourceType string) string {
 	if gap.interpolated {
 		return fmt.Sprintf("request input %q is resolved at runtime, so %s cannot be compared with its blueprint template", gap.input, resourceType)
-	}
-	if gap.unsupported {
-		return fmt.Sprintf("request input %q selects %s evidence, but has no supported direct comparison", gap.input, resourceType)
 	}
 	return fmt.Sprintf("request input %q references another node, but %s has no supported resource-field mapping for it", gap.input, resourceType)
 }
@@ -348,13 +327,17 @@ func compileResourcePredicates(templates []PredicateTemplate, inputs map[string]
 	return compiled, gaps, nil
 }
 
-func compileEvidence(rules []EvidenceRule, request coop.APIRequest) ([]EvidenceCheck, []predicateCoverageGap, error) {
+func compileEvidence(rules []EvidenceRule, inputs map[string][]any) ([]EvidenceCheck, []predicateCoverageGap, error) {
 	compiled := make([]EvidenceCheck, 0, len(rules))
 	var allGaps []predicateCoverageGap
-	inputs := flattenRequestInputs(request)
 	for _, rule := range rules {
 		if rule.WhenInput != "" {
-			if _, present := requestInput(request, rule.WhenInput); !present {
+			values := inputs[rule.WhenInput]
+			if len(values) != 1 {
+				continue
+			}
+			value, scalar := values[0].(string)
+			if !scalar || value != rule.WhenValue {
 				continue
 			}
 		}
@@ -362,19 +345,12 @@ func compileEvidence(rules []EvidenceRule, request coop.APIRequest) ([]EvidenceC
 		if err != nil {
 			return nil, nil, err
 		}
-		if rule.WhenInput != "" && !templatesMapInput(rule.Predicates, rule.WhenInput) {
-			gaps = append(gaps, predicateCoverageGap{
-				discriminator: "unsupported:" + rule.WhenInput,
-				input:         rule.WhenInput,
-				unsupported:   true,
-			})
-		}
 		for _, gap := range gaps {
 			// Each evidence rule sees the whole request. Unmapped references
 			// belong to some other rule and are reported once by the parent
 			// resource compiler; only a selected-but-interpolated input is an
 			// evidence-specific coverage gap.
-			if !gap.interpolated && !gap.unsupported {
+			if !gap.interpolated {
 				continue
 			}
 			gap.discriminator = "evidence:" + rule.ID + ":" + gap.discriminator
@@ -427,75 +403,26 @@ func predicateFromTemplate(template PredicateTemplate) Predicate {
 	}
 }
 
-func templatesMapInput(templates []PredicateTemplate, input string) bool {
-	for _, template := range templates {
-		if template.Input == input {
-			return true
-		}
-	}
-	return false
-}
-
-func requestInput(request coop.APIRequest, path string) (any, bool) {
-	if value, ok := valueAtInput(request.Params, path); ok {
-		return value, true
-	}
-	return valueAtInput(request.HiddenParams, path)
-}
-
-func valueAtInput(root any, path string) (any, bool) {
-	current := root
-	for _, part := range strings.Split(path, ".") {
-		if object, ok := current.(map[string]any); ok {
-			current, ok = object[part]
-			if !ok {
-				return nil, false
-			}
-			continue
-		}
-		if list, ok := current.([]any); ok {
-			index, err := strconv.Atoi(part)
-			if err != nil || index < 0 || index >= len(list) {
-				return nil, false
-			}
-			current = list[index]
-			continue
-		}
-		return nil, false
-	}
-	return current, current != nil
-}
-
 func flattenInputs(params any) map[string][]any {
 	flat := make(map[string][]any)
 	var walk func(string, any)
 	walk = func(prefix string, value any) {
 		switch typed := value.(type) {
 		case map[string]any:
-			keys := make([]string, 0, len(typed))
-			for key := range typed {
-				keys = append(keys, key)
-			}
-			sort.Strings(keys)
-			for _, key := range keys {
+			for key, item := range typed {
 				path := key
 				if prefix != "" {
 					path = prefix + "." + key
 				}
-				walk(path, typed[key])
+				walk(path, item)
 			}
 		case map[string]string:
-			keys := make([]string, 0, len(typed))
-			for key := range typed {
-				keys = append(keys, key)
-			}
-			sort.Strings(keys)
-			for _, key := range keys {
+			for key, item := range typed {
 				path := key
 				if prefix != "" {
 					path = prefix + "." + key
 				}
-				walk(path, typed[key])
+				walk(path, item)
 			}
 		case []any:
 			for index, item := range typed {

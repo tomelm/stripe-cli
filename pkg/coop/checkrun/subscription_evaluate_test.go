@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -207,7 +206,7 @@ func TestEvaluateSubscriptionEvidenceDuringAppReview(t *testing.T) {
 		wantSuffix        string
 		want              coop.CheckStatus
 	}{
-		{name: "reusable Prices match while duration remains unsupported", subscriptionPrice: "price_default", wantSuffix: ".evidence-subscription-field-items-data-0-price", want: coop.CheckPassed},
+		{name: "reusable Prices match", subscriptionPrice: "price_default", wantSuffix: ".evidence-subscription-field-items-data-0-price", want: coop.CheckPassed},
 		{name: "wrong Price", subscriptionPrice: "price_other", wantSuffix: ".evidence-subscription-field-items-data-0-price", want: coop.CheckUnavailable},
 		{name: "different line item Price", lineItemPrice: "price_other", subscriptionPrice: "price_other", wantSuffix: ".evidence-line_items-field-data-0-price", want: coop.CheckUnavailable},
 		{name: "subscription still pending", omitSubscription: true, wantSuffix: ".evidence-subscription-exists", want: coop.CheckUnavailable},
@@ -227,11 +226,10 @@ func TestEvaluateSubscriptionEvidenceDuringAppReview(t *testing.T) {
 			}}
 			plan, err := checks.CompileStep(catalog, session.Steps[2])
 			require.NoError(t, err)
-			var trialGap bool
 			for _, gap := range plan.CoverageGaps {
-				trialGap = trialGap || strings.Contains(gap.Reason, "subscription_data.trial_period_days")
+				assert.NotContains(t, gap.Reason, "subscription_data.trial_period_days",
+					"evidence applicability must not manufacture a trial-duration check")
 			}
-			assert.True(t, trialGap, "trial duration must be represented as an explicit unsupported check")
 			checkoutObject := map[string]any{
 				"id": "cs_subscription", "livemode": false, "mode": "subscription",
 				"status": "complete", "payment_status": "no_payment_required",

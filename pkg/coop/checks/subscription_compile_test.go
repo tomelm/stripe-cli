@@ -1,7 +1,6 @@
 package checks
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -48,14 +47,11 @@ func TestCompileSubscriptionWithTrialRelationships(t *testing.T) {
 	checkoutState := compiledState(t, checkout, "checkout.session.completed")
 	assert.Equal(t, Source{Step: "checkout-chapter", Node: "complete-checkout"}, checkoutState.Source,
 		"the app surface must declare the event it exercises explicitly")
-	var trialGap bool
 	for _, gap := range checkout.CoverageGaps {
 		assert.NotContains(t, gap.Reason, "line_items.0.price", "the cataloged relationship must not remain a coverage gap")
-		if strings.Contains(gap.Reason, "subscription_data.trial_period_days") {
-			trialGap = true
-		}
+		assert.NotContains(t, gap.Reason, "subscription_data.trial_period_days",
+			"evidence applicability must not manufacture a trial-duration check")
 	}
-	assert.True(t, trialGap, "unsupported trial-duration comparison must remain an explicit coverage gap")
 
 	webhook, err := CompileStep(catalog, session.Steps[3])
 	require.NoError(t, err)
@@ -63,7 +59,39 @@ func TestCompileSubscriptionWithTrialRelationships(t *testing.T) {
 	assert.NotEmpty(t, subscriptionState.Predicates)
 }
 
-func TestCompileOneTimePaymentOmitsTrialSubscriptionEvidence(t *testing.T) {
+func TestCompileSubscriptionModeSelectsSubscriptionEvidenceAcrossCanonicalBlueprints(t *testing.T) {
+	catalog := testCatalog(t)
+	for _, blueprintID := range []string{
+		"flat-subscription-with-entitlements",
+		"managed-payments",
+		"metered-subscription-with-entitlements",
+		"subscription-with-trial",
+	} {
+		t.Run(blueprintID, func(t *testing.T) {
+			blueprint, err := coop.LoadBlueprint(blueprintID)
+			require.NoError(t, err)
+			session := coop.NewSessionFromBlueprint(blueprint, blueprintID, nil, nil)
+
+			found := false
+			for _, step := range session.Steps {
+				plan, compileErr := CompileStep(catalog, step)
+				require.NoError(t, compileErr)
+				for _, resource := range plan.Resources {
+					if resource.ResourceType != "checkout_session" {
+						continue
+					}
+					evidence := compiledEvidence(t, resource, "subscription")
+					assert.True(t, evidence.Eventual)
+					findPredicate(t, evidence.Predicates, PredicateEqualsBinding, "items.data.0.price")
+					found = true
+				}
+			}
+			assert.True(t, found, "subscription-mode Checkout must verify its eventual Subscription relationship")
+		})
+	}
+}
+
+func TestCompileOneTimePaymentOmitsSubscriptionEvidence(t *testing.T) {
 	catalog := testCatalog(t)
 	blueprint, err := coop.LoadBlueprint("one-time-payment")
 	require.NoError(t, err)
@@ -77,7 +105,7 @@ func TestCompileOneTimePaymentOmitsTrialSubscriptionEvidence(t *testing.T) {
 			}
 			for _, evidence := range resource.Evidence {
 				assert.NotEqual(t, "subscription", evidence.ID,
-					"line_items.price alone must not select trial subscription evidence")
+					"line_items.price alone must not select subscription evidence in payment mode")
 			}
 			return
 		}

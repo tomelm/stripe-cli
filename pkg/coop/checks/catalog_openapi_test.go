@@ -38,9 +38,7 @@ func TestCatalogResourceOperationsMatchBundledOpenAPI(t *testing.T) {
 				resource.Create.Method, resource.Create.Path,
 			)
 
-			if resource.Retrieve != "" {
-				requireCatalogGETMatchesOpenAPI(t, spec, resource.Retrieve)
-			}
+			requireCatalogGETMatchesOpenAPI(t, spec, resource.Retrieve)
 			for _, evidence := range resource.Evidence {
 				requireCatalogGETMatchesOpenAPI(t, spec, evidence.Retrieve)
 			}

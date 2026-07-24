@@ -152,6 +152,42 @@ func TestCatalogValidateRejectsAmbiguousOrInvalidDefinitions(t *testing.T) {
 		t.Fatal("catalog has no evidence rule")
 	})
 
+	t.Run("evidence gate requires an exact value", func(t *testing.T) {
+		catalog := testCatalog(t)
+		for resourceIndex := range catalog.Resources {
+			for evidenceIndex := range catalog.Resources[resourceIndex].Evidence {
+				evidence := &catalog.Resources[resourceIndex].Evidence[evidenceIndex]
+				if evidence.WhenInput != "" {
+					evidence.WhenValue = ""
+					require.ErrorContains(t, catalog.Validate(), "must be declared together")
+					return
+				}
+			}
+		}
+		t.Fatal("catalog has no conditional evidence rule")
+	})
+
+	t.Run("evidence gate value is bounded", func(t *testing.T) {
+		catalog := testCatalog(t)
+		for resourceIndex := range catalog.Resources {
+			for evidenceIndex := range catalog.Resources[resourceIndex].Evidence {
+				evidence := &catalog.Resources[resourceIndex].Evidence[evidenceIndex]
+				if evidence.WhenInput != "" {
+					evidence.WhenValue = strings.Repeat("x", maxCatalogText+1)
+					require.ErrorContains(t, catalog.Validate(), "when_value")
+					return
+				}
+			}
+		}
+		t.Fatal("catalog has no conditional evidence rule")
+	})
+
+	t.Run("resource requires bounded retrieve path", func(t *testing.T) {
+		catalog := testCatalog(t)
+		catalog.Resources[0].Retrieve = ""
+		require.ErrorContains(t, catalog.Validate(), ".retrieve")
+	})
+
 	t.Run("predicate result ids must be unique", func(t *testing.T) {
 		catalog := testCatalog(t)
 		catalog.Resources[0].Predicates = []PredicateTemplate{

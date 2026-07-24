@@ -58,7 +58,8 @@
           "retrieve": "/v1/subscriptions/{id}",
           "from_field": "subscription",
           "id_prefixes": ["sub_"],
-          "when_input": "subscription_data.trial_period_days",
+          "when_input": "mode",
+          "when_value": "subscription",
           "eventual": true,
           "predicates": [
             {"op": "equals_binding", "field": "items.data.0.price", "input": "line_items.0.price"}
@@ -73,12 +74,6 @@
       "create": {"method": "POST", "path": "/v1/customers"},
       "retrieve": "/v1/customers/{id}",
       "id_prefixes": ["cus_"]
-    },
-    {
-      "type": "entitlement_feature",
-      "role": "feature",
-      "create": {"method": "POST", "path": "/v1/entitlements/features"},
-      "id_prefixes": ["feat_"]
     },
     {
       "type": "financial_connections_session",
@@ -245,24 +240,10 @@
       ]
     },
     {
-      "type": "financial_account.features_status_updated",
-      "resource": "treasury_financial_account",
-      "predicates": [
-        {"op": "present", "field": "id"}
-      ]
-    },
-    {
       "type": "inbound_transfer.succeeded",
       "resource": "treasury_inbound_transfer",
       "predicates": [
         {"op": "eq", "field": "status", "value": "succeeded"}
-      ]
-    },
-    {
-      "type": "invoice.created",
-      "resource": "invoice",
-      "predicates": [
-        {"op": "present", "field": "id"}
       ]
     },
     {

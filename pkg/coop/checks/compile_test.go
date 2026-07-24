@@ -286,14 +286,14 @@ func TestCompileEvidenceKeepsApplicableRelationshipPredicates(t *testing.T) {
 	}
 	request := coop.APIRequest{Params: params}
 
-	evidence, _, err := compileEvidence(rules, request)
+	evidence, _, err := compileEvidence(rules, flattenRequestInputs(request))
 	require.NoError(t, err)
 	require.Len(t, evidence, 1)
 	assert.Len(t, evidence[0].Predicates, 1,
 		"relationship evidence verifies applicable object facts without claiming attempt ownership")
 
 	params["metadata"] = map[string]any{"product": "${node.setup.create-product:id}"}
-	evidence, _, err = compileEvidence(rules, request)
+	evidence, _, err = compileEvidence(rules, flattenRequestInputs(request))
 	require.NoError(t, err)
 	require.Len(t, evidence, 1)
 	assert.Len(t, evidence[0].Predicates, 2)
@@ -332,7 +332,7 @@ func TestCompileStateSeparatesPassFromTerminalFailure(t *testing.T) {
 	assert.Contains(t, terminal.Repair, "new Checkout Session")
 }
 
-func TestCompileResourceWithoutBoundedReadIsAdvisoryCoverage(t *testing.T) {
+func TestCompileUnsupportedResourceIsAdvisoryCoverage(t *testing.T) {
 	catalog := testCatalog(t)
 	plan, err := CompileNodes(catalog, "entitlements", []coop.NodeDefinition{{
 		Type: coop.NodeAPIRequest,
@@ -347,7 +347,27 @@ func TestCompileResourceWithoutBoundedReadIsAdvisoryCoverage(t *testing.T) {
 	require.Len(t, plan.CoverageGaps, 1)
 	assert.Equal(t, RuleResourceMatches, plan.CoverageGaps[0].RuleID)
 	assert.Equal(t, ImportanceAdvisory, plan.CoverageGaps[0].Importance)
-	assert.Contains(t, plan.CoverageGaps[0].Reason, "no bounded retrieve path")
+	assert.Contains(t, plan.CoverageGaps[0].Reason, "no direct resource rule")
+}
+
+func TestCompileEventsWithoutAuthoritativeStateRulesAreAdvisoryCoverage(t *testing.T) {
+	catalog := testCatalog(t)
+	for _, eventType := range []string{
+		"financial_account.features_status_updated",
+		"invoice.created",
+	} {
+		t.Run(eventType, func(t *testing.T) {
+			plan, err := CompileNodes(catalog, "events", []coop.NodeDefinition{{
+				Type: coop.NodeAsyncHandler, Key: "handler", Events: []string{eventType},
+			}})
+			require.NoError(t, err)
+			assert.Empty(t, plan.States)
+			require.Len(t, plan.CoverageGaps, 1)
+			assert.Equal(t, RuleStateMatches, plan.CoverageGaps[0].RuleID)
+			assert.Equal(t, ImportanceAdvisory, plan.CoverageGaps[0].Importance)
+			assert.Contains(t, plan.CoverageGaps[0].Reason, "no canonical state rule")
+		})
+	}
 }
 
 func TestCompileUnknownReadOrActionIsExplicitCoverageGap(t *testing.T) {
@@ -448,6 +468,9 @@ func TestCompileAllEmbeddedBlueprints(t *testing.T) {
 		for _, step := range blueprint.Steps {
 			plan, compileErr := CompileNodes(catalog, step.Key, step.Nodes)
 			require.NoErrorf(t, compileErr, "%s/%s", blueprint.ID, step.Key)
+			recompiled, recompileErr := CompileNodes(catalog, step.Key, step.Nodes)
+			require.NoErrorf(t, recompileErr, "%s/%s deterministic recompile", blueprint.ID, step.Key)
+			assert.Equalf(t, plan, recompiled, "%s/%s compilation must be deterministic", blueprint.ID, step.Key)
 			for _, gap := range plan.CoverageGaps {
 				assert.LessOrEqualf(t, len(gap.ID), coop.MaxCheckResultIDBytes, "%s/%s: %s", blueprint.ID, step.Key, gap.ID)
 			}

@@ -83,10 +83,8 @@ func (catalog Catalog) validateResources() (map[string]ResourceRule, error) {
 		if previous, exists := operations[operation]; exists {
 			return nil, fmt.Errorf("creation operation %q is shared by %q and %q", operation, previous, resource.Type)
 		}
-		if resource.Retrieve != "" {
-			if err := validateCatalogPath(resource.Retrieve, where+".retrieve", true); err != nil {
-				return nil, err
-			}
+		if err := validateCatalogPath(resource.Retrieve, where+".retrieve", true); err != nil {
+			return nil, err
 		}
 		if err := validateIDPrefixes(resource.IDPrefixes, where+".id_prefixes"); err != nil {
 			return nil, err
@@ -181,8 +179,14 @@ func validateEvidence(evidence []EvidenceRule, where string) error {
 			return fmt.Errorf("%s contains duplicate id %q", where, item.ID)
 		}
 		seen[item.ID] = true
+		if (item.WhenInput == "") != (item.WhenValue == "") {
+			return fmt.Errorf("%s.when_input and when_value must be declared together", itemWhere)
+		}
 		if item.WhenInput != "" && (!fieldPattern.MatchString(item.WhenInput) || len(item.WhenInput) > maxCatalogText) {
 			return fmt.Errorf("%s.when_input %q is invalid", itemWhere, item.WhenInput)
+		}
+		if item.WhenValue != "" && (strings.TrimSpace(item.WhenValue) == "" || len(item.WhenValue) > maxCatalogText) {
+			return fmt.Errorf("%s.when_value must contain 1..%d bytes", itemWhere, maxCatalogText)
 		}
 		if err := validateCatalogPath(item.Retrieve, itemWhere+".retrieve", true); err != nil {
 			return err
