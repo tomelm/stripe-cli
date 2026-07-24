@@ -73,15 +73,11 @@ func ReviewAttemptsReadiness(session *coop.Session, refs []AttemptRef) (ReviewRe
 			len(policy.unavailable) > 0 ||
 			attempt.AutomaticRefreshPending ||
 			attempt.AutomaticCheckPending() ||
-			supportingEvidenceNeedsReevaluation(attempt) ||
 			attemptHasObservedCandidate(attempt)
 		if node.Type == coop.NodeUIComponent {
 			incomplete = incomplete ||
 				attempt.AppSurface.OpenedAt == nil ||
-				attempt.AutomaticResultsAt == nil ||
-				(attempt.AppSurface.OpenedAt != nil &&
-					attempt.AutomaticResultsAt != nil &&
-					!attempt.AutomaticResultsAt.After(*attempt.AppSurface.OpenedAt))
+				attempt.AutomaticResultsAt == nil
 		}
 		if incomplete {
 			readiness.Incomplete = true

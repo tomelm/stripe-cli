@@ -172,6 +172,22 @@ func TestAutomaticCheckMarkerIsMonotonicAndTracksPendingRead(t *testing.T) {
 	assert.False(t, attempt.AutomaticCheckPending())
 }
 
+func TestAutomaticCheckWatermarkKeepsFrozenClockTokensUnique(t *testing.T) {
+	now := time.Now().UTC()
+	node := testSessionNode("node", "Node", NodeActive)
+	attempt, err := node.StartAttempt(now, "")
+	require.NoError(t, err)
+
+	first, err := node.BeginAutomaticCheck(attempt.Number, now)
+	require.NoError(t, err)
+	require.NoError(t, node.InvalidateAutomaticCheck(attempt.Number, first))
+
+	second, err := node.BeginAutomaticCheck(attempt.Number, now)
+	require.NoError(t, err)
+	assert.True(t, second.After(first))
+	require.NoError(t, node.ReconcileAutomaticEvaluation(attempt.Number, second, nil))
+}
+
 func TestAutomaticCheckLeaseIsSingleFlightAndRejectsExpiredOwner(t *testing.T) {
 	now := time.Now().UTC()
 	passed := []CheckResult{{

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
@@ -36,19 +35,6 @@ type Service struct {
 	evalTimeout         time.Duration
 	requirementProvider RequirementProvider
 	evaluator           Evaluator
-	evaluationMu        sync.Mutex
-	lastEvalAt          time.Time
-}
-
-func (s *Service) nextEvaluationTime() time.Time {
-	s.evaluationMu.Lock()
-	defer s.evaluationMu.Unlock()
-	now := s.now().UTC()
-	if !now.After(s.lastEvalAt) {
-		now = s.lastEvalAt.Add(time.Nanosecond)
-	}
-	s.lastEvalAt = now
-	return now
 }
 
 type Option func(*Service)
@@ -586,8 +572,14 @@ func (s *Service) MarkAppOpened(sessionID string, nodeNumber, attemptNumber int)
 		if err := appsurface.Validate(attempt.AppSurface.URL); err != nil {
 			return fmt.Errorf("stored app surface URL is invalid: %w", err)
 		}
+		firstOpen := attempt.AppSurface.OpenedAt == nil
 		if err := node.OpenApp(attemptNumber, s.now()); err != nil {
 			return err
+		}
+		if firstOpen {
+			if err := node.MarkAutomaticRefresh(attemptNumber); err != nil {
+				return err
+			}
 		}
 		appURL = attempt.AppSurface.URL
 		return nil
@@ -839,33 +831,8 @@ func AttemptNeedsReevaluation(attempt *coop.NodeAttempt) bool {
 	if attempt.ReportedAt != nil && attempt.AutomaticResultsAt == nil {
 		return true
 	}
-	if attempt.AppSurface != nil && attempt.AppSurface.OpenedAt != nil &&
-		(attempt.AutomaticResultsAt == nil || !attempt.AutomaticResultsAt.After(*attempt.AppSurface.OpenedAt)) {
-		return true
-	}
-	if supportingEvidenceNeedsReevaluation(attempt) {
-		return true
-	}
 	for _, result := range attempt.Results {
 		if result.Importance == coop.CheckRequired && result.Status == coop.CheckPending {
-			return true
-		}
-	}
-	return false
-}
-
-func supportingEvidenceNeedsReevaluation(attempt *coop.NodeAttempt) bool {
-	if attempt == nil {
-		return false
-	}
-	for _, result := range attempt.Results {
-		// Attributable request and event observations trigger a direct reread.
-		// If the trigger arrived while another evaluation held the lease, the
-		// newer evidence keeps polling eligible until a later read settles it.
-		if result.Kind != coop.CheckEvent && result.Kind != coop.CheckRequest {
-			continue
-		}
-		if attempt.AutomaticResultsAt == nil || !attempt.AutomaticResultsAt.After(result.UpdatedAt) {
 			return true
 		}
 	}

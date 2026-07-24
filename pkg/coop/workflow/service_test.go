@@ -337,9 +337,7 @@ func TestSkipAttemptRejectsRequiredStepAndInvalidReasonWithoutMutation(t *testin
 }
 
 func TestAttemptNeedsReevaluationOnlyForOpenState(t *testing.T) {
-	opened := time.Now().UTC()
-	beforeOpen := opened.Add(-time.Second)
-	afterOpen := opened.Add(time.Second)
+	now := time.Now().UTC()
 	tests := []struct {
 		name    string
 		attempt *coop.NodeAttempt
@@ -356,20 +354,20 @@ func TestAttemptNeedsReevaluationOnlyForOpenState(t *testing.T) {
 			Importance: coop.CheckRequired, Status: coop.CheckPassed,
 		}}}},
 		{name: "newer automatic check is running", attempt: &coop.NodeAttempt{
-			AutomaticCheckStartedAt: &afterOpen, AutomaticResultsAt: &beforeOpen,
+			AutomaticCheckStartedAt: &now,
 		}, want: true},
-		{name: "needs post-open sample", attempt: &coop.NodeAttempt{
-			AppSurface: &coop.AppSurface{OpenedAt: &opened}, AutomaticResultsAt: &beforeOpen,
-		}, want: true},
-		{name: "post-open sample settled", attempt: &coop.NodeAttempt{
-			AppSurface: &coop.AppSurface{OpenedAt: &opened}, AutomaticResultsAt: &afterOpen,
-		}},
+		{name: "refresh requested", attempt: &coop.NodeAttempt{AutomaticRefreshPending: true}, want: true},
+		{name: "refresh settled", attempt: &coop.NodeAttempt{}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			assert.Equal(t, test.want, AttemptNeedsReevaluation(test.attempt))
 		})
 	}
+}
+
+func TestAutomaticEvaluationTimeoutFitsInsideLease(t *testing.T) {
+	assert.Less(t, AutomaticEvaluationTimeout, coop.AutomaticCheckLease)
 }
 
 func TestQuoteArgPreventsShellExpansion(t *testing.T) {

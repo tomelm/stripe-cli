@@ -158,8 +158,7 @@ func TestObserverPersistsThroughWorkflowBoundary(t *testing.T) {
 	defer controller.Close()
 
 	stream <- websocket.DataElement{Data: logtailing.EventPayload{Method: "POST", URL: "/v1/customers", Status: 200}}
-	input := receive(t, evaluator.calls)
-	assert.Equal(t, workflow.TriggerRequest, input.Trigger)
+	_ = receive(t, evaluator.calls)
 	require.Eventually(t, func() bool {
 		session, err := store.Read("observer_session")
 		if err != nil {
@@ -525,6 +524,7 @@ func TestObserverOwnsPostOpenRefresh(t *testing.T) {
 		attempt.ReportedAt = &reported
 		attempt.AutomaticResultsAt = &resultsAt
 		attempt.AppSurface = &coop.AppSurface{URL: "http://localhost:3000/billing", OpenedAt: &opened}
+		attempt.AutomaticRefreshPending = true
 		attempt.Results = []coop.CheckResult{{
 			ID: "resource.passed", Kind: coop.CheckResource, Importance: coop.CheckRequired,
 			Status: coop.CheckPassed, UpdatedAt: resultsAt,
@@ -543,10 +543,9 @@ func TestObserverOwnsPostOpenRefresh(t *testing.T) {
 	assert.Equal(t, observerEvaluationCall{node: 1, attempt: 1, trigger: workflow.TriggerPoll}, call)
 }
 
-func TestAttemptNeedsPollingAfterAppOpen(t *testing.T) {
+func TestAttemptNeedsPollingUsesDurableRefreshState(t *testing.T) {
 	opened := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
 	beforeOpen := opened.Add(-time.Second)
-	atOpen := opened
 	afterOpen := opened.Add(time.Second)
 	passed := []coop.CheckResult{{
 		ID: "resource.checkout_session.exists", Kind: coop.CheckResource,
@@ -560,32 +559,25 @@ func TestAttemptNeedsPollingAfterAppOpen(t *testing.T) {
 	}{
 		{name: "nil attempt", attempt: nil, want: false},
 		{
-			name: "opened without automatic results",
+			name: "reported without automatic results",
 			attempt: &coop.NodeAttempt{
-				AppSurface: &coop.AppSurface{OpenedAt: &opened}, Results: passed,
+				ReportedAt: &opened, Results: passed,
 			},
 			want: true,
 		},
 		{
-			name: "opened after automatic results",
+			name: "first app open marks refresh",
+			attempt: &coop.NodeAttempt{
+				AppSurface: &coop.AppSurface{OpenedAt: &opened}, AutomaticResultsAt: &beforeOpen,
+				AutomaticRefreshPending: true, Results: passed,
+			},
+			want: true,
+		},
+		{
+			name: "timestamp alone is not a refresh",
 			attempt: &coop.NodeAttempt{
 				AppSurface: &coop.AppSurface{OpenedAt: &opened}, AutomaticResultsAt: &beforeOpen, Results: passed,
 			},
-			want: true,
-		},
-		{
-			name: "automatic results at open still need polling",
-			attempt: &coop.NodeAttempt{
-				AppSurface: &coop.AppSurface{OpenedAt: &opened}, AutomaticResultsAt: &atOpen, Results: passed,
-			},
-			want: true,
-		},
-		{
-			name: "automatic results after open are fresh",
-			attempt: &coop.NodeAttempt{
-				AppSurface: &coop.AppSurface{OpenedAt: &opened}, AutomaticResultsAt: &afterOpen, Results: passed,
-			},
-			want: false,
 		},
 		{
 			name: "app surface not opened",
@@ -609,9 +601,9 @@ func TestAttemptNeedsPollingAfterAppOpen(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "event newer than the direct snapshot is retried",
+			name: "supporting evidence marks refresh",
 			attempt: &coop.NodeAttempt{
-				AutomaticResultsAt: &atOpen,
+				AutomaticResultsAt: &beforeOpen, AutomaticRefreshPending: true,
 				Results: []coop.CheckResult{{
 					ID: "passive.event", Kind: coop.CheckEvent, Importance: coop.CheckAdvisory,
 					Status: coop.CheckObserved, UpdatedAt: afterOpen,
@@ -620,15 +612,14 @@ func TestAttemptNeedsPollingAfterAppOpen(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "attributable request newer than the direct snapshot is retried",
+			name: "supporting timestamp alone is not a refresh",
 			attempt: &coop.NodeAttempt{
-				AutomaticResultsAt: &atOpen,
+				AutomaticResultsAt: &beforeOpen,
 				Results: []coop.CheckResult{{
 					ID: "passive.request", Kind: coop.CheckRequest, Importance: coop.CheckAdvisory,
 					Status: coop.CheckObserved, UpdatedAt: afterOpen,
 				}},
 			},
-			want: true,
 		},
 	}
 

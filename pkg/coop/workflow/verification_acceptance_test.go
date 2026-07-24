@@ -460,6 +460,26 @@ func TestVerificationAcceptancePassiveFailureCannotBlameOrWakeAgent(t *testing.T
 		"the persistence boundary must downgrade all passive evidence")
 }
 
+func TestVerificationAcceptanceSupportingEvidenceAtomicallyMarksRefresh(t *testing.T) {
+	store, session := newVerificationAcceptanceStore(t, coop.NodeCLICommand)
+	clock := newAcceptanceClock()
+	service := newVerificationAcceptanceService(store, &acceptanceEvaluator{}, clock)
+	started, err := service.StartWork(session.ID, 1, "Building")
+	require.NoError(t, err)
+
+	result := coop.CheckResult{
+		ID: "passive.request", Kind: coop.CheckRequest, Status: coop.CheckObserved,
+		Detail: "Stripe observed the request", UpdatedAt: clock.Now(),
+	}
+	require.NoError(t, service.RecordSupportingResult(session.ID, 1, started.Attempt, result))
+
+	attempt := acceptanceNode(t, readAcceptanceSession(t, store, session.ID)).CurrentAttempt()
+	require.NotNil(t, attempt)
+	assert.True(t, attempt.AutomaticRefreshPending)
+	require.Len(t, attempt.Results, 1)
+	assert.Equal(t, coop.CheckAdvisory, attempt.Results[0].Importance)
+}
+
 func TestVerificationAcceptanceObserverPollsSameEvaluatorUntilPass(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeCLICommand)
 	pending := requiredAcceptanceResult("state.checkout.complete", coop.CheckState, coop.CheckPending)
@@ -492,8 +512,6 @@ func TestVerificationAcceptanceObserverPollsSameEvaluatorUntilPass(t *testing.T)
 	assert.Equal(t, coop.CheckPassed, node.Attempts[0].Results[0].Status)
 	inputs := evaluator.Inputs()
 	require.Len(t, inputs, 2)
-	assert.Equal(t, TriggerPoll, inputs[0].Trigger)
-	assert.Equal(t, TriggerPoll, inputs[1].Trigger)
 	assert.Equal(t, started.Attempt, inputs[0].Attempt)
 	assert.Equal(t, started.Attempt, inputs[1].Attempt)
 }
@@ -639,7 +657,6 @@ func TestVerificationAcceptanceBusyEventCoalescesPersistedCandidateForNextPoll(t
 	assert.Equal(t, string(decisionNeedsHuman), settled.Decision)
 	inputs := evaluator.Inputs()
 	require.Len(t, inputs, 2)
-	assert.Equal(t, TriggerPoll, inputs[1].Trigger)
 	frozenNode, err := inputs[1].Session.NodeByNumber(1)
 	require.NoError(t, err)
 	require.Len(t, frozenNode.CurrentAttempt().Resources, 1)
@@ -776,7 +793,11 @@ func TestVerificationAcceptanceBasisMismatchKeepsCollectorPersistedCandidateForN
 		if nodeErr != nil {
 			return nodeErr
 		}
-		return node.AddAgentCheck(started.Attempt, coop.Verification{Check: "new basis", Passed: true})
+		return node.ReportAttempt(
+			started.Attempt,
+			clock.Now().Add(time.Minute),
+			&coop.Implementation{File: "updated.go"},
+		)
 	})
 	require.NoError(t, err)
 	close(release)
@@ -1032,7 +1053,7 @@ func TestVerificationAcceptanceUIConfirmationWinsDuringInitialEvaluation(t *test
 }
 
 func TestVerificationAcceptanceBasisChangesDiscardInflightEvaluationAndPreserveSupportingEvidence(t *testing.T) {
-	for _, change := range []string{"stripe_account_id", "reported_at", "opened_at", "resources", "agent_checks"} {
+	for _, change := range []string{"stripe_account_id", "reported_at", "opened_at", "resources"} {
 		t.Run(change, func(t *testing.T) {
 			nodeType := coop.NodeDashboard
 			if change == "opened_at" {
@@ -1107,16 +1128,6 @@ func TestVerificationAcceptanceBasisChangesDiscardInflightEvaluationAndPreserveS
 					}
 					return node.UpsertResource(started.Attempt, coop.ResourceBinding{
 						Role: "customer", Type: "customer", ID: "cus_current", Source: coop.BindingAgent,
-					})
-				})
-			case "agent_checks":
-				_, err = store.Update(session.ID, func(current *coop.Session) error {
-					node, nodeErr := current.NodeByNumber(1)
-					if nodeErr != nil {
-						return nodeErr
-					}
-					return node.AddAgentCheck(started.Attempt, coop.Verification{
-						Check: "Current handler check", Passed: true,
 					})
 				})
 			}
@@ -1266,14 +1277,14 @@ func TestVerificationAcceptanceUIOpenIsStableButOptionalForConfirm(t *testing.T)
 	require.NotNil(t, opened.AppSurface.OpenedAt)
 	assert.Equal(t, firstOpen, *opened.AppSurface.OpenedAt)
 	require.NotNil(t, opened.AutomaticResultsAt)
-	assert.Equal(t, *opened.AppSurface.OpenedAt, *opened.AutomaticResultsAt)
+	assert.True(t, opened.AutomaticRefreshPending)
 
 	fresh, err := service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
 	require.NoError(t, err)
 	assert.Equal(t, string(decisionNeedsHuman), fresh.Decision)
 	opened = acceptanceNode(t, readAcceptanceSession(t, store, session.ID)).CurrentAttempt()
 	require.NotNil(t, opened.AutomaticResultsAt)
-	assert.True(t, opened.AutomaticResultsAt.After(*opened.AppSurface.OpenedAt))
+	assert.False(t, opened.AutomaticRefreshPending)
 
 	confirmed, err := service.ConfirmReviewAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}})
 	require.NoError(t, err)
@@ -1791,8 +1802,8 @@ func TestVerificationAcceptanceObserverPollsEveryOpenedUIAttempt(t *testing.T) {
 	require.NotNil(t, secondAttempt.AppSurface)
 	require.NotNil(t, secondAttempt.AppSurface.OpenedAt)
 	require.NotNil(t, secondAttempt.AutomaticResultsAt)
-	assert.True(t, secondAttempt.AutomaticResultsAt.After(*secondAttempt.AppSurface.OpenedAt),
-		"the observer must give every opened UI attempt a post-open evaluation")
+	assert.False(t, secondAttempt.AutomaticRefreshPending,
+		"the observer must settle every opened UI attempt's refresh")
 }
 
 func TestVerificationAcceptanceAwaitTimeoutReturnsExactRetry(t *testing.T) {
@@ -1848,7 +1859,6 @@ func TestVerificationAcceptanceReportPassesAndCompletesWithoutTUI(t *testing.T) 
 	assert.Equal(t, "confirmed", reported.State)
 	assert.Equal(t, coop.CheckPassed, acceptanceResult(t, reported.Verification, passed.ID).Status)
 	require.Len(t, evaluator.Inputs(), 1)
-	assert.Equal(t, TriggerPoll, evaluator.Inputs()[0].Trigger)
 	node := acceptanceNode(t, readAcceptanceSession(t, store, session.ID))
 	assert.Equal(t, coop.NodeDone, node.State)
 	require.Len(t, node.Attempts, 1)
@@ -1894,8 +1904,6 @@ func TestVerificationAcceptanceAwaitRerunsPendingAndWakesForFailureWithoutTUI(t 
 	assert.Contains(t, awaited.Message, "Create and exercise a new Checkout Session.")
 	assert.Contains(t, awaited.Next, "stripe coop agent start-work")
 	require.Len(t, evaluator.Inputs(), 2)
-	assert.Equal(t, TriggerPoll, evaluator.Inputs()[0].Trigger)
-	assert.Equal(t, TriggerPoll, evaluator.Inputs()[1].Trigger)
 
 	node := acceptanceNode(t, readAcceptanceSession(t, store, session.ID))
 	require.Len(t, node.Attempts, 2)

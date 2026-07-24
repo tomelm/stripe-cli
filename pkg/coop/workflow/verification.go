@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -28,7 +29,6 @@ type EvaluationInput struct {
 	Session    *coop.Session
 	NodeNumber int
 	Attempt    int
-	Trigger    EvaluationTrigger
 }
 
 // Evaluation is one complete bounded snapshot of the node's direct resource,
@@ -271,28 +271,15 @@ func (s *Service) Reevaluate(ctx context.Context, sessionID string, nodeNumber, 
 	if err := s.requireEvaluator(); err != nil {
 		return coop.CommandResponse{}, err
 	}
-	session, err := s.store.Read(sessionID)
-	if err != nil {
-		return coop.CommandResponse{}, err
-	}
-	node, err := session.NodeByNumber(nodeNumber)
-	if err != nil {
-		return coop.CommandResponse{}, err
-	}
-	attempt := node.CurrentAttempt()
-	if attempt == nil || attempt.Number != attemptNumber {
-		return responseForChangedAttempt(session, nodeNumber), nil
-	}
-	return s.evaluateAndApplyObservation(ctx, sessionID, nodeNumber, attemptNumber, trigger, true)
+	return s.evaluateAndApplyObservation(ctx, sessionID, nodeNumber, attemptNumber, trigger)
 }
 
-func (s *Service) evaluateAndApplyObservation(ctx context.Context, sessionID string, nodeNumber, attemptNumber int, trigger EvaluationTrigger, ignoreStale bool) (coop.CommandResponse, error) {
+func (s *Service) evaluateAndApplyObservation(ctx context.Context, sessionID string, nodeNumber, attemptNumber int, trigger EvaluationTrigger) (coop.CommandResponse, error) {
 	session, started, err := s.acquireAutomaticEvaluation(
 		sessionID,
 		nodeNumber,
 		attemptNumber,
 		trigger,
-		ignoreStale,
 	)
 	if err != nil {
 		return coop.CommandResponse{}, err
@@ -304,7 +291,7 @@ func (s *Service) evaluateAndApplyObservation(ctx context.Context, sessionID str
 		return staleEvaluationResponse(session, nodeNumber), nil
 	}
 	evaluation, evalErr := s.evaluateBounded(ctx, EvaluationInput{
-		Session: session, NodeNumber: nodeNumber, Attempt: attemptNumber, Trigger: trigger,
+		Session: session, NodeNumber: nodeNumber, Attempt: attemptNumber,
 	})
 	if ctx.Err() != nil {
 		s.invalidateCanceledEvaluation(sessionID, nodeNumber, attemptNumber, started.snapshotAt)
@@ -322,7 +309,7 @@ func (s *Service) evaluateAndApplyObservation(ctx context.Context, sessionID str
 	}
 	applied := evaluationApply{responseAttempt: attemptNumber}
 	session, err = s.store.Update(sessionID, func(session *coop.Session) error {
-		return s.applyEvaluation(session, nodeNumber, attemptNumber, started.basis, started.snapshotAt, evaluation, ignoreStale, &applied)
+		return s.applyEvaluation(session, nodeNumber, attemptNumber, started.basis, started.snapshotAt, evaluation, &applied)
 	})
 	if err != nil {
 		return errorResponse(err, fmt.Sprintf("stripe coop agent start-work --session=%s --node=%d", sessionID, nodeNumber)), nil
@@ -334,11 +321,7 @@ func (s *Service) evaluateAndApplyObservation(ctx context.Context, sessionID str
 		return supersededEvaluationResponse(session, nodeNumber, attemptNumber), nil
 	}
 	if applied.stale {
-		latest, readErr := s.store.Read(sessionID)
-		if readErr != nil {
-			return coop.CommandResponse{}, readErr
-		}
-		return staleEvaluationResponse(latest, nodeNumber), nil
+		return staleEvaluationResponse(session, nodeNumber), nil
 	}
 	return s.evaluationResponse(session, nodeNumber, applied.responseAttempt, applied.policy, applied.results), nil
 }
@@ -347,26 +330,22 @@ func (s *Service) acquireAutomaticEvaluation(
 	sessionID string,
 	nodeNumber, attemptNumber int,
 	trigger EvaluationTrigger,
-	ignoreStale bool,
 ) (*coop.Session, evaluationBegin, error) {
 	var started evaluationBegin
 	session, err := s.store.Update(sessionID, func(session *coop.Session) error {
-		if err := requireActiveSession(session); err != nil {
-			return err
-		}
 		node, err := session.NodeByNumber(nodeNumber)
 		if err != nil {
 			return err
 		}
 		attempt, err := node.AttemptByNumber(attemptNumber)
 		if err != nil || node.CurrentAttempt() != attempt {
-			if ignoreStale {
-				started.stale = true
-				return nil
-			}
-			return fmt.Errorf("%w: node %d attempt %d", coop.ErrAttemptNotCurrent, nodeNumber, attemptNumber)
+			started.stale = true
+			return nil
 		}
-		started.snapshotAt, err = node.BeginAutomaticCheck(attemptNumber, s.nextEvaluationTime())
+		if err := requireActiveSession(session); err != nil {
+			return err
+		}
+		started.snapshotAt, err = node.BeginAutomaticCheck(attemptNumber, s.now())
 		if errors.Is(err, coop.ErrAutomaticCheckBusy) {
 			started.busy = true
 			if trigger == TriggerRequest || trigger == TriggerEvent {
@@ -480,72 +459,42 @@ type evaluationApply struct {
 
 type evaluationBasis struct {
 	stripeAccountID string
-	reportedAt      *time.Time
-	openedAt        *time.Time
+	reportedAt      time.Time
+	openedAt        time.Time
 	resources       []coop.ResourceBinding
-	agentChecks     []coop.Verification
 }
 
 func captureEvaluationBasis(session *coop.Session, attempt *coop.NodeAttempt) evaluationBasis {
 	basis := evaluationBasis{
 		stripeAccountID: session.StripeAccountID,
-		reportedAt:      copyTime(attempt.ReportedAt),
 		resources:       append([]coop.ResourceBinding(nil), attempt.Resources...),
-		agentChecks:     append([]coop.Verification(nil), attempt.AgentChecks...),
 	}
-	if attempt.AppSurface != nil {
-		basis.openedAt = copyTime(attempt.AppSurface.OpenedAt)
+	if attempt.ReportedAt != nil {
+		basis.reportedAt = attempt.ReportedAt.UTC()
+	}
+	if attempt.AppSurface != nil && attempt.AppSurface.OpenedAt != nil {
+		basis.openedAt = attempt.AppSurface.OpenedAt.UTC()
 	}
 	return basis
 }
 
 func (basis evaluationBasis) matches(session *coop.Session, attempt *coop.NodeAttempt) bool {
 	current := captureEvaluationBasis(session, attempt)
-	if basis.stripeAccountID != current.stripeAccountID ||
-		!sameTime(basis.reportedAt, current.reportedAt) || !sameTime(basis.openedAt, current.openedAt) ||
-		len(basis.resources) != len(current.resources) || len(basis.agentChecks) != len(current.agentChecks) {
-		return false
-	}
-	for index := range basis.resources {
-		if basis.resources[index] != current.resources[index] {
-			return false
-		}
-	}
-	for index := range basis.agentChecks {
-		if basis.agentChecks[index] != current.agentChecks[index] {
-			return false
-		}
-	}
-	return true
+	return basis.stripeAccountID == current.stripeAccountID &&
+		basis.reportedAt.Equal(current.reportedAt) &&
+		basis.openedAt.Equal(current.openedAt) &&
+		slices.Equal(basis.resources, current.resources)
 }
 
-func copyTime(value *time.Time) *time.Time {
-	if value == nil {
-		return nil
-	}
-	copy := value.UTC()
-	return &copy
-}
-
-func sameTime(left, right *time.Time) bool {
-	if left == nil || right == nil {
-		return left == nil && right == nil
-	}
-	return left.Equal(*right)
-}
-
-func (s *Service) applyEvaluation(session *coop.Session, nodeNumber, attemptNumber int, basis evaluationBasis, snapshotAt time.Time, evaluation Evaluation, ignoreStale bool, applied *evaluationApply) error {
+func (s *Service) applyEvaluation(session *coop.Session, nodeNumber, attemptNumber int, basis evaluationBasis, snapshotAt time.Time, evaluation Evaluation, applied *evaluationApply) error {
 	node, err := session.NodeByNumber(nodeNumber)
 	if err != nil {
 		return err
 	}
 	attempt, err := node.AttemptByNumber(attemptNumber)
 	if err != nil || node.CurrentAttempt() != attempt {
-		if ignoreStale {
-			applied.stale = true
-			return nil
-		}
-		return fmt.Errorf("%w: node %d attempt %d", coop.ErrAttemptNotCurrent, nodeNumber, attemptNumber)
+		applied.stale = true
+		return nil
 	}
 	if err := requireActiveSession(session); err != nil {
 		return err
@@ -565,11 +514,10 @@ func (s *Service) applyEvaluation(session *coop.Session, nodeNumber, attemptNumb
 		applied.basisChanged = true
 		return nil
 	}
-	merged, err := s.mergeEvaluation(node, attemptNumber, snapshotAt, evaluation)
-	if err != nil {
-		return err
-	}
-	if !merged {
+	if err := node.ReconcileAutomaticEvaluation(attemptNumber, snapshotAt, evaluation.Results); err != nil {
+		if !errors.Is(err, coop.ErrStaleResultSnapshot) {
+			return err
+		}
 		// A reclaimed lease owner has no authority to land findings, bindings,
 		// or policy transitions—even when newer persisted evidence is a failure.
 		applied.lostLease = true
@@ -583,7 +531,7 @@ func (s *Service) applyEvaluation(session *coop.Session, nodeNumber, attemptNumb
 		return nil
 	}
 	applied.policy = decideResults(attempt.Results, attempt.AgentChecks, isHumanReviewNode(node))
-	if attempt.AutomaticRefreshPending || supportingEvidenceNeedsReevaluation(attempt) {
+	if attempt.AutomaticRefreshPending {
 		// An observation arrived after this read began. Do not close the attempt
 		// from the older snapshot; the coordinator must perform the coalesced
 		// follow-up read first.
@@ -669,20 +617,6 @@ func normalizeEvaluationPolicy(session *coop.Session, node *coop.SessionNode, no
 	if policy.decision == decisionUnverified && len(policy.unavailable) > 0 && stepHasHumanReview(session, nodeNumber) {
 		policy.decision = decisionNeedsHuman
 	}
-}
-
-func (s *Service) mergeEvaluation(node *coop.SessionNode, attemptNumber int, snapshotAt time.Time, evaluation Evaluation) (bool, error) {
-	if err := node.ReconcileAutomaticEvaluation(
-		attemptNumber,
-		snapshotAt,
-		evaluation.Results,
-	); err != nil {
-		if errors.Is(err, coop.ErrStaleResultSnapshot) {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, nil
 }
 
 func (s *Service) applyEvaluationPolicy(session *coop.Session, node *coop.SessionNode, nodeNumber, attemptNumber int, applied *evaluationApply) error {
@@ -858,7 +792,10 @@ func (s *Service) RecordSupportingResult(sessionID string, nodeNumber, attemptNu
 		if err != nil {
 			return err
 		}
-		return node.UpsertResult(attemptNumber, result)
+		if err := node.UpsertResult(attemptNumber, result); err != nil {
+			return err
+		}
+		return node.MarkAutomaticRefresh(attemptNumber)
 	})
 	return err
 }
