@@ -69,11 +69,27 @@ func TestExplicitBlueprintPromptIncludesSessionProtocol(t *testing.T) {
 	assert.Contains(t, prompt, "required_outcomes")
 	assert.Contains(t, prompt, "sole foreground waiter")
 	assert.Contains(t, prompt, `Before making Stripe API calls, run "stripe whoami"`)
+	assert.Contains(t, prompt, "Build and exercise the behavior in the user's app")
+	assert.Contains(t, prompt, "Never hardcode secret or restricted keys")
 	assert.NotContains(t, prompt, `"agent_instructions"`)
 	assert.NotContains(t, prompt, `"nodes"`)
 	assert.NotContains(t, prompt, `"verification_coverage"`)
 	assert.NotContains(t, prompt, "Create Checkout Session")
 	assert.Less(t, len(prompt), 2_000)
+}
+
+func TestDiscoveryPromptCarriesCompactIncrementalProtocol(t *testing.T) {
+	prompt := (&coopRunCmd{language: "node"}).buildAgentPrompt("")
+
+	assert.Contains(t, prompt, `run "stripe coop run <blueprint-id> --language=<lang>"`)
+	assert.Contains(t, prompt, `Run the exact "next" command in the creation response`)
+	assert.Contains(t, prompt, `"next_template"`)
+	assert.Contains(t, prompt, "node_contract")
+	assert.Contains(t, prompt, "required_outcomes")
+	assert.Contains(t, prompt, "Build and exercise the behavior in the user's app")
+	assert.Contains(t, prompt, "sole foreground waiter")
+	assert.NotContains(t, prompt, "Follow the instructions in the JSON response")
+	assert.Less(t, len(prompt), 4_000)
 }
 
 func TestPromptAutoApproveReturnsPromptErrors(t *testing.T) {

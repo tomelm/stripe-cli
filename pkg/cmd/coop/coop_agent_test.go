@@ -434,15 +434,19 @@ func TestCoopAgentStartFollowupCreatesGuidedSession(t *testing.T) {
 		require.NoError(t, cmd.Execute())
 	})
 
-	var resp coopAgentRunResponse
+	var resp coop.CommandResponse
 	require.NoError(t, json.Unmarshal([]byte(output), &resp))
 	require.True(t, resp.OK)
 	assert.Contains(t, resp.Message, "Deploy your changes")
 	assert.Contains(t, resp.Next, "stripe coop agent start-work")
-	assert.Contains(t, resp.AgentInstructions, "guided co-op follow-up")
-	assert.Contains(t, resp.AgentInstructions, "Vercel")
-	require.Len(t, resp.Nodes, 3)
-	assert.Equal(t, "Inspect existing deploy config", resp.Nodes[0].Title)
+	assert.Contains(t, resp.AgentPrompt, "existing Vercel deployment configuration")
+	assert.Less(t, len(output), 1_000)
+	var payload map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(output), &payload))
+	assert.NotContains(t, payload, "agent_instructions")
+	assert.NotContains(t, payload, "nodes")
+	assert.NotContains(t, payload, "lifecycle_facts")
+	assert.NotContains(t, payload, "verification_coverage")
 
 	ids, err := store.List()
 	require.NoError(t, err)
@@ -464,6 +468,14 @@ func TestCoopAgentStartFollowupCreatesGuidedSession(t *testing.T) {
 	assert.Equal(t, "Vercel", child.Settings["deploy_target"])
 	assert.Equal(t, "deploy-update", child.Settings["guided_action"])
 	assert.Len(t, child.Steps, 3)
+
+	service, err := newAgentWorkflowService(context.Background(), child.ID)
+	require.NoError(t, err)
+	started, err := service.StartWork(child.ID, 1, "Inspecting deploy config")
+	require.NoError(t, err)
+	require.NotNil(t, started.NodeContract)
+	assert.Equal(t, "Inspect existing deploy config", started.NodeContract.Title)
+	assert.Equal(t, 1, started.NodeContract.Number)
 }
 
 func TestCoopAgentStartFollowupRequiresCompletedParent(t *testing.T) {

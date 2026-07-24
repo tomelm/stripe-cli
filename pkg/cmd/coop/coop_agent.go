@@ -463,6 +463,9 @@ func runCoopStartFollowup(parentSessionID, actionID, target string) error {
 	if err != nil {
 		return outputCoopError(err.Error(), "stripe coop agent start-followup --session=<session> --action=deploy")
 	}
+	if err := validateGuidedActionAgentContext(action); err != nil {
+		return outputCoopError(err.Error(), "stripe coop agent next-action --session="+parent.ID)
+	}
 	if err := validateFollowupParent(parent, action.ID); err != nil {
 		return outputCoopError(err.Error(), "stripe coop agent next-action --session="+parent.ID)
 	}

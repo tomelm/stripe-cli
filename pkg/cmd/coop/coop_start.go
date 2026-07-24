@@ -121,13 +121,16 @@ Steps:
 3. Based on their answer, run "stripe coop recommend --query=<description of what they need>"
 4. Explain what you found in simple terms: "I'll set up X which lets you do Y" and confirm.
 5. Only after confirmation, run "stripe coop run <blueprint-id> --language=<lang>".
-6. Follow the instructions in the JSON response and work through each node.
+6. Run the exact "next" command in the creation response, then work incrementally
+   from each current node contract.
 
 Co-op automatically checks supported Stripe resources and state. The developer
 reviews app UI and Dashboard-owned work in the TUI. Do not ask them to relay
 automatic findings; follow the CLI decision and continuation action directly.
 
-Important: Run "stripe whoami" first to check auth. If not logged in OR if it shows "Test mode key: not available", run "stripe sandbox create --from-git" to provision a sandbox. The claim URL will appear automatically in the TUI.`, langHint)
+Important: Run "stripe whoami" first to check auth. If not logged in OR if it shows "Test mode key: not available", run "stripe sandbox create --from-git" to provision a sandbox. The claim URL will appear automatically in the TUI.
+
+%s`, langHint, coopAgentOperatingContract())
 }
 
 func (rc *coopRunCmd) buildAgentPromptForSession(session *coop.Session) (string, error) {
@@ -144,16 +147,21 @@ Run this command exactly:
 
 %s
 
-Treat each typed Co-op JSON response as the source of truth for the current action:
-- Run an executable "next" command unchanged.
-- For "next_template", fill every "required_inputs" value; never submit placeholders literally.
-- Save the attempt number from start-work and include it in later mutations for that work.
-- Treat node_contract, lifecycle_facts, and required_outcomes as the current work contract.
-- Follow needs_agent findings directly. Run await-review or next-action as the sole foreground waiter when instructed.
+%s
 
 Before making Stripe API calls, run "stripe whoami". If it is not authenticated or says "Test mode key: not available", run "stripe sandbox create --from-git"; its claim URL appears in the TUI.
 
-Write and run working code. When asked for an app URL, keep that app running for the developer to review.`, session.ID, bp.Title, initialStartWorkCommand(session)), nil
+When asked for an app URL, keep that app running for the developer to review.`, session.ID, bp.Title, initialStartWorkCommand(session), coopAgentOperatingContract()), nil
+}
+
+func coopAgentOperatingContract() string {
+	return `Co-op operating contract:
+- Run each executable "next" command unchanged. For "next_template", fill every named "required_inputs" value; never run placeholders.
+- Save the attempt from start-work and include it in later mutations for that work.
+- Treat node_contract, lifecycle_facts, and required_outcomes as the current contract. Build and exercise the behavior in the user's app; Stripe CLI calls are only setup or test tools unless the node is a cliCommand.
+- Write and run working code, then report meaningful observed checks. An agent-authored report-check is useful context, not independent proof.
+- Never hardcode secret or restricted keys or webhook secrets, and never send raw card numbers; use the app's secret management and official Stripe collection or test PaymentMethod IDs.
+- Follow needs_agent findings directly. Run await-review or next-action as the sole foreground waiter when instructed; do not background it or replace it with status polling.`
 }
 
 func (rc *coopRunCmd) startSessionQuietly(blueprintID string) (*coop.Session, error) {

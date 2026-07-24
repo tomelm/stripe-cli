@@ -2,6 +2,7 @@ package coopcmd
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -68,120 +69,52 @@ func TestNewCoopSessionRejectsMalformedKeyValues(t *testing.T) {
 	}
 }
 
-func TestSessionLifecycleInstructionsUseDirectBoundedAwait(t *testing.T) {
-	prompt := sessionLifecycleInstructions("Build the integration.", &coop.Session{ID: "coop_prompt"})
-
-	assert.Contains(t, prompt, `When a response instead contains "next_template", fill every named "required_inputs" value`)
-	assert.Contains(t, prompt, "Run the returned await-review command directly as the sole foreground waiter")
-	assert.Contains(t, prompt, `If it returns state=timeout, immediately run its executable "next" command`)
-	assert.Contains(t, prompt, "If that final command is next-action, keep it as the sole foreground waiter")
-	assert.Contains(t, prompt, "Do not background it")
-	assert.NotContains(t, prompt, "shell timeout")
-	assert.NotContains(t, prompt, "5-minute")
-	assert.Contains(t, prompt, "structured fields are the contract")
-	assert.NotContains(t, prompt, "description — it's the source of truth")
-}
-
-func TestSessionLifecycleInstructionsRenderRequiredApplicationOutcomes(t *testing.T) {
-	session := &coop.Session{
-		ID: "coop_lifecycle",
-		LifecycleFacts: []coop.LifecycleFact{{
-			ID:        "redirect_not_access",
-			Statement: "A successful redirect does not prove durable subscription access.",
-		}},
-		Steps: []coop.SessionStep{{
-			StepDefinition: coop.StepDefinition{Key: "checkout"},
-			Nodes: []coop.SessionNode{{
-				NodeDefinition: coop.NodeDefinition{
-					Key: "return_page",
-					RequiredOutcomes: []coop.RequiredOutcome{{
-						ID:        "server_authorized_access",
-						FactRefs:  []string{"redirect_not_access"},
-						Statement: "Authorize access from persisted subscription state, not the redirect.",
-					}},
-				},
-			}},
-		}},
-	}
-
-	prompt := sessionLifecycleInstructions("Build the integration.", session)
-
-	assert.Contains(t, prompt, "lifecycle_facts in the structured session response describe canonical Stripe behavior")
-	assert.Contains(t, prompt, "required_outcomes in each structured node are mandatory application-level results")
-	assert.Contains(t, prompt, "Values for application-owned concerns such as identity or return routes may be illustrative")
-	assert.Contains(t, prompt, "when a required_outcome refines one, adapt that value")
-	assert.Contains(t, prompt, "implementation obligation")
-	assert.Contains(t, prompt, "report-check records only an agent-authored claim")
-	assert.Contains(t, prompt, "never independent proof")
-	assert.NotContains(t, prompt, "A successful redirect does not prove durable subscription access.")
-	assert.NotContains(t, prompt, "Authorize access from persisted subscription state, not the redirect.")
-}
-
-func TestCoopRunResponseCarriesLifecycleContract(t *testing.T) {
-	blueprint, err := coop.LoadBlueprint("one-time-payment")
+func TestCoopRunResponseIsIncrementalAndBounded(t *testing.T) {
+	blueprint, err := coop.LoadBlueprint("subscription-with-trial")
 	require.NoError(t, err)
-	session := coop.NewSessionFromBlueprint(blueprint, "coop_contract", nil, nil)
-	session.LifecycleFacts = []coop.LifecycleFact{{
-		ID:        "redirect_not_access",
-		Statement: "A successful redirect does not prove durable access.",
-	}}
-	session.Steps[0].Nodes[0].RequiredOutcomes = []coop.RequiredOutcome{{
-		ID:        "server_authorized_access",
-		FactRefs:  []string{"redirect_not_access"},
-		Statement: "Authorize access from persisted provider state.",
-	}}
+	session := coop.NewSessionFromBlueprint(blueprint, "coop_incremental", nil, nil)
 
 	response := newCoopAgentRunResponse(blueprint, session)
-
-	assert.Equal(t, session.LifecycleFacts, response.LifecycleFacts)
-	require.NotEmpty(t, response.Nodes)
-	assert.Equal(t, session.Steps[0].Nodes[0].RequiredOutcomes, response.Nodes[0].RequiredOutcomes)
-
-	response.LifecycleFacts[0].Statement = "mutated response"
-	response.Nodes[0].RequiredOutcomes[0].Statement = "mutated outcome"
-	response.Nodes[0].RequiredOutcomes[0].FactRefs[0] = "mutated_ref"
-	assert.Equal(t, "A successful redirect does not prove durable access.", session.LifecycleFacts[0].Statement)
-	assert.Equal(t, "Authorize access from persisted provider state.", session.Steps[0].Nodes[0].RequiredOutcomes[0].Statement)
-	assert.Equal(t, "redirect_not_access", session.Steps[0].Nodes[0].RequiredOutcomes[0].FactRefs[0])
-}
-
-func TestCoopRunResponseDisclosesBlueprintVerificationCoverage(t *testing.T) {
-	blueprint, err := coop.LoadBlueprint("one-time-payment")
+	data, err := json.MarshalIndent(response, "", "  ")
 	require.NoError(t, err)
-	session := coop.NewSessionFromBlueprint(blueprint, "coop_coverage", nil, nil)
 
-	response := newCoopAgentRunResponse(blueprint, session)
+	assert.Less(t, len(data), 1_000)
+	assert.Equal(t, "created", response.State)
+	assert.Equal(t, 1, response.Node)
+	assert.Equal(t, initialStartWorkCommand(session), response.Next)
 
-	require.NotNil(t, response.VerificationCoverage)
-	assert.Positive(t, response.VerificationCoverage.DirectChecks)
-	assert.Contains(t, response.VerificationCoverage.Message, "Unsupported facts")
-	assert.Contains(t, response.Message, "Automatic verification covers")
-	assert.NotEmpty(t, response.Nodes)
-}
-
-func TestVerificationCoverageDisclosesUnverifiedApplicationOutcomes(t *testing.T) {
-	blueprint, err := coop.LoadBlueprint("one-time-payment")
-	require.NoError(t, err)
-	session := coop.NewSessionFromBlueprint(blueprint, "coop_outcome_coverage", nil, nil)
-	session.Steps[0].Nodes[0].RequiredOutcomes = []coop.RequiredOutcome{
-		{
-			ID:        "customer_identity",
-			FactRefs:  []string{"customer_reuse"},
-			Statement: "Persist a stable mapping between the app principal and Stripe Customer.",
-		},
-		{
-			ID:        "server_authorized_access",
-			FactRefs:  []string{"redirect_not_access"},
-			Statement: "Authorize access from durable subscription state.",
-		},
+	var payload map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &payload))
+	require.Len(t, payload, 6)
+	for _, key := range []string{"ok", "session_id", "node", "state", "message", "next"} {
+		assert.Contains(t, payload, key)
 	}
+	for _, omitted := range []string{
+		"agent_instructions",
+		"nodes",
+		"steps",
+		"lifecycle_facts",
+		"required_outcomes",
+		"verification_coverage",
+	} {
+		assert.NotContains(t, payload, omitted)
+	}
+}
 
-	summary := verificationCoverageForSession(session)
+func TestGuidedActionAgentContextIsBoundedAndSafe(t *testing.T) {
+	require.NoError(t, validateGuidedActionAgentContext(&coop.GuidedAction{
+		AgentContext: strings.Repeat("x", maxGuidedActionAgentContextBytes),
+	}))
 
-	assert.Equal(t, 2, summary.UnverifiedApplicationOutcomes)
-	assert.Equal(t, "partial", summary.Status)
-	assert.Contains(t, summary.Message, "2 required application outcome(s) have no independent automatic check")
-	assert.Contains(t, summary.Message, "required outcomes remain implementation obligations")
+	err := validateGuidedActionAgentContext(&coop.GuidedAction{
+		AgentContext: strings.Repeat("x", maxGuidedActionAgentContextBytes+1),
+	})
+	require.ErrorContains(t, err, "exceeds 512 bytes")
+
+	err = validateGuidedActionAgentContext(&coop.GuidedAction{
+		AgentContext: "unsafe\ncontext",
+	})
+	require.ErrorContains(t, err, "contains control characters")
 }
 
 func TestCoopRunReturnsStructuredErrorForMalformedSetting(t *testing.T) {
@@ -285,36 +218,4 @@ func TestCoopStartKeepsNotFoundGuidance(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 	assert.Contains(t, err.Error(), "stripe coop recommend")
-}
-
-func TestAgentInstructionsFrameBlueprintAsAppImplementation(t *testing.T) {
-	bp := &coop.Blueprint{Title: "Metered subscription"}
-	session := &coop.Session{ID: "coop_123"}
-
-	instructions := agentInstructions(bp, session)
-
-	assert.Contains(t, instructions, "The blueprint describes the Stripe flow the developer wants in their app")
-	assert.Contains(t, instructions, "Stripe CLI commands are useful for setup and verification, but they are not the implementation")
-	assert.Contains(t, instructions, `"apiRequest": Implement app code that calls this Stripe API`)
-	assert.Contains(t, instructions, `"asyncHandler": Implement the app's webhook or async event handler for every event listed on the node`)
-	assert.Contains(t, instructions, "when that event has a supported trigger")
-	assert.Contains(t, instructions, "Do not hardcode port 4242 unless the app is actually listening there")
-	assert.Contains(t, instructions, "Verification exercises the app code, not only a direct Stripe CLI/API call")
-	assert.Contains(t, instructions, "add --passed only after observing the expected result")
-	assert.Contains(t, instructions, "report-work points to the relevant app file/function/route you implemented, changed, or verified")
-	assert.Contains(t, instructions, "Never pass full card numbers to Stripe APIs or CLI commands")
-}
-
-func TestCoopAgentRunResponsePreservesNodesWireKey(t *testing.T) {
-	bp, err := coop.LoadBlueprint("one-time-payment")
-	require.NoError(t, err)
-	session := coop.NewSessionFromBlueprint(bp, "coop_123", nil, nil)
-
-	data, err := json.Marshal(newCoopAgentRunResponse(bp, session))
-	require.NoError(t, err)
-
-	var payload map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal(data, &payload))
-	assert.Contains(t, payload, "nodes")
-	assert.NotContains(t, payload, "steps")
 }
