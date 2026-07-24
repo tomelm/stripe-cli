@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -278,6 +279,8 @@ func TestAgentPaneCommandShellQuotesLauncherPath(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(script), "process-pulse",
 		"discovery mode has no session to associate with an agent process pulse")
+	assert.NotContains(t, string(script), "process-state",
+		"discovery mode must not claim a known agent lifecycle")
 }
 
 func TestAgentLauncherRunsSessionScopedProcessPulse(t *testing.T) {
@@ -297,10 +300,18 @@ func TestAgentLauncherRunsSessionScopedProcessPulse(t *testing.T) {
 	script, err := os.ReadFile(launcherPath)
 	require.NoError(t, err)
 	assert.Contains(t, string(script),
-		`'/stripe with spaces' coop agent process-pulse --session='coop_pulse' --owner-pid="$$"`)
+		`'/stripe with spaces' coop agent process-state --session='coop_pulse'`)
+	assert.Contains(t, string(script),
+		`'/stripe with spaces' coop agent process-pulse --session='coop_pulse'`)
+	launchIDs := regexp.MustCompile(`--launch-id='([^']+)'`).FindAllStringSubmatch(string(script), -1)
+	require.Len(t, launchIDs, 3)
+	assert.Equal(t, launchIDs[0][1], launchIDs[1][1])
+	assert.Equal(t, launchIDs[0][1], launchIDs[2][1])
+	assert.Contains(t, string(script), "--phase=launched")
+	assert.Contains(t, string(script), "--phase=stopped")
 	assert.Contains(t, string(script), "stop_agent_pulse")
 	assert.Contains(t, string(script), `kill -TERM "$agent_pulse_pid"`)
-	stopIndex := strings.Index(string(script), "stop_agent_pulse\ntrap - EXIT")
+	stopIndex := strings.Index(string(script), "record_agent_stopped \"$status\"\nstop_agent_pulse")
 	diagnosticIndex := strings.Index(string(script), "Agent exited with status")
 	require.GreaterOrEqual(t, stopIndex, 0)
 	require.GreaterOrEqual(t, diagnosticIndex, 0)
@@ -319,6 +330,9 @@ func TestAgentLauncherPulseMatchesForegroundAgentLifetime(t *testing.T) {
 
 	require.NoError(t, os.WriteFile(pulsePath, []byte(`#!/bin/bash
 marker="${AGENT_PULSE_MARKER:?}"
+if [[ "$*" == *"process-state"* ]]; then
+  exit 0
+fi
 cleanup() {
   rm -f "$marker"
 }

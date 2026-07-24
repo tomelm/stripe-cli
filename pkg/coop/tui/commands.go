@@ -33,11 +33,14 @@ func (m Model) checkForUpdates() tea.Cmd {
 		}
 		age, err := store.HeartbeatAge(sessionID)
 		pulseAge, pulseErr := store.AgentProcessPulseAge(sessionID)
+		process, processErr := store.AgentProcessLifecycle(sessionID)
 		return noUpdateMsg{
-			heartbeatAge:  age,
-			heartbeatOK:   err == nil,
-			agentPulseAge: pulseAge,
-			agentPulseOK:  pulseErr == nil,
+			heartbeatAge:       age,
+			heartbeatOK:        err == nil,
+			agentPulseAge:      pulseAge,
+			agentPulseOK:       pulseErr == nil,
+			agentProcess:       process,
+			agentProcessReadOK: processErr == nil,
 		}
 	}
 }

@@ -68,8 +68,9 @@ type Model struct {
 	existingSessionIDs map[string]bool
 	lastUpdateTime     time.Time
 	agentIsIdle        bool
-	agentPulseSeen     bool
 	agentProcessActive bool
+	agentProcess       *coop.AgentProcessLifecycle
+	agentProcessRead   bool
 	observer           ObserverController
 
 	isDark bool
@@ -191,7 +192,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.checkForUpdates(), tickCmd())
 
 	case noUpdateMsg:
-		m.updateAgentProcessPulse(msg.agentPulseAge, msg.agentPulseOK)
+		m.updateAgentProcessPresence(
+			msg.agentProcess,
+			msg.agentProcessReadOK,
+			msg.agentPulseAge,
+			msg.agentPulseOK,
+		)
 		m.updateAgentIdle(msg.heartbeatAge, msg.heartbeatOK, time.Now())
 		return m, nil
 
@@ -410,8 +416,9 @@ func (m *Model) resetSessionViewState() {
 	m.clearRejectionState()
 	m.clearStatus()
 	m.clearSDKSnippetState()
-	m.agentPulseSeen = false
 	m.agentProcessActive = false
+	m.agentProcess = nil
+	m.agentProcessRead = false
 	m.agentIsIdle = false
 }
 
@@ -916,11 +923,7 @@ func (m *Model) handleConfirm() tea.Cmd {
 		m.selectNode(target.nodeNumbers[0] - 1)
 	}
 	m.userMoved = false
-	if readiness.Incomplete {
-		m.setStatus("Confirmed with limited automatic coverage. Agent can continue.", 5*time.Second)
-	} else {
-		m.setStatus("Confirmed. Agent can continue.", 5*time.Second)
-	}
+	m.setStatus(m.confirmationStatus(readiness.Incomplete), 5*time.Second)
 	m.clearRejectionState()
 	if m.session.IsComplete() {
 		m.resetSelectionState()
@@ -1347,12 +1350,15 @@ func (m *Model) updateAgentIdle(heartbeatAge time.Duration, heartbeatOK bool, no
 		m.agentIsIdle = false
 		return
 	}
-	if m.agentProcessActive {
+	// A launcher lifecycle is more specific than the older await-review
+	// heartbeat heuristic. Its status is rendered directly in the header,
+	// including terminal state, so do not also show the generic idle warning.
+	if m.agentProcessRead && m.agentProcess != nil {
 		m.agentIsIdle = false
 		return
 	}
-	if m.agentPulseSeen {
-		m.agentIsIdle = true
+	if m.agentProcessActive {
+		m.agentIsIdle = false
 		return
 	}
 	if !heartbeatOK {
@@ -1370,16 +1376,77 @@ func (m *Model) updateAgentIdle(heartbeatAge time.Duration, heartbeatOK bool, no
 	m.agentIsIdle = now.Sub(m.lastUpdateTime) > 2*time.Minute
 }
 
-func (m *Model) updateAgentProcessPulse(age time.Duration, ok bool) {
-	if m.session == nil || m.session.IsComplete() {
-		m.agentProcessActive = false
+func (m *Model) updateAgentProcessPresence(
+	lifecycle *coop.AgentProcessLifecycle,
+	lifecycleOK bool,
+	pulseAge time.Duration,
+	pulseOK bool,
+) {
+	if !lifecycleOK {
+		// A corrupt/unreadable durable record must never leave a previously
+		// cached "running" claim alive after its renewable proof disappears.
+		m.agentProcessActive = m.agentProcess != nil &&
+			m.agentProcess.Phase == coop.AgentProcessRunning &&
+			pulseOK &&
+			pulseAge >= 0 &&
+			pulseAge < coop.AgentProcessPulseFreshFor
 		return
 	}
-	if !ok {
-		return
+	m.agentProcessRead = true
+	m.agentProcess = lifecycle
+	m.agentProcessActive = lifecycle != nil &&
+		lifecycle.Phase == coop.AgentProcessRunning &&
+		pulseOK &&
+		pulseAge >= 0 &&
+		pulseAge < coop.AgentProcessPulseFreshFor
+}
+
+func (m Model) agentProcessStatusLabel(now time.Time) string {
+	if !m.agentProcessRead {
+		return ""
 	}
-	if age >= 0 {
-		m.agentPulseSeen = true
+	if m.agentProcess == nil {
+		return "agent status unknown"
 	}
-	m.agentProcessActive = age >= 0 && age < coop.AgentProcessPulseFreshFor
+	switch m.agentProcess.Phase {
+	case coop.AgentProcessLaunched:
+		if !m.agentProcess.UpdatedAt.IsZero() &&
+			now.Sub(m.agentProcess.UpdatedAt) < coop.AgentProcessPulseFreshFor {
+			return "agent starting"
+		}
+		return "agent status unknown"
+	case coop.AgentProcessRunning:
+		if m.agentProcessActive {
+			return "agent running"
+		}
+		return "agent status unknown"
+	case coop.AgentProcessStopped:
+		if m.agentProcess.ExitStatus != nil {
+			return fmt.Sprintf("agent stopped (exit %d)", *m.agentProcess.ExitStatus)
+		}
+		return "agent stopped"
+	default:
+		return "agent status unknown"
+	}
+}
+
+func (m Model) agentProcessStopped() bool {
+	return m.agentProcessRead &&
+		m.agentProcess != nil &&
+		m.agentProcess.Phase == coop.AgentProcessStopped
+}
+
+func (m Model) confirmationStatus(incomplete bool) string {
+	message := "Confirmed."
+	if incomplete {
+		message = "Confirmed with limited automatic coverage."
+	}
+	switch {
+	case m.agentProcessStopped():
+		return message + " The agent is stopped; check its pane to continue."
+	case m.agentProcessActive:
+		return message + " Agent can continue."
+	default:
+		return message
+	}
 }

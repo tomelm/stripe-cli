@@ -874,9 +874,11 @@ func TestCheckForUpdatesNoChangeReturnsNoUpdate(t *testing.T) {
 	stored, err := store.Read(m.session.ID)
 	require.NoError(t, err)
 	m.lastVersion = stored.Version
+	require.NoError(t, store.StartAgentProcess(m.session.ID, "tui-launch"))
 	releasePulse, err := store.AcquireAgentProcessPulse(m.session.ID)
 	require.NoError(t, err)
 	defer releasePulse()
+	require.NoError(t, store.MarkAgentProcessRunning(m.session.ID, "tui-launch"))
 
 	cmd := m.checkForUpdates()
 	require.NotNil(t, cmd)
@@ -887,6 +889,9 @@ func TestCheckForUpdatesNoChangeReturnsNoUpdate(t *testing.T) {
 	assert.True(t, noUpdate.agentPulseOK)
 	assert.GreaterOrEqual(t, noUpdate.agentPulseAge, time.Duration(0))
 	assert.Less(t, noUpdate.agentPulseAge, coop.AgentProcessPulseFreshFor)
+	require.NotNil(t, noUpdate.agentProcess)
+	assert.True(t, noUpdate.agentProcessReadOK)
+	assert.Equal(t, coop.AgentProcessRunning, noUpdate.agentProcess.Phase)
 }
 
 func TestDiscoverNewSessionNoChangeReturnsNoUpdate(t *testing.T) {
@@ -1439,24 +1444,83 @@ func TestNoUpdateMsgRefreshesCachedAgentIdle(t *testing.T) {
 	assert.True(t, updated.agentIdle())
 }
 
-func TestAgentProcessPulseMakesRunningAndStoppedStateVisible(t *testing.T) {
+func TestAgentProcessLifecycleMakesRunningAndStoppedStateVisible(t *testing.T) {
 	m := readyModel()
 	m.lastUpdateTime = time.Now().Add(-3 * time.Minute)
+	now := time.Now().UTC()
 
-	m.updateAgentProcessPulse(time.Second, true)
+	m.updateAgentProcessPresence(&coop.AgentProcessLifecycle{
+		LaunchID:   "visible-launch",
+		Phase:      coop.AgentProcessRunning,
+		LaunchedAt: now,
+		UpdatedAt:  now,
+	}, true, time.Second, true)
 	m.updateAgentIdle(10*time.Second, true, time.Now())
 
-	assert.True(t, m.agentPulseSeen)
 	assert.True(t, m.agentProcessActive)
 	assert.False(t, m.agentIdle())
 	assertContainsPlain(t, m.renderHeader(), "agent running")
 
-	m.updateAgentProcessPulse(-1, true)
+	status := 9
+	stoppedAt := now.Add(time.Second)
+	m.updateAgentProcessPresence(&coop.AgentProcessLifecycle{
+		LaunchID:   "visible-launch",
+		Phase:      coop.AgentProcessStopped,
+		LaunchedAt: now,
+		UpdatedAt:  stoppedAt,
+		ExitStatus: &status,
+	}, true, -1, true)
 	m.updateAgentIdle(time.Second, true, time.Now())
 
 	assert.False(t, m.agentProcessActive)
-	assert.True(t, m.agentIdle())
-	assertContainsPlain(t, m.renderFooter(), "Agent stopped")
+	assert.False(t, m.agentIdle())
+	assertContainsPlain(t, m.renderHeader(), "agent stopped (exit 9)")
+	assertContainsPlain(t, m.confirmationStatus(false), "agent is stopped")
+	assertNotContainsPlain(t, m.confirmationStatus(false), "Agent can continue")
+
+	m.width = 24
+	assertContainsPlain(t, m.renderHeader(), "agent stopped (exit 9)")
+}
+
+func TestAgentProcessLifecycleNeverInfersRunningWithoutFreshPulse(t *testing.T) {
+	m := readyModel()
+	now := time.Now().UTC()
+
+	m.updateAgentProcessPresence(&coop.AgentProcessLifecycle{
+		LaunchID:   "stale-launch",
+		Phase:      coop.AgentProcessRunning,
+		LaunchedAt: now,
+		UpdatedAt:  now,
+	}, true, -1, true)
+
+	assert.False(t, m.agentProcessActive)
+	assertContainsPlain(t, m.renderHeader(), "agent status unknown")
+	assertNotContainsPlain(t, m.renderHeader(), "agent running")
+	assert.Equal(t, "Confirmed.", m.confirmationStatus(false))
+}
+
+func TestAgentProcessLifecycleReadFailureCannotKeepStaleRunningClaim(t *testing.T) {
+	m := readyModel()
+	now := time.Now().UTC()
+	m.updateAgentProcessPresence(&coop.AgentProcessLifecycle{
+		LaunchID:   "cached-launch",
+		Phase:      coop.AgentProcessRunning,
+		LaunchedAt: now,
+		UpdatedAt:  now,
+	}, true, time.Second, true)
+	require.True(t, m.agentProcessActive)
+
+	m.updateAgentProcessPresence(nil, false, -1, true)
+
+	assert.False(t, m.agentProcessActive)
+	assertContainsPlain(t, m.renderHeader(), "agent status unknown")
+}
+
+func TestAgentProcessLifecycleNoRecordIsExplicitlyUnknownAfterPoll(t *testing.T) {
+	m := readyModel()
+	m.updateAgentProcessPresence(nil, true, -1, true)
+
+	assertContainsPlain(t, m.renderHeader(), "agent status unknown")
 }
 
 func TestResizeViewportOnSessionUpdate(t *testing.T) {

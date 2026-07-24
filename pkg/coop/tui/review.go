@@ -21,9 +21,6 @@ func (m Model) renderFooter() string {
 
 	if m.agentIdle() {
 		message := "Waiting for agent: no recent updates. Reconnect: stripe coop status"
-		if m.agentPulseSeen {
-			message = "Agent stopped. Review the agent pane or restart Co-op."
-		}
 		lines = append(lines, m.theme.AttentionStyle.Render("  "+message))
 	}
 

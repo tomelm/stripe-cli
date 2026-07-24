@@ -103,12 +103,14 @@ func TestAgentProcessPulseCommandOwnsDistinctLeaseUntilCanceled(t *testing.T) {
 	session := &coop.Session{ID: "agent_process_pulse", Status: coop.SessionActive}
 	require.NoError(t, store.Write(session))
 	require.NoError(t, store.WriteHeartbeat(session.ID))
+	require.NoError(t, store.StartAgentProcess(session.ID, "command-launch"))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := newCoopAgentProcessPulseCmd().cmd
 	require.True(t, cmd.Hidden)
 	cmd.SetArgs([]string{
 		"--session", session.ID,
+		"--launch-id", "command-launch",
 		"--owner-pid", strconv.Itoa(os.Getppid()),
 	})
 	done := make(chan error, 1)
@@ -130,11 +132,54 @@ func TestAgentProcessPulseCommandOwnsDistinctLeaseUntilCanceled(t *testing.T) {
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, heartbeatAge, time.Duration(0),
 		"the process pulse command must not remove await-review's heartbeat")
+	lifecycle, err := store.AgentProcessLifecycle(session.ID)
+	require.NoError(t, err)
+	require.NotNil(t, lifecycle)
+	assert.Equal(t, coop.AgentProcessStopped, lifecycle.Phase)
+}
+
+func TestAgentProcessStateCommandPersistsFastExit(t *testing.T) {
+	previousOptions := options
+	configDir := t.TempDir()
+	options = Options{ConfigFolder: func() string { return configDir }}
+	t.Cleanup(func() { options = previousOptions })
+
+	store, err := coop.NewStore(configDir)
+	require.NoError(t, err)
+	session := &coop.Session{ID: "agent_process_state", Status: coop.SessionActive}
+	require.NoError(t, store.Write(session))
+
+	launched := newCoopAgentProcessStateCmd().cmd
+	require.True(t, launched.Hidden)
+	launched.SetArgs([]string{
+		"--session", session.ID,
+		"--launch-id", "fast-launch",
+		"--phase", "launched",
+	})
+	require.NoError(t, launched.Execute())
+
+	stopped := newCoopAgentProcessStateCmd().cmd
+	stopped.SetArgs([]string{
+		"--session", session.ID,
+		"--launch-id", "fast-launch",
+		"--phase", "stopped",
+		"--exit-status", "42",
+	})
+	require.NoError(t, stopped.Execute())
+
+	lifecycle, err := store.AgentProcessLifecycle(session.ID)
+	require.NoError(t, err)
+	require.NotNil(t, lifecycle)
+	assert.Equal(t, coop.AgentProcessStopped, lifecycle.Phase)
+	require.NotNil(t, lifecycle.ExitStatus)
+	assert.Equal(t, 42, *lifecycle.ExitStatus)
 }
 
 func TestRunAgentProcessPulseStopsWhenLauncherOwnerChanges(t *testing.T) {
 	store, err := coop.NewStoreAt(t.TempDir())
 	require.NoError(t, err)
+	require.NoError(t, store.Write(&coop.Session{ID: "owner_change", Status: coop.SessionActive}))
+	require.NoError(t, store.StartAgentProcess("owner_change", "owner-launch"))
 
 	const ownerPID = 4242
 	var parent atomic.Int64
@@ -145,6 +190,7 @@ func TestRunAgentProcessPulseStopsWhenLauncherOwnerChanges(t *testing.T) {
 			context.Background(),
 			store,
 			"owner_change",
+			"owner-launch",
 			ownerPID,
 			func() int { return int(parent.Load()) },
 			time.Millisecond,
@@ -160,6 +206,10 @@ func TestRunAgentProcessPulseStopsWhenLauncherOwnerChanges(t *testing.T) {
 	age, err := store.AgentProcessPulseAge("owner_change")
 	require.NoError(t, err)
 	assert.Equal(t, time.Duration(-1), age)
+	lifecycle, err := store.AgentProcessLifecycle("owner_change")
+	require.NoError(t, err)
+	require.NotNil(t, lifecycle)
+	assert.Equal(t, coop.AgentProcessStopped, lifecycle.Phase)
 }
 
 func TestRunAgentProcessPulseRejectsDetachedOwner(t *testing.T) {
@@ -170,6 +220,7 @@ func TestRunAgentProcessPulseRejectsDetachedOwner(t *testing.T) {
 		context.Background(),
 		store,
 		"detached",
+		"detached-launch",
 		4242,
 		func() int { return 1 },
 		time.Millisecond,

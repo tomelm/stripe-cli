@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -57,12 +58,9 @@ func (m Model) renderHeader() string {
 	}
 
 	left := m.theme.HeaderStyle.Render("● Stripe Co-op")
-	right := m.session.Blueprint
+	context := m.session.Blueprint
 	if lang, ok := m.session.Settings["language"]; ok {
-		right += " · " + lang
-	}
-	if m.agentProcessActive {
-		right += " · agent running"
+		context += " · " + lang
 	}
 
 	summary := m.session.NodeSummary()
@@ -74,7 +72,13 @@ func (m Model) renderHeader() string {
 	if skipped > 0 {
 		progress += fmt.Sprintf(" · %d skipped", skipped)
 	}
-	rightPart := m.theme.MutedStyle.Render(right + " · " + progress)
+	// Process presence comes first when the header wraps. This keeps the most
+	// actionable diagnostic visible even when tmux gives the TUI a narrow pane.
+	right := context + " · " + progress
+	if process := m.agentProcessStatusLabel(time.Now()); process != "" {
+		right = process + " · " + right
+	}
+	rightPart := m.theme.MutedStyle.Render(right)
 
 	available := m.contentWidth()
 	var header string

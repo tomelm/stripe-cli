@@ -40,6 +40,9 @@ type coopAgentActionCmd struct {
 	action    string
 	target    string
 	ownerPID  int
+	launchID  string
+	phase     string
+	exitCode  int
 }
 
 func newCoopAgentCmd() *coopAgentCmd {
@@ -54,6 +57,7 @@ func newCoopAgentCmd() *coopAgentCmd {
 	ac.cmd.AddCommand(newCoopAgentReportCheckCmd().cmd)
 	ac.cmd.AddCommand(newCoopAgentSkipCmd().cmd)
 	ac.cmd.AddCommand(newCoopAgentAwaitReviewCmd().cmd)
+	ac.cmd.AddCommand(newCoopAgentProcessStateCmd().cmd)
 	ac.cmd.AddCommand(newCoopAgentProcessPulseCmd().cmd)
 	ac.cmd.AddCommand(newCoopAgentNextActionCmd().cmd)
 	ac.cmd.AddCommand(newCoopAgentStartFollowupCmd().cmd)
@@ -175,6 +179,45 @@ func newCoopAgentAwaitReviewCmd() *coopAgentActionCmd {
 
 const agentProcessOwnerPollInterval = 250 * time.Millisecond
 
+func newCoopAgentProcessStateCmd() *coopAgentActionCmd {
+	c := &coopAgentActionCmd{exitCode: -1}
+	c.cmd = &cobra.Command{
+		Use:    "process-state",
+		Short:  "Record launched agent process state",
+		Hidden: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := coop.NewStore(coopConfigFolder())
+			if err != nil {
+				return err
+			}
+			switch coop.AgentProcessPhase(c.phase) {
+			case coop.AgentProcessLaunched:
+				return store.StartAgentProcess(c.session, c.launchID)
+			case coop.AgentProcessStopped:
+				var status *int
+				if c.exitCode >= 0 {
+					status = &c.exitCode
+				}
+				return store.StopAgentProcess(
+					c.session,
+					c.launchID,
+					status,
+				)
+			default:
+				return fmt.Errorf("--phase must be %q or %q", coop.AgentProcessLaunched, coop.AgentProcessStopped)
+			}
+		},
+	}
+	c.cmd.Flags().StringVar(&c.session, "session", "", "Session ID")
+	c.cmd.Flags().StringVar(&c.launchID, "launch-id", "", "Unique launcher invocation ID")
+	c.cmd.Flags().StringVar(&c.phase, "phase", "", "Lifecycle phase")
+	c.cmd.Flags().IntVar(&c.exitCode, "exit-status", -1, "Agent process exit status")
+	mustMarkFlagRequired(c.cmd, "session")
+	mustMarkFlagRequired(c.cmd, "launch-id")
+	mustMarkFlagRequired(c.cmd, "phase")
+	return c
+}
+
 func newCoopAgentProcessPulseCmd() *coopAgentActionCmd {
 	c := &coopAgentActionCmd{}
 	c.cmd = &cobra.Command{
@@ -195,6 +238,7 @@ func newCoopAgentProcessPulseCmd() *coopAgentActionCmd {
 				ctx,
 				store,
 				c.session,
+				c.launchID,
 				c.ownerPID,
 				os.Getppid,
 				agentProcessOwnerPollInterval,
@@ -202,8 +246,10 @@ func newCoopAgentProcessPulseCmd() *coopAgentActionCmd {
 		},
 	}
 	c.cmd.Flags().StringVar(&c.session, "session", "", "Session ID")
+	c.cmd.Flags().StringVar(&c.launchID, "launch-id", "", "Unique launcher invocation ID")
 	c.cmd.Flags().IntVar(&c.ownerPID, "owner-pid", 0, "Agent launcher process ID")
 	mustMarkFlagRequired(c.cmd, "session")
+	mustMarkFlagRequired(c.cmd, "launch-id")
 	mustMarkFlagRequired(c.cmd, "owner-pid")
 	return c
 }
@@ -212,6 +258,7 @@ func runAgentProcessPulse(
 	ctx context.Context,
 	store *coop.Store,
 	sessionID string,
+	launchID string,
 	ownerPID int,
 	parentPID func() int,
 	pollEvery time.Duration,
@@ -229,7 +276,17 @@ func runAgentProcessPulse(
 	if err != nil {
 		return err
 	}
-	defer release()
+	if err := store.MarkAgentProcessRunning(sessionID, launchID); err != nil {
+		release()
+		return err
+	}
+	defer func() {
+		// The launcher normally records a useful exit status before stopping
+		// this pulse. If it crashes, this fallback turns a stale "running"
+		// record into an honest terminal state. Duplicate stops are idempotent.
+		_ = store.StopAgentProcess(sessionID, launchID, nil)
+		release()
+	}()
 
 	ticker := time.NewTicker(pollEvery)
 	defer ticker.Stop()

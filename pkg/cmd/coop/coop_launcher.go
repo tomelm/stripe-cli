@@ -140,11 +140,19 @@ func (rc *coopRunCmd) buildAgentCmd(
 		}
 	}
 
-	pulseStart := ""
-	pulseStop := ""
+	processStart := ""
+	processStop := ""
 	if sessionID != "" {
-		pulseStart = fmt.Sprintf(`
+		launchID := uuid.New().String()
+		processStart = fmt.Sprintf(`
 agent_pulse_pid=
+agent_stop_recorded=
+record_agent_stopped() {
+  local exit_status="$1"
+  if %s coop agent process-state --session=%s --launch-id=%s --phase=stopped --exit-status="$exit_status" >/dev/null 2>&1; then
+    agent_stop_recorded=1
+  fi
+}
 stop_agent_pulse() {
   if [[ -z "${agent_pulse_pid:-}" ]]; then
     return
@@ -155,17 +163,45 @@ stop_agent_pulse() {
   wait "$agent_pulse_pid" 2>/dev/null || true
   agent_pulse_pid=
 }
-stop_agent_launcher() {
-  trap - EXIT HUP INT TERM
+finish_agent_launcher() {
+  local exit_status=$?
+  trap - EXIT
+  if [[ -z "${agent_stop_recorded:-}" ]]; then
+    record_agent_stopped "$exit_status"
+  fi
   stop_agent_pulse
-  exit 1
+  exit "$exit_status"
 }
-trap stop_agent_pulse EXIT
-trap stop_agent_launcher HUP INT TERM
-%s coop agent process-pulse --session=%s --owner-pid="$$" >/dev/null &
+interrupt_agent_launcher() {
+  local exit_status="$1"
+  trap - EXIT HUP INT TERM
+  record_agent_stopped "$exit_status"
+  stop_agent_pulse
+  exit "$exit_status"
+}
+trap finish_agent_launcher EXIT
+trap 'interrupt_agent_launcher 129' HUP
+trap 'interrupt_agent_launcher 130' INT
+trap 'interrupt_agent_launcher 143' TERM
+if ! %s coop agent process-state --session=%s --launch-id=%s --phase=launched >/dev/null; then
+  printf 'Could not register the agent process for this Co-op session.\n' >&2
+  exit 1
+fi
+%s coop agent process-pulse --session=%s --launch-id=%s --owner-pid="$$" >/dev/null 2>&1 &
 agent_pulse_pid=$!
-`, shellQuote(stripeBin), shellQuote(sessionID))
-		pulseStop = `
+`,
+			shellQuote(stripeBin),
+			shellQuote(sessionID),
+			shellQuote(launchID),
+			shellQuote(stripeBin),
+			shellQuote(sessionID),
+			shellQuote(launchID),
+			shellQuote(stripeBin),
+			shellQuote(sessionID),
+			shellQuote(launchID),
+		)
+		processStop = `
+record_agent_stopped "$status"
 stop_agent_pulse
 trap - EXIT HUP INT TERM
 `
@@ -191,10 +227,10 @@ exit "$status"
 		shellQuote(promptPath),
 		shellQuote(promptPath),
 		shellQuote(launcherPath),
-		pulseStart,
+		processStart,
 		shellQuote(agent.path),
 		flags,
-		pulseStop,
+		processStop,
 	)
 
 	if err := os.WriteFile(launcherPath, []byte(script), 0700); err != nil {
