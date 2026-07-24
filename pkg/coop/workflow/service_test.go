@@ -435,6 +435,7 @@ func TestMultipleFailuresCreateBoundedCorrectionAttempt(t *testing.T) {
 func TestRequestChangesMovesReviewNodeBackToActive(t *testing.T) {
 	store, session := workflowTestStore(t)
 	service := newPassingWorkflowService(store)
+	const feedback = "Keep signature verification intact.\nAdd duplicate-event coverage."
 
 	started, err := service.StartWork(session.ID, 1, "First")
 	require.NoError(t, err)
@@ -442,14 +443,46 @@ func TestRequestChangesMovesReviewNodeBackToActive(t *testing.T) {
 	require.NoError(t, err)
 	_, err = service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
 	require.NoError(t, err)
-	updated, err := service.RequestChangesAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, "Needs tests")
+	updated, err := service.RequestChangesAttempts(session.ID, []AttemptRef{{Node: 1, Attempt: started.Attempt}}, feedback)
 	require.NoError(t, err)
 	node, err := updated.NodeByNumber(1)
 	require.NoError(t, err)
 	assert.Equal(t, coop.NodeActive, node.State)
-	assert.Equal(t, "Needs tests", node.RejectionNote)
+	assert.Equal(t, feedback, node.RejectionNote)
+	require.Len(t, node.Attempts, 2)
+	assert.Equal(t, coop.AttemptHumanChanges, node.Attempts[0].EndReason)
 	require.NotNil(t, node.CurrentAttempt())
+	assert.Equal(t, feedback, node.CurrentAttempt().Feedback)
 	assert.Nil(t, node.CurrentAttempt().Implementation)
+}
+
+func TestRequestChangesRejectsOversizedFeedbackWithoutMutatingAttempt(t *testing.T) {
+	store, session := workflowTestStore(t)
+	service := newPassingWorkflowService(store)
+
+	started, err := service.StartWork(session.ID, 1, "First")
+	require.NoError(t, err)
+	_, err = service.ReportWorkAttempt(context.Background(), session.ID, 1, started.Attempt, ReportWorkInput{File: "server.go", Note: "Implemented node"})
+	require.NoError(t, err)
+	_, err = service.Reevaluate(context.Background(), session.ID, 1, started.Attempt, TriggerPoll)
+	require.NoError(t, err)
+
+	_, err = service.RequestChangesAttempts(
+		session.ID,
+		[]AttemptRef{{Node: 1, Attempt: started.Attempt}},
+		strings.Repeat("a", coop.MaxAttemptFeedbackBytes+1),
+	)
+	require.ErrorContains(t, err, "exceeds 4096 bytes")
+
+	loaded, err := store.Read(session.ID)
+	require.NoError(t, err)
+	node, err := loaded.NodeByNumber(1)
+	require.NoError(t, err)
+	assert.Equal(t, coop.NodeReview, node.State)
+	require.Len(t, node.Attempts, 1)
+	assert.Equal(t, started.Attempt, node.CurrentAttempt().Number)
+	assert.Nil(t, node.CurrentAttempt().EndedAt)
+	assert.Empty(t, node.RejectionNote)
 }
 
 func TestRequestChangesRequiresReviewWithoutMutatingActiveAttempt(t *testing.T) {

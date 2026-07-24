@@ -38,6 +38,41 @@ func TestNodeAttemptLifecycleRetainsHistory(t *testing.T) {
 	assert.Equal(t, "fixing feedback", node.Attempts[1].Feedback)
 }
 
+func TestSessionFeedbackAllowsLineFeedsWithoutRelaxingOtherSessionText(t *testing.T) {
+	const feedback = "Keep signature verification intact.\nAdd duplicate-event coverage."
+
+	require.NoError(t, ValidateSessionFeedback("feedback", feedback, MaxAttemptFeedbackBytes))
+	require.ErrorContains(t, ValidateSessionText("ordinary text", feedback, MaxAttemptFeedbackBytes), "control characters")
+
+	for _, unsafe := range []string{
+		"first line\rsecond line",
+		"first line\tsecond line",
+		"first line\x1b[31msecond line",
+		"first line\u0085second line",
+	} {
+		err := ValidateSessionFeedback("feedback", unsafe, MaxAttemptFeedbackBytes)
+		require.ErrorContains(t, err, "control characters")
+	}
+
+	oversized := strings.Repeat("a", MaxAttemptFeedbackBytes+1)
+	require.ErrorContains(t, ValidateSessionFeedback("feedback", oversized, MaxAttemptFeedbackBytes), "exceeds 4096 bytes")
+}
+
+func TestStartAttemptPreservesMultilineFeedbackAndRejectsOversizedFeedback(t *testing.T) {
+	now := time.Now().UTC()
+	const feedback = "Keep signature verification intact.\nAdd duplicate-event coverage."
+	node := testSessionNode("node", "Node", NodeActive)
+
+	attempt, err := node.StartAttempt(now, feedback)
+	require.NoError(t, err)
+	assert.Equal(t, feedback, attempt.Feedback)
+
+	empty := testSessionNode("node", "Node", NodeActive)
+	_, err = empty.StartAttempt(now, strings.Repeat("a", MaxAttemptFeedbackBytes+1))
+	require.ErrorContains(t, err, "exceeds 4096 bytes")
+	assert.Empty(t, empty.Attempts)
+}
+
 func TestAttemptMutationRejectsTerminalControlsWithoutPartialWrites(t *testing.T) {
 	now := time.Now().UTC()
 	unsafe := "visible\x1b[31mhidden"

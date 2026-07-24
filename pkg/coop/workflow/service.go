@@ -517,7 +517,7 @@ func (s *Service) RequestChangesAttempts(sessionID string, refs []AttemptRef, no
 	if note == "" {
 		return nil, fmt.Errorf("request changes note is required")
 	}
-	if err := coop.ValidateSessionText("request changes note", note, coop.MaxAttemptFeedbackBytes); err != nil {
+	if err := coop.ValidateSessionFeedback("request changes note", note, coop.MaxAttemptFeedbackBytes); err != nil {
 		return nil, err
 	}
 	return s.store.Update(sessionID, func(session *coop.Session) error {

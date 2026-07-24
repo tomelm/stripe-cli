@@ -44,10 +44,23 @@ var validTransitions = map[NodeState][]NodeState{
 // terminal or returned as an agent command response. Control characters are
 // rejected at the mutation boundary rather than trusted to every presenter.
 func ValidateSessionText(label, value string, maxBytes int) error {
+	return validateSessionText(label, value, maxBytes, false)
+}
+
+// ValidateSessionFeedback applies the same persisted-text boundary while
+// permitting line feeds in human feedback. Other control characters remain
+// invalid so pasted terminal escapes cannot reach session presenters.
+func ValidateSessionFeedback(label, value string, maxBytes int) error {
+	return validateSessionText(label, value, maxBytes, true)
+}
+
+func validateSessionText(label, value string, maxBytes int, allowLineFeeds bool) error {
 	if maxBytes > 0 && len(value) > maxBytes {
 		return fmt.Errorf("%s exceeds %d bytes", label, maxBytes)
 	}
-	if strings.IndexFunc(value, unicode.IsControl) >= 0 {
+	if strings.IndexFunc(value, func(character rune) bool {
+		return unicode.IsControl(character) && !(allowLineFeeds && character == '\n')
+	}) >= 0 {
 		return fmt.Errorf("%s contains control characters", label)
 	}
 	return nil
@@ -93,7 +106,7 @@ func (node *SessionNode) StartAttempt(now time.Time, feedback string) (*NodeAtte
 		return nil, errors.New("attempt start time is required")
 	}
 	feedback = strings.TrimSpace(feedback)
-	if err := ValidateSessionText("attempt feedback", feedback, MaxAttemptFeedbackBytes); err != nil {
+	if err := ValidateSessionFeedback("attempt feedback", feedback, MaxAttemptFeedbackBytes); err != nil {
 		return nil, err
 	}
 	number := 1
