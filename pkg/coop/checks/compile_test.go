@@ -1,6 +1,7 @@
 package checks
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -457,13 +458,48 @@ func TestCompileRejectsMalformedMappedReference(t *testing.T) {
 	require.ErrorContains(t, err, "malformed node reference")
 }
 
+func TestCompileRejectsPlansBeyondEvaluationCapacity(t *testing.T) {
+	catalog := testCatalog(t)
+	t.Run("supported checks", func(t *testing.T) {
+		nodes := make([]coop.NodeDefinition, 0, maxCompiledTargets+1)
+		for index := 0; index <= maxCompiledTargets; index++ {
+			nodes = append(nodes, coop.NodeDefinition{
+				Type: coop.NodeAPIRequest,
+				Key:  fmt.Sprintf("customer-%d", index),
+				Request: &coop.APIRequest{
+					Method: "POST",
+					Path:   "/v1/customers",
+				},
+			})
+		}
+		_, err := CompileNodes(catalog, "oversized", nodes)
+		require.ErrorContains(t, err, "supported checks exceed the 8-check bound")
+	})
+
+	t.Run("possible results", func(t *testing.T) {
+		nodes := make([]coop.NodeDefinition, 0, maxCompiledResults+1)
+		for index := 0; index <= maxCompiledResults; index++ {
+			nodes = append(nodes, coop.NodeDefinition{
+				Type: coop.NodeAPIRequest,
+				Key:  fmt.Sprintf("unsupported-%d", index),
+				Request: &coop.APIRequest{
+					Method: "POST",
+					Path:   fmt.Sprintf("/v1/unsupported/%d", index),
+				},
+			})
+		}
+		_, err := CompileNodes(catalog, "oversized", nodes)
+		require.ErrorContains(t, err, "possible results exceed the 249-result bound")
+	})
+}
+
 func TestCompileAllEmbeddedBlueprints(t *testing.T) {
 	catalog := testCatalog(t)
 	blueprints, err := coop.ListBlueprintsWithMetadata()
 	require.NoError(t, err)
 	require.NotEmpty(t, blueprints)
 
-	var resources, states int
+	var resources, states, maxTargets int
 	for _, blueprint := range blueprints {
 		for _, step := range blueprint.Steps {
 			plan, compileErr := CompileNodes(catalog, step.Key, step.Nodes)
@@ -476,10 +512,12 @@ func TestCompileAllEmbeddedBlueprints(t *testing.T) {
 			}
 			resources += len(plan.Resources)
 			states += len(plan.States)
+			maxTargets = max(maxTargets, len(plan.Resources)+len(plan.States))
 		}
 	}
 	assert.Positive(t, resources)
 	assert.Positive(t, states)
+	assert.Equal(t, 5, maxTargets, "canonical growth should deliberately revisit the eight-check headroom")
 }
 
 func findPredicate(t *testing.T, predicates []Predicate, kind PredicateKind, field string) Predicate {

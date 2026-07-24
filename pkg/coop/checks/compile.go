@@ -12,6 +12,14 @@ import (
 	"github.com/stripe/stripe-cli/pkg/coop"
 )
 
+const (
+	// Canonical blueprints currently compile at most five supported checks in
+	// one step. Keep bounded headroom while rejecting plans the evaluator could
+	// not safely persist as one automatic snapshot.
+	maxCompiledTargets = 8
+	maxCompiledResults = maxCompiledTargets*(5+maxPredicates+maxEvidenceReads*(1+maxPredicates)) + 1
+)
+
 var nodeReferencePattern = regexp.MustCompile(`^\$\{node\.([^:}]+):([^}]+)\}$`)
 
 // CompileStep compiles the immutable node definitions stored on one session
@@ -72,7 +80,33 @@ func CompileNodes(catalog Catalog, stepKey string, nodes []coop.NodeDefinition) 
 		}
 	}
 
+	if err := validatePlanCapacity(compiler.plan); err != nil {
+		return StepPlan{}, fmt.Errorf("compiling step %q: %w", stepKey, err)
+	}
 	return compiler.plan, nil
+}
+
+func validatePlanCapacity(plan StepPlan) error {
+	targets := len(plan.Resources) + len(plan.States)
+	if targets > maxCompiledTargets {
+		return fmt.Errorf("%d supported checks exceed the %d-check bound", targets, maxCompiledTargets)
+	}
+	results := len(plan.CoverageGaps)
+	for _, resource := range plan.Resources {
+		// Existence, test mode, action window, optional observation window,
+		// and optional candidate attribution can each emit one result.
+		results += 5 + len(resource.Predicates)
+		for _, evidence := range resource.Evidence {
+			results += 1 + len(evidence.Predicates)
+		}
+	}
+	// State targets can emit existence, test mode, state, optional observation
+	// window, and optional candidate attribution results.
+	results += 5 * len(plan.States)
+	if results > maxCompiledResults {
+		return fmt.Errorf("%d possible results exceed the %d-result bound", results, maxCompiledResults)
+	}
+	return nil
 }
 
 type stepCompiler struct {

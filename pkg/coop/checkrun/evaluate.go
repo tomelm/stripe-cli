@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -19,14 +18,9 @@ import (
 )
 
 const (
-	MaxTargetsPerRun       = 8
-	MaxPredicatesPerTarget = 8
-	MaxTerminalPerTarget   = 8
-	MaxEvidencePerTarget   = 2
-	MaxResultsPerRun       = MaxTargetsPerRun*(5+MaxPredicatesPerTarget+MaxEvidencePerTarget*(1+MaxPredicatesPerTarget)) + 1
-	maxReadAttempts        = 2
-	evaluationTimeout      = 10 * time.Second
-	eventDiscoveryWindow   = 5 * time.Minute
+	maxReadAttempts      = 2
+	evaluationTimeout    = 10 * time.Second
+	eventDiscoveryWindow = 5 * time.Minute
 )
 
 type Input struct {
@@ -79,29 +73,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, input Input) ([]coop.CheckResu
 		attempt: attempt, step: step.Key, at: at, cache: map[string]objectRead{},
 		candidateSeen: map[string]bool{}}
 	targets := run.targets(input.Plan)
-	if len(targets) > MaxTargetsPerRun {
-		run.coverage(fmt.Sprintf("%d compiled checks exceeded the %d-target bound", len(targets), MaxTargetsPerRun))
-		targets = targets[:MaxTargetsPerRun]
-	}
 	for _, target := range targets {
-		if len(target.predicates) > MaxPredicatesPerTarget {
-			run.coverage("compiled predicates exceeded the per-target bound")
-			target.predicates = target.predicates[:MaxPredicatesPerTarget]
-		}
-		if len(target.terminalFailures) > MaxTerminalPerTarget {
-			run.coverage("terminal predicates exceeded the per-target bound")
-			target.terminalFailures = target.terminalFailures[:MaxTerminalPerTarget]
-		}
-		if len(target.evidence) > MaxEvidencePerTarget {
-			run.coverage("compiled evidence reads exceeded the per-target bound")
-			target.evidence = target.evidence[:MaxEvidencePerTarget]
-		}
-		for index := range target.evidence {
-			if len(target.evidence[index].Predicates) > MaxPredicatesPerTarget {
-				run.coverage("compiled evidence predicates exceeded the per-target bound")
-				target.evidence[index].Predicates = target.evidence[index].Predicates[:MaxPredicatesPerTarget]
-			}
-		}
 		run.evaluate(target)
 	}
 	run.finalizeCandidates()
@@ -144,7 +116,6 @@ type evaluation struct {
 	resultCandidates []string
 	candidates       []coop.ResourceBinding
 	candidateSeen    map[string]bool
-	covered          bool
 }
 
 func (run *evaluation) targets(plan checks.StepPlan) []target {
@@ -336,8 +307,8 @@ func (run *evaluation) handleInvalidBinding(target target) bool {
 }
 
 func (run *evaluation) readTarget(target target) (objectRead, bool) {
-	path, ok := retrievePath(target.path, target.id)
-	if !ok || run.evaluator.reader == nil {
+	path := retrievePath(target.path, target.id)
+	if run.evaluator.reader == nil {
 		run.add(target, "exists", coop.CheckUnavailable, "resource readable in the authorized test account", "read unavailable", "Make test-mode Stripe authentication available and try again.")
 		return objectRead{}, false
 	}
@@ -430,8 +401,8 @@ func (run *evaluation) evaluateEvidence(target target, parent map[string]any, ev
 			return
 		}
 	}
-	path, ok := retrievePath(evidence.RetrievePath, evidenceID)
-	if !ok || run.evaluator.reader == nil {
+	path := retrievePath(evidence.RetrievePath, evidenceID)
+	if run.evaluator.reader == nil {
 		run.add(target, evidenceSuffix(evidence.ID, "exists"), coop.CheckUnavailable,
 			"supporting Stripe evidence readable in the authorized test account", "read unavailable", evidence.Repair)
 		return
@@ -720,10 +691,7 @@ func (run *evaluation) bindingValue(reference *checks.BindingRef) (string, error
 		!coop.IsSafeStripeObjectID(binding.ID) || !hasPrefix(binding.ID, rule.IDPrefixes) {
 		return "", ErrUnavailable
 	}
-	path, ok := retrievePath(rule.Retrieve, binding.ID)
-	if !ok {
-		return "", ErrUnavailable
-	}
+	path := retrievePath(rule.Retrieve, binding.ID)
 	read := run.read(path)
 	if read.err != nil {
 		return "", read.err
@@ -766,19 +734,6 @@ func (run *evaluation) add(target target, suffix string, status coop.CheckStatus
 		key = candidateKey(target)
 	}
 	run.resultCandidates = append(run.resultCandidates, key)
-}
-
-func (run *evaluation) coverage(observed string) {
-	if run.covered || len(run.results) >= MaxResultsPerRun {
-		return
-	}
-	run.covered = true
-	run.results = append(run.results, coop.CheckResult{
-		ID: "checkrun.coverage", Kind: coop.CheckCoverage, Importance: coop.CheckRequired,
-		Status: coop.CheckUnavailable, Expected: "complete bounded coverage", Observed: bounded(observed),
-		Repair: "Narrow the compiled checks and run verification again.", UpdatedAt: run.at,
-	})
-	run.resultCandidates = append(run.resultCandidates, "")
 }
 
 // finalizeCandidates separates facts about an account-wide event candidate
@@ -923,12 +878,8 @@ func hasBindingRole(attempt *coop.NodeAttempt, role string) bool {
 	return false
 }
 
-func retrievePath(template, id string) (string, bool) {
-	if strings.Count(template, "{id}") != 1 {
-		return "", false
-	}
-	path := strings.Replace(template, "{id}", url.PathEscape(id), 1)
-	return path, validReadPath(path)
+func retrievePath(template, id string) string {
+	return strings.Replace(template, "{id}", id, 1)
 }
 
 func hasPrefix(id string, prefixes []string) bool {
