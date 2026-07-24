@@ -165,7 +165,7 @@ func TestAgentProcessPulseIsExclusiveOwnerSafeAndReadable(t *testing.T) {
 	secondRelease()
 }
 
-func TestAgentProcessPulseRenewsWithoutTouchingAwaitHeartbeat(t *testing.T) {
+func TestAgentProcessPulseRenews(t *testing.T) {
 	originalInterval := agentPulseLeaseHeartbeatInterval
 	agentPulseLeaseHeartbeatInterval = 5 * time.Millisecond
 	t.Cleanup(func() { agentPulseLeaseHeartbeatInterval = originalInterval })
@@ -173,7 +173,6 @@ func TestAgentProcessPulseRenewsWithoutTouchingAwaitHeartbeat(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewStoreAt(dir)
 	require.NoError(t, err)
-	require.NoError(t, store.WriteHeartbeat("session"))
 
 	release, err := store.AcquireAgentProcessPulse("session")
 	require.NoError(t, err)
@@ -187,19 +186,9 @@ func TestAgentProcessPulseRenewsWithoutTouchingAwaitHeartbeat(t *testing.T) {
 	}, time.Second, 5*time.Millisecond)
 
 	release()
-	heartbeatAge, err := store.HeartbeatAge("session")
-	require.NoError(t, err)
-	assert.GreaterOrEqual(t, heartbeatAge, time.Duration(0),
-		"releasing the agent pulse must not remove await-review's heartbeat")
-
-	release, err = store.AcquireAgentProcessPulse("session")
-	require.NoError(t, err)
-	require.NoError(t, store.RemoveHeartbeat("session"))
 	pulseAge, err := store.AgentProcessPulseAge("session")
 	require.NoError(t, err)
-	assert.GreaterOrEqual(t, pulseAge, time.Duration(0),
-		"removing await-review's heartbeat must not remove the agent pulse")
-	release()
+	assert.Equal(t, time.Duration(-1), pulseAge)
 }
 
 func TestAgentProcessPulseRejectsInvalidSessionID(t *testing.T) {
@@ -578,47 +567,6 @@ func TestStoreListIgnoresTmpFiles(t *testing.T) {
 	ids, err := store.List()
 	require.NoError(t, err)
 	assert.Equal(t, []string{"real"}, ids)
-}
-
-func TestStoreHeartbeatLifecycle(t *testing.T) {
-	dir := t.TempDir()
-	store, err := NewStoreAt(dir)
-	require.NoError(t, err)
-
-	require.NoError(t, store.Write(&Session{ID: "heartbeat", Status: SessionActive}))
-
-	age, err := store.HeartbeatAge("heartbeat")
-	require.NoError(t, err)
-	assert.Equal(t, time.Duration(-1), age)
-
-	require.NoError(t, store.WriteHeartbeat("heartbeat"))
-
-	age, err = store.HeartbeatAge("heartbeat")
-	require.NoError(t, err)
-	assert.GreaterOrEqual(t, age, time.Duration(0))
-	assert.Less(t, age, 2*time.Second)
-
-	require.NoError(t, store.RemoveHeartbeat("heartbeat"))
-
-	age, err = store.HeartbeatAge("heartbeat")
-	require.NoError(t, err)
-	assert.Equal(t, time.Duration(-1), age)
-}
-
-func TestStoreHeartbeatInvalidSessionID(t *testing.T) {
-	dir := t.TempDir()
-	store, err := NewStoreAt(dir)
-	require.NoError(t, err)
-
-	require.ErrorIs(t, store.WriteHeartbeat("../bad"), ErrInvalidSessionID)
-
-	_, err = store.HeartbeatAge("../bad")
-	require.ErrorIs(t, err, ErrInvalidSessionID)
-
-	require.ErrorIs(t, store.RemoveHeartbeat("../bad"), ErrInvalidSessionID)
-
-	_, err = os.Stat(filepath.Join(dir, "invalid.heartbeat"))
-	assert.True(t, errors.Is(err, os.ErrNotExist))
 }
 
 func TestLatestSessionSkipsCorruptNewest(t *testing.T) {

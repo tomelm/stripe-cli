@@ -66,8 +66,6 @@ type Model struct {
 	waiting            bool
 	waitingMessage     string
 	existingSessionIDs map[string]bool
-	lastUpdateTime     time.Time
-	agentIsIdle        bool
 	agentProcessActive bool
 	agentProcess       *coop.AgentProcessLifecycle
 	agentProcessRead   bool
@@ -200,7 +198,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			msg.agentPulseAge,
 			msg.agentPulseOK,
 		)
-		m.updateAgentIdle(msg.heartbeatAge, msg.heartbeatOK, time.Now())
 		return m, nil
 
 	case waitingBaselineMsg:
@@ -282,8 +279,6 @@ func (m Model) applySessionUpdate(msg sessionUpdatedMsg) (tea.Model, tea.Cmd) {
 	wasComplete := m.session != nil && m.session.IsComplete()
 	m.session = msg.session
 	m.lastVersion = msg.session.Version
-	m.lastUpdateTime = time.Now()
-	m.agentIsIdle = false
 
 	// Child session completed → return to parent with step marked done.
 	if !wasComplete && m.session.IsComplete() && m.session.ParentSessionID != "" {
@@ -397,11 +392,7 @@ func (m Model) progressBar() *tea.ProgressBar {
 		return tea.NewProgressBar(tea.ProgressBarNone, 0)
 	}
 	value := done * 100 / total
-	state := tea.ProgressBarDefault
-	if m.agentIdle() {
-		state = tea.ProgressBarWarning
-	}
-	return tea.NewProgressBar(state, value)
+	return tea.NewProgressBar(tea.ProgressBarDefault, value)
 }
 
 func (m Model) rejectionCursor(content string) *tea.Cursor {
@@ -444,7 +435,6 @@ func (m *Model) resetSessionViewState() {
 	m.agentProcessActive = false
 	m.agentProcess = nil
 	m.agentProcessRead = false
-	m.agentIsIdle = false
 }
 
 func (m *Model) resetSelectionState() {
@@ -1383,37 +1373,6 @@ func (m *Model) clearExpiredStatus(now time.Time) {
 		m.statusMessage = ""
 		m.statusExpiresAt = time.Time{}
 	}
-}
-
-func (m *Model) updateAgentIdle(heartbeatAge time.Duration, heartbeatOK bool, now time.Time) {
-	if m.session == nil || m.session.IsComplete() {
-		m.agentIsIdle = false
-		return
-	}
-	// A launcher lifecycle is more specific than the older await-review
-	// heartbeat heuristic. Its status is rendered directly in the header,
-	// including terminal state, so do not also show the generic idle warning.
-	if m.agentProcessRead && m.agentProcess != nil {
-		m.agentIsIdle = false
-		return
-	}
-	if m.agentProcessActive {
-		m.agentIsIdle = false
-		return
-	}
-	if !heartbeatOK {
-		m.agentIsIdle = false
-		return
-	}
-	if heartbeatAge >= 0 && heartbeatAge < 5*time.Second {
-		m.agentIsIdle = false
-		return
-	}
-	if m.lastUpdateTime.IsZero() {
-		m.agentIsIdle = false
-		return
-	}
-	m.agentIsIdle = now.Sub(m.lastUpdateTime) > 2*time.Minute
 }
 
 func (m *Model) updateAgentProcessPresence(

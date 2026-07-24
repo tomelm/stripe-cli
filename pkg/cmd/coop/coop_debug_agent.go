@@ -237,26 +237,19 @@ func (a *coopDebugAgent) awaitReview(ctx context.Context, step int) error {
 
 func (a *coopDebugAgent) awaitStepReview(ctx context.Context, stepIndex int) error {
 	for {
-		if err := a.store.WriteHeartbeat(a.sessionID); err != nil {
-			return err
-		}
 		if err := a.sleep(ctx, a.pollInterval); err != nil {
-			_ = a.store.RemoveHeartbeat(a.sessionID)
 			return err
 		}
 
 		session, err := a.store.Read(a.sessionID)
 		if err != nil {
-			_ = a.store.RemoveHeartbeat(a.sessionID)
 			return err
 		}
 		if active := session.FirstActiveNodeInStep(stepIndex); active > 0 {
-			_ = a.store.RemoveHeartbeat(a.sessionID)
 			a.logf("step requested changes; rerunning from step %d", active)
 			return nil
 		}
 		if !session.StepHasReview(stepIndex) {
-			_ = a.store.RemoveHeartbeat(a.sessionID)
 			a.logf("step review released")
 			return nil
 		}

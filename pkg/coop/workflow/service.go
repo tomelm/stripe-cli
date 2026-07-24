@@ -26,8 +26,6 @@ const (
 type Store interface {
 	Read(id string) (*coop.Session, error)
 	Update(id string, fn func(*coop.Session) error) (*coop.Session, error)
-	WriteHeartbeat(id string) error
-	RemoveHeartbeat(id string) error
 }
 
 type Service struct {
@@ -651,11 +649,6 @@ func (s *Service) AwaitReviewAttempt(ctx context.Context, sessionID string, node
 }
 
 func (s *Service) awaitAutomatic(ctx context.Context, sessionID string, nodeNumber, attemptNumber int) (coop.CommandResponse, error) {
-	if err := s.store.WriteHeartbeat(sessionID); err != nil {
-		return coop.CommandResponse{}, err
-	}
-	defer func() { _ = s.store.RemoveHeartbeat(sessionID) }()
-
 	deadline := s.now().Add(s.awaitTimeout)
 	evaluationSchedule := newAgentEvaluationSchedule(s.now(), s.evalInterval)
 	for {
@@ -663,9 +656,6 @@ func (s *Service) awaitAutomatic(ctx context.Context, sessionID string, nodeNumb
 			return coop.CommandResponse{}, err
 		}
 		s.sleep(s.evalInterval)
-		if err := s.store.WriteHeartbeat(sessionID); err != nil {
-			return coop.CommandResponse{}, err
-		}
 		if s.now().After(deadline) {
 			return timeoutResponseAttempt(sessionID, nodeNumber, attemptNumber, true), nil
 		}
@@ -720,13 +710,6 @@ func (s *Service) awaitAutomatic(ctx context.Context, sessionID string, nodeNumb
 }
 
 func (s *Service) awaitStepReview(ctx context.Context, sessionID, stepTitle string, stepIndex, nodeNumber, attemptNumber int) (coop.CommandResponse, error) {
-	if err := s.store.WriteHeartbeat(sessionID); err != nil {
-		return coop.CommandResponse{}, err
-	}
-	defer func() {
-		_ = s.store.RemoveHeartbeat(sessionID)
-	}()
-
 	deadline := s.now().Add(s.awaitTimeout)
 	evaluationSchedule := newAgentEvaluationSchedule(s.now(), s.evalInterval)
 	for {
@@ -737,9 +720,6 @@ func (s *Service) awaitStepReview(ctx context.Context, sessionID, stepTitle stri
 			return timeoutResponseAttempt(sessionID, nodeNumber, attemptNumber, false), nil
 		}
 		s.sleep(500 * time.Millisecond)
-		if err := s.store.WriteHeartbeat(sessionID); err != nil {
-			return coop.CommandResponse{}, err
-		}
 
 		session, err := s.store.Read(sessionID)
 		if err != nil {

@@ -177,7 +177,7 @@ func newCoopAgentAwaitReviewCmd() *coopAgentActionCmd {
 	return c
 }
 
-const agentProcessOwnerPollInterval = 250 * time.Millisecond
+const agentProcessOwnerPollInterval = time.Second
 
 func newCoopAgentProcessStateCmd() *coopAgentActionCmd {
 	c := &coopAgentActionCmd{exitCode: -1}

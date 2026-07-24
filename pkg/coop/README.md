@@ -150,13 +150,17 @@ Post-completion choices are written into the session file for the agent. Deploy 
 - A state rule proves the authoritative Stripe object's state, not that application webhook code received or processed the event. Handler-specific side effects remain agent/human evidence until a direct reusable rule can verify them.
 - Real `uiComponent` work requires a syntactically safe application URL. Co-op performs no reachability or authentication probe; the human opens and judges it. `dashboard` work remains human-owned without an app URL.
 
-## Heartbeat
+## Agent process presence
 
-When the agent runs `stripe coop agent await-review`, it writes a `.heartbeat` file every 500ms. The TUI checks this file:
-- **Fresh heartbeat (< 5s old):** Agent is actively waiting for confirmation
-- **No heartbeat + no session update in 2min:** Show idle warning
+Sessions launched by `stripe coop start` have one launcher-owned presence
+contract. A renewable process pulse proves that the foreground agent is still
+running, while a small durable lifecycle record preserves its terminal state
+and exit status. The TUI presents `starting`, `running`, or `stopped`; a stale
+pulse, unreadable record, or session joined without the launcher is reported as
+unknown rather than inferred from session activity.
 
-The heartbeat file is cleaned up when `await` exits.
+`await-review` is only the agent notification channel. It does not maintain a
+second heartbeat or make claims about the lifetime of the coding agent.
 
 ## Resuming
 
@@ -168,7 +172,7 @@ Use `stripe coop join --resume` to pick from recent sessions.
 |-------|------------|
 | Node is active | Rejoin the session and check the agent pane/TUI state |
 | Node or step is in review | Rejoin the session and confirm or request changes |
-| Agent appears idle | Rejoin the session; the TUI shows heartbeat/idle state |
+| Agent is stopped or its status is unknown | Check the agent pane, then rejoin the session if needed |
 | Need a specific older session | Run `stripe coop join --resume` |
 
 ## Blueprint Format
@@ -262,7 +266,8 @@ pkg/coop/
   observe/           — Bounded request/event normalization and attribution
   types.go          — Session, Node, Step types and constants
   session.go        — State machine, validation, queries
-  store.go          — Atomic file I/O, heartbeat, lock files, optimistic locking
+  store.go          — Atomic file I/O, renewable leases, locks, optimistic locking
+  agent_process.go  — Durable launcher lifecycle and process presence
   blueprint.go      — Blueprint type, embed loader, prefix matching
   guided_action.go  — In-code guided follow-up session model
   snippet.go        — SDK snippet fetcher (docs.stripe.com)

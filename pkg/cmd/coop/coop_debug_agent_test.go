@@ -85,7 +85,6 @@ func TestCoopDebugAgentRerunsRequestedChanges(t *testing.T) {
 		return node.State == coop.NodeReview && attempt != nil &&
 			attempt.AutomaticResultsAt != nil && !attempt.AutomaticCheckPending()
 	})
-	waitForDebugHeartbeat(t, store, session.ID)
 
 	service := workflow.NewService(store)
 	reviewed, err := store.Read(session.ID)
@@ -218,20 +217,4 @@ func waitForDebugSession(t *testing.T, store *coop.Store, sessionID string, pred
 	session, err := store.Read(sessionID)
 	require.NoError(t, err)
 	require.True(t, predicate(session), "session did not reach expected state: %+v", session)
-}
-
-func waitForDebugHeartbeat(t *testing.T, store *coop.Store, sessionID string) {
-	t.Helper()
-	deadline := time.Now().Add(debugAgentTestTimeout)
-	for time.Now().Before(deadline) {
-		age, err := store.HeartbeatAge(sessionID)
-		require.NoError(t, err)
-		if age >= 0 {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	age, err := store.HeartbeatAge(sessionID)
-	require.NoError(t, err)
-	require.True(t, age >= 0, "debug agent did not write heartbeat")
 }

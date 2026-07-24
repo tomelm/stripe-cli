@@ -165,7 +165,6 @@ func TestAgentProcessPulseCommandOwnsDistinctLeaseUntilCanceled(t *testing.T) {
 	require.NoError(t, err)
 	session := &coop.Session{ID: "agent_process_pulse", Status: coop.SessionActive}
 	require.NoError(t, store.Write(session))
-	require.NoError(t, store.WriteHeartbeat(session.ID))
 	require.NoError(t, store.StartAgentProcess(session.ID, "command-launch"))
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -191,10 +190,6 @@ func TestAgentProcessPulseCommandOwnsDistinctLeaseUntilCanceled(t *testing.T) {
 	age, err := store.AgentProcessPulseAge(session.ID)
 	require.NoError(t, err)
 	assert.Equal(t, time.Duration(-1), age)
-	heartbeatAge, err := store.HeartbeatAge(session.ID)
-	require.NoError(t, err)
-	assert.GreaterOrEqual(t, heartbeatAge, time.Duration(0),
-		"the process pulse command must not remove await-review's heartbeat")
 	lifecycle, err := store.AgentProcessLifecycle(session.ID)
 	require.NoError(t, err)
 	require.NotNil(t, lifecycle)

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/viewport"
@@ -136,7 +137,7 @@ func TestCompletionTransitionClearsTransientStatus(t *testing.T) {
 	m.height = 24
 	m.viewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(10))
 	m.statusMessage = "Waiting for agent to continue..."
-	m.statusExpiresAt = m.lastUpdateTime.Add(10)
+	m.statusExpiresAt = time.Now().Add(10 * time.Second)
 
 	next := completionLayoutModel().session
 	next.ID = m.session.ID

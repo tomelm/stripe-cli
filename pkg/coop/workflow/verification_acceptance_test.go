@@ -1599,23 +1599,34 @@ func TestVerificationAcceptanceAwaitWakesForHumanRejectionAndReusesCorrectionAtt
 		response coop.CommandResponse
 		err      error
 	}
-	waitForReview := func(attempt int) <-chan awaitResult {
+	waitEntered := make(chan chan struct{}, 1)
+	awaitService := NewService(
+		store,
+		WithEvaluator(evaluator),
+		WithAwaitTimeout(3*time.Second),
+		WithEvaluationInterval(time.Hour),
+		WithClock(time.Now, func(time.Duration) {
+			release := make(chan struct{})
+			waitEntered <- release
+			<-release
+		}),
+	)
+	waitForReview := func(attempt int) (<-chan awaitResult, chan struct{}) {
 		result := make(chan awaitResult, 1)
 		go func() {
-			response, awaitErr := service.AwaitReviewAttempt(context.Background(), session.ID, 1, attempt)
+			response, awaitErr := awaitService.AwaitReviewAttempt(context.Background(), session.ID, 1, attempt)
 			result <- awaitResult{response: response, err: awaitErr}
 		}()
-		return result
-	}
-	waitForHeartbeat := func() {
-		require.Eventually(t, func() bool {
-			age, heartbeatErr := store.HeartbeatAge(session.ID)
-			return heartbeatErr == nil && age >= 0 && age < time.Second
-		}, 2*time.Second, 10*time.Millisecond)
+		select {
+		case release := <-waitEntered:
+			return result, release
+		case <-time.After(2 * time.Second):
+			t.Fatal("await-review did not enter its wait loop")
+			return nil, nil
+		}
 	}
 
-	firstWait := waitForReview(started.Attempt)
-	waitForHeartbeat()
+	firstWait, releaseFirstWait := waitForReview(started.Attempt)
 	updated, err := service.RequestChangesAttempts(
 		session.ID,
 		[]AttemptRef{{Node: 1, Attempt: started.Attempt}},
@@ -1623,6 +1634,7 @@ func TestVerificationAcceptanceAwaitWakesForHumanRejectionAndReusesCorrectionAtt
 	)
 	require.NoError(t, err)
 	assert.Equal(t, 2, acceptanceNode(t, updated).CurrentAttempt().Number)
+	close(releaseFirstWait)
 
 	select {
 	case woken := <-firstWait:
@@ -1653,14 +1665,14 @@ func TestVerificationAcceptanceAwaitWakesForHumanRejectionAndReusesCorrectionAtt
 	_, err = service.Reevaluate(context.Background(), session.ID, 1, continued.Attempt, TriggerPoll)
 	require.NoError(t, err)
 
-	secondWait := waitForReview(continued.Attempt)
-	waitForHeartbeat()
+	secondWait, releaseSecondWait := waitForReview(continued.Attempt)
 	confirmed, err := service.ConfirmReviewAttempts(
 		session.ID,
 		[]AttemptRef{{Node: 1, Attempt: continued.Attempt}},
 	)
 	require.NoError(t, err)
 	assert.Equal(t, coop.SessionCompleted, confirmed.Status)
+	close(releaseSecondWait)
 
 	select {
 	case woken := <-secondWait:
@@ -1741,7 +1753,7 @@ func TestVerificationAcceptanceObserverPollsEveryOpenedUIAttempt(t *testing.T) {
 		"the observer must give every opened UI attempt a post-open evaluation")
 }
 
-func TestVerificationAcceptanceAwaitTimeoutReturnsExactRetryAndCleansHeartbeat(t *testing.T) {
+func TestVerificationAcceptanceAwaitTimeoutReturnsExactRetry(t *testing.T) {
 	store, session := newVerificationAcceptanceStore(t, coop.NodeUIComponent)
 	pending := requiredAcceptanceResult("state.checkout.complete", coop.CheckState, coop.CheckPending)
 	evaluator := &acceptanceEvaluator{evaluate: func(context.Context, EvaluationInput) (Evaluation, error) {
@@ -1774,9 +1786,6 @@ func TestVerificationAcceptanceAwaitTimeoutReturnsExactRetryAndCleansHeartbeat(t
 	)
 	assert.Equal(t, maxAgentAwaitEvaluations, len(evaluator.Inputs()),
 		"pending human review remains quietly open after its bounded direct-check budget")
-	age, heartbeatErr := store.HeartbeatAge(session.ID)
-	require.NoError(t, heartbeatErr)
-	assert.Equal(t, time.Duration(-1), age)
 }
 
 func TestVerificationAcceptanceReportPassesAndCompletesWithoutTUI(t *testing.T) {
@@ -1852,9 +1861,6 @@ func TestVerificationAcceptanceAwaitRerunsPendingAndWakesForFailureWithoutTUI(t 
 	assert.Equal(t, coop.CheckFailed, acceptanceResult(t, node.Attempts[0].Results, failed.ID).Status)
 	assert.Equal(t, 2, node.CurrentAttempt().Number)
 	assert.Contains(t, node.CurrentAttempt().Feedback, "expired")
-	age, heartbeatErr := store.HeartbeatAge(session.ID)
-	require.NoError(t, heartbeatErr)
-	assert.Equal(t, time.Duration(-1), age)
 }
 
 func TestVerificationAcceptanceAwaitBoundsPendingReadsAndReturnsAgentAction(t *testing.T) {
@@ -1895,9 +1901,6 @@ func TestVerificationAcceptanceAwaitBoundsPendingReadsAndReturnsAgentAction(t *t
 	node := acceptanceNode(t, readAcceptanceSession(t, store, session.ID))
 	assert.Equal(t, coop.NodeActive, node.State)
 	assert.Equal(t, coop.CheckPending, acceptanceResult(t, node.CurrentAttempt().Results, pending.ID).Status)
-	age, heartbeatErr := store.HeartbeatAge(session.ID)
-	require.NoError(t, heartbeatErr)
-	assert.Equal(t, time.Duration(-1), age)
 }
 
 func TestVerificationAcceptanceReportRefreshesPreReportObservation(t *testing.T) {

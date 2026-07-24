@@ -489,7 +489,6 @@ func TestObserverDoesNotPollSettledUnavailableResult(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	require.NoError(t, store.WriteHeartbeat("observer_session"))
 	service := newRecordingObserverWorkflow()
 	controller := testObserverController(store, service, func(context.Context, observerStreamConfig) ([]<-chan websocket.IElement, error) {
 		return nil, nil
@@ -498,11 +497,10 @@ func TestObserverDoesNotPollSettledUnavailableResult(t *testing.T) {
 	defer controller.Close()
 
 	assertNoValue(t, service.calls)
-	require.NoError(t, store.RemoveHeartbeat("observer_session"))
 	assertNoValue(t, service.calls)
 }
 
-func TestObserverPollsReportedPendingDespiteAgentHeartbeat(t *testing.T) {
+func TestObserverPollsReportedPending(t *testing.T) {
 	store := writeObserverSession(t, []coop.SessionNode{observerRequestNode("/v1/customers", 1)})
 	reported := time.Now().UTC()
 	_, err := store.Update("observer_session", func(session *coop.Session) error {
@@ -515,7 +513,6 @@ func TestObserverPollsReportedPendingDespiteAgentHeartbeat(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	require.NoError(t, store.WriteHeartbeat("observer_session"))
 	service := newRecordingObserverWorkflow()
 	controller := testObserverController(store, service, func(context.Context, observerStreamConfig) ([]<-chan websocket.IElement, error) {
 		return nil, nil
@@ -528,7 +525,7 @@ func TestObserverPollsReportedPendingDespiteAgentHeartbeat(t *testing.T) {
 	assertNoValue(t, service.calls)
 }
 
-func TestObserverOwnsPostOpenRefreshDespiteAgentHeartbeat(t *testing.T) {
+func TestObserverOwnsPostOpenRefresh(t *testing.T) {
 	store := writeObserverSession(t, []coop.SessionNode{observerRequestNode("/v1/customers", 1)})
 	reported := time.Now().UTC()
 	resultsAt := reported.Add(time.Second)
@@ -547,7 +544,6 @@ func TestObserverOwnsPostOpenRefreshDespiteAgentHeartbeat(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	require.NoError(t, store.WriteHeartbeat("observer_session"))
 	service := newRecordingObserverWorkflow()
 	controller := testObserverController(store, service, func(context.Context, observerStreamConfig) ([]<-chan websocket.IElement, error) {
 		return nil, nil

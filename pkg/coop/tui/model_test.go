@@ -1463,72 +1463,8 @@ func TestFetchSnippetCached(t *testing.T) {
 	assert.Nil(t, cmd) // should not re-fetch
 }
 
-func TestAgentIdleNoSession(t *testing.T) {
-	m := readyModel()
-	m.session = nil
-	m.updateAgentIdle(10*time.Second, true, time.Now())
-	assert.False(t, m.agentIdle())
-}
-
-func TestAgentIdleSessionComplete(t *testing.T) {
-	m := readyModel()
-	for i := range m.session.Steps {
-		for j := range m.session.Steps[i].Nodes {
-			m.session.Steps[i].Nodes[j].State = coop.NodeDone
-		}
-	}
-	m.lastUpdateTime = time.Now().Add(-5 * time.Minute)
-	m.updateAgentIdle(10*time.Second, true, time.Now())
-	assert.False(t, m.agentIdle())
-}
-
-func TestAgentIdleNoUpdateTime(t *testing.T) {
-	m := readyModel()
-	m.updateAgentIdle(10*time.Second, true, time.Now())
-	assert.False(t, m.agentIdle())
-}
-
-func TestAgentIdleRecentUpdate(t *testing.T) {
-	m := readyModel()
-	m.lastUpdateTime = time.Now()
-	m.updateAgentIdle(10*time.Second, true, time.Now())
-	assert.False(t, m.agentIdle())
-}
-
-func TestAgentIdleStaleNoHeartbeat(t *testing.T) {
-	m := readyModel()
-	m.lastUpdateTime = time.Now().Add(-3 * time.Minute)
-	m.updateAgentIdle(0, false, time.Now())
-	assert.False(t, m.agentIdle())
-}
-
-func TestAgentIdleFreshHeartbeat(t *testing.T) {
-	m := readyModel()
-	m.lastUpdateTime = time.Now().Add(-3 * time.Minute)
-	m.updateAgentIdle(time.Second, true, time.Now())
-	assert.False(t, m.agentIdle())
-}
-
-func TestAgentIdleStaleHeartbeat(t *testing.T) {
-	m := readyModel()
-	m.lastUpdateTime = time.Now().Add(-3 * time.Minute)
-	m.updateAgentIdle(10*time.Second, true, time.Now())
-	assert.True(t, m.agentIdle())
-}
-
-func TestNoUpdateMsgRefreshesCachedAgentIdle(t *testing.T) {
-	m := readyModel()
-	m.lastUpdateTime = time.Now().Add(-3 * time.Minute)
-
-	result, _ := m.Update(noUpdateMsg{heartbeatAge: 10 * time.Second, heartbeatOK: true})
-	updated := result.(Model)
-
-	assert.True(t, updated.agentIdle())
-}
-
 func TestAgentProcessLifecycleMakesRunningAndStoppedStateVisible(t *testing.T) {
 	m := readyModel()
-	m.lastUpdateTime = time.Now().Add(-3 * time.Minute)
 	now := time.Now().UTC()
 
 	m.updateAgentProcessPresence(&coop.AgentProcessLifecycle{
@@ -1537,10 +1473,8 @@ func TestAgentProcessLifecycleMakesRunningAndStoppedStateVisible(t *testing.T) {
 		LaunchedAt: now,
 		UpdatedAt:  now,
 	}, true, time.Second, true)
-	m.updateAgentIdle(10*time.Second, true, time.Now())
 
 	assert.True(t, m.agentProcessActive)
-	assert.False(t, m.agentIdle())
 	assertContainsPlain(t, m.renderHeader(), "agent running")
 
 	status := 9
@@ -1552,10 +1486,8 @@ func TestAgentProcessLifecycleMakesRunningAndStoppedStateVisible(t *testing.T) {
 		UpdatedAt:  stoppedAt,
 		ExitStatus: &status,
 	}, true, -1, true)
-	m.updateAgentIdle(time.Second, true, time.Now())
 
 	assert.False(t, m.agentProcessActive)
-	assert.False(t, m.agentIdle())
 	assertContainsPlain(t, m.renderHeader(), "agent stopped (exit 9)")
 	assertContainsPlain(t, m.confirmationStatus(false), "agent is stopped")
 	assertNotContainsPlain(t, m.confirmationStatus(false), "Agent can continue")

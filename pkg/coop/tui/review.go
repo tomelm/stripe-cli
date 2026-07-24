@@ -19,11 +19,6 @@ func (m Model) renderFooter() string {
 	var lines []string
 	var statusLines []string
 
-	if m.agentIdle() {
-		message := "Waiting for agent: no recent updates. Reconnect: stripe coop status"
-		lines = append(lines, m.theme.AttentionStyle.Render("  "+message))
-	}
-
 	if m.statusMessage != "" {
 		for _, line := range wrapPlainText(safeEvidenceText(m.statusMessage), max(m.width-4, 20)) {
 			statusLines = append(statusLines, m.theme.AttentionStyle.Render("  "+line))
@@ -693,8 +688,4 @@ func (m Model) actionableReviewCount() int {
 		}
 	}
 	return count
-}
-
-func (m Model) agentIdle() bool {
-	return m.agentIsIdle
 }

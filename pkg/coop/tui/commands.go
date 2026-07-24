@@ -31,12 +31,9 @@ func (m Model) checkForUpdates() tea.Cmd {
 		if session.Version != lastVersion {
 			return sessionUpdatedMsg{session: session}
 		}
-		age, err := store.HeartbeatAge(sessionID)
 		pulseAge, pulseErr := store.AgentProcessPulseAge(sessionID)
 		process, processErr := store.AgentProcessLifecycle(sessionID)
 		return noUpdateMsg{
-			heartbeatAge:       age,
-			heartbeatOK:        err == nil,
 			agentPulseAge:      pulseAge,
 			agentPulseOK:       pulseErr == nil,
 			agentProcess:       process,
