@@ -1,11 +1,9 @@
 package coop
 
 import (
-	"bytes"
 	"embed"
 	"encoding/json"
 	"fmt"
-	"io"
 	"strings"
 	"time"
 )
@@ -106,7 +104,7 @@ func validateBlueprintReferences(bp *Blueprint) error {
 	for i := range metadata.Steps {
 		metadata.Steps[i].Nodes = nil
 	}
-	if err := visitBlueprintStrings(&metadata, func(value string) error {
+	if err := visitJSONStrings(&metadata, func(value string) error {
 		if findBlueprintNodeCandidate(value) != -1 {
 			return fmt.Errorf("node references are only supported inside node definitions: %q", value)
 		}
@@ -115,36 +113,12 @@ func validateBlueprintReferences(bp *Blueprint) error {
 		return err
 	}
 
-	if err := visitBlueprintStrings(bp, func(value string) error {
+	if err := visitJSONStrings(bp, func(value string) error {
 		return validateBlueprintReferenceString(value, validRefs)
 	}); err != nil {
 		return err
 	}
 	return validateBlueprintReferenceOrder(bp)
-}
-
-func visitBlueprintStrings(value any, visit func(string) error) error {
-	data, err := json.Marshal(value)
-	if err != nil {
-		return err
-	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	for {
-		token, err := decoder.Token()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		text, ok := token.(string)
-		if !ok {
-			continue
-		}
-		if err := visit(text); err != nil {
-			return err
-		}
-	}
 }
 
 func validateBlueprintReferenceOrder(bp *Blueprint) error {
@@ -161,18 +135,13 @@ func validateBlueprintReferenceOrder(bp *Blueprint) error {
 	for _, step := range bp.Steps {
 		for _, node := range step.Nodes {
 			order++
-			data, err := json.Marshal(node)
-			if err != nil {
+			if err := walkNodeReferences(node, func(reference nodeReference) error {
+				if nodeOrder[reference.Base] >= order {
+					return fmt.Errorf("node %q references %q before it has completed", step.Key+"."+node.Key, reference.Base)
+				}
+				return nil
+			}); err != nil {
 				return err
-			}
-			for _, match := range nodeReferencePattern.FindAllStringSubmatch(string(data), -1) {
-				base, _, ok := splitNodeReference(match[1])
-				if !ok {
-					continue
-				}
-				if nodeOrder[base] >= order {
-					return fmt.Errorf("node %q references %q before it has completed", step.Key+"."+node.Key, base)
-				}
 			}
 		}
 	}

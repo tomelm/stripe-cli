@@ -68,13 +68,12 @@ func TestEmbeddedBlueprintReferencesAreExposedAsRequiredOutputs(t *testing.T) {
 		t.Run(id, func(t *testing.T) {
 			bp, err := LoadBlueprint(id)
 			require.NoError(t, err)
-			data, err := json.Marshal(bp)
-			require.NoError(t, err)
 
 			expected := map[string]bool{}
-			for _, match := range nodeReferencePattern.FindAllStringSubmatch(string(data), -1) {
-				expected[match[1]+":"+match[2]] = true
-			}
+			require.NoError(t, walkNodeReferences(bp, func(reference nodeReference) error {
+				expected[reference.Ref+":"+reference.Field] = true
+				return nil
+			}))
 
 			session := NewSessionFromBlueprint(bp, "required_outputs_"+id, nil, nil)
 			actual := map[string]bool{}

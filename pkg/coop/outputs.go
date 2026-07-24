@@ -3,14 +3,11 @@ package coop
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 )
 
 const DefaultOutputSource = "default"
-
-var nodeReferencePattern = regexp.MustCompile(`\$\{node\.([^}:]+):([^}]+)\}`)
 
 // Selector returns the report-work --output selector for this required value.
 func (o RequiredOutput) Selector() string {
@@ -37,17 +34,15 @@ func (s *Session) RequiredOutputs(nodeNumber int) ([]RequiredOutput, error) {
 			if current <= nodeNumber {
 				continue
 			}
-			data, err := json.Marshal(candidateNode.NodeDefinition)
-			if err != nil {
-				return nil, fmt.Errorf("encoding node %d while finding required outputs: %w", current, err)
-			}
-			for _, match := range nodeReferencePattern.FindAllStringSubmatch(string(data), -1) {
-				base, source, ok := splitNodeReference(match[1])
-				if !ok || base != targetBase {
-					continue
+			if err := walkNodeReferences(candidateNode.NodeDefinition, func(reference nodeReference) error {
+				if reference.Base != targetBase {
+					return nil
 				}
-				output := RequiredOutput{Source: source, Field: match[2]}
+				output := RequiredOutput{Source: reference.Source, Field: reference.Field}
 				seen[output.Selector()] = output
+				return nil
+			}); err != nil {
+				return nil, fmt.Errorf("scanning node %d while finding required outputs: %w", current, err)
 			}
 		}
 	}
@@ -81,17 +76,14 @@ func (s *Session) DependentNodeNumbers(nodeNumber int) ([]int, error) {
 			if current <= nodeNumber {
 				continue
 			}
-			data, err := json.Marshal(candidateNode.NodeDefinition)
-			if err != nil {
-				return nil, fmt.Errorf("encoding node %d while finding dependents: %w", current, err)
-			}
 			dependent := false
-			for _, match := range nodeReferencePattern.FindAllStringSubmatch(string(data), -1) {
-				base, _, ok := splitNodeReference(match[1])
-				if ok && dependencyBases[base] {
+			if err := walkNodeReferences(candidateNode.NodeDefinition, func(reference nodeReference) error {
+				if dependencyBases[reference.Base] {
 					dependent = true
-					break
 				}
+				return nil
+			}); err != nil {
+				return nil, fmt.Errorf("scanning node %d while finding dependents: %w", current, err)
 			}
 			if !dependent {
 				continue
@@ -266,18 +258,6 @@ func (s *Session) lookupNodeOutput(ref, field string) (json.RawMessage, error) {
 		}
 	}
 	return nil, fmt.Errorf("unknown output source ${node.%s:%s}", ref, field)
-}
-
-func splitNodeReference(ref string) (base, source string, ok bool) {
-	parts := strings.Split(ref, ".")
-	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", false
-	}
-	base = parts[0] + "." + parts[1]
-	if len(parts) > 2 {
-		source = strings.Join(parts[2:], ".")
-	}
-	return base, source, true
 }
 
 func outputAsString(raw json.RawMessage) (string, error) {

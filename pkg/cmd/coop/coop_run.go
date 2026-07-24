@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -83,7 +82,7 @@ func (rc *coopAgentRunCmd) runCmd(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return outputCoopError(err.Error(), coop.Recovery{
 			Hint: "Retry without the malformed setting or parameter; optional values use key=value syntax.",
-			Next: fmt.Sprintf("stripe coop run %s", quoteArg(blueprintID)),
+			Next: coop.RunCommand(blueprintID),
 		})
 	}
 
@@ -111,7 +110,7 @@ func newCoopAgentSessionResponse(title string, session *coop.Session, instructio
 		Node:        1,
 		State:       "created",
 		Message:     fmt.Sprintf("Session started: %s (%d nodes)", title, session.TotalNodes()),
-		Next:        fmt.Sprintf("stripe coop agent start-work --session=%s --step=1 --note=%s", session.ID, quoteArg("Beginning: "+session.Steps[0].Nodes[0].Title)),
+		Next:        coop.StartWorkCommand(session.ID, 1, "Beginning: "+session.Steps[0].Nodes[0].Title),
 		AgentPrompt: instructions,
 	}
 }
@@ -193,10 +192,6 @@ func outputJSONTo(w io.Writer, v interface{}) error {
 	}
 	fmt.Fprintln(w, string(data))
 	return nil
-}
-
-func quoteArg(value string) string {
-	return strconv.Quote(value)
 }
 
 func outputCoopError(msg string, recovery coop.Recovery) error {

@@ -61,7 +61,7 @@ func (rc *coopRecommendCmd) runRecommendCmd(cmd *cobra.Command, args []string) e
 			Description: bp.Description,
 			Products:    bp.Products,
 			NodeCount:   nodes,
-			Command:     fmt.Sprintf("stripe coop run %s", bp.ID),
+			Command:     coop.RunCommand(bp.ID),
 		}
 		if rc.query != "" {
 			entry.Score = blueprintMatchScore(bp, rc.query)

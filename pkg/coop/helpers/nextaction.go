@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -238,7 +237,7 @@ func BuildResponse(session *coop.Session, suggestions []Suggestion, selected str
 			Completed:   session.Blueprint,
 			Suggestions: suggestions,
 			AgentPrompt: BuildSummarizePrompt(session),
-			Next:        fmt.Sprintf("stripe coop agent next-action --session=%s --completed=summarize", session.ID),
+			Next:        coop.NextActionCommand(session.ID, "summarize"),
 		}
 	case "deploy":
 		return Response{
@@ -247,7 +246,7 @@ func BuildResponse(session *coop.Session, suggestions []Suggestion, selected str
 			Completed:   session.Blueprint,
 			Suggestions: suggestions,
 			AgentPrompt: BuildDeployPrompt(session),
-			Next:        followupCommand(session.ID, "deploy", ""),
+			Next:        coop.StartFollowupCommand(session.ID, "deploy", ""),
 		}
 	case "deploy-update":
 		target := deployTargetFromSuggestion(suggestions, selected)
@@ -257,7 +256,7 @@ func BuildResponse(session *coop.Session, suggestions []Suggestion, selected str
 			Completed:   session.Blueprint,
 			Suggestions: suggestions,
 			AgentPrompt: BuildDeployUpdatePrompt(session, target),
-			Next:        followupCommand(session.ID, "deploy-update", target),
+			Next:        coop.StartFollowupCommand(session.ID, "deploy-update", target),
 		}
 	case "add-integration":
 		return Response{
@@ -274,7 +273,7 @@ func BuildResponse(session *coop.Session, suggestions []Suggestion, selected str
 			SessionID:   session.ID,
 			Completed:   session.Blueprint,
 			AgentPrompt: "The developer is done. End the session.",
-			Next:        fmt.Sprintf("stripe coop stop --session=%s", session.ID),
+			Next:        coop.StopCommand(session.ID),
 		}
 	default:
 		return Response{
@@ -282,7 +281,7 @@ func BuildResponse(session *coop.Session, suggestions []Suggestion, selected str
 			SessionID:   session.ID,
 			Completed:   session.Blueprint,
 			AgentPrompt: fmt.Sprintf("The developer selected: %s", selected),
-			Next:        "stripe coop stop",
+			Next:        coop.StopCommand(""),
 		}
 	}
 }
@@ -302,14 +301,6 @@ func deployTargetFromSuggestion(suggestions []Suggestion, selected string) strin
 		}
 	}
 	return "the detected deployment target"
-}
-
-func followupCommand(sessionID, action, target string) string {
-	cmd := fmt.Sprintf("stripe coop agent start-followup --session=%s --action=%s", strconv.Quote(sessionID), strconv.Quote(action))
-	if target != "" {
-		cmd += fmt.Sprintf(" --target=%s", strconv.Quote(target))
-	}
-	return cmd
 }
 
 func BuildDeployPrompt(session *coop.Session) string {
@@ -333,6 +324,7 @@ Parent session: %s`, target, target, session.ID)
 }
 
 func BuildSummarizePrompt(session *coop.Session) string {
+	next := coop.NextActionCommand(session.ID, "summarize")
 	return fmt.Sprintf(`The developer wants a STRIPE.md summary. Create a STRIPE.md file in the project root with:
 
 ## What was built
@@ -356,7 +348,7 @@ func BuildSummarizePrompt(session *coop.Session) string {
 - Stripe Dashboard: https://dashboard.stripe.com/test
 - API docs: https://docs.stripe.com/api
 
-After writing the file, run "stripe coop agent next-action --session=%s --completed=summarize" again to offer more options.`, session.Blueprint, session.ID)
+After writing the file, run %q again to offer more options.`, session.Blueprint, next)
 }
 
 func DetectProjectEnvironment() Environment {
