@@ -22,6 +22,19 @@ func readyModel() Model {
 	return m
 }
 
+func reconcileAutomaticEvaluationForTest(
+	t *testing.T,
+	node *coop.SessionNode,
+	attemptNumber int,
+	requestedAt time.Time,
+	results []coop.CheckResult,
+) {
+	t.Helper()
+	token, err := node.BeginAutomaticCheck(attemptNumber, requestedAt)
+	require.NoError(t, err)
+	require.NoError(t, node.ReconcileAutomaticEvaluation(attemptNumber, token, results))
+}
+
 func TestUpdateKeyDown(t *testing.T) {
 	m := readyModel()
 	m.selectionCursor = 0
@@ -282,10 +295,10 @@ func TestUpdateKeyConfirmUnavailableSucceedsWithOnePress(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, node.ReportAttempt(attempt.Number, now, &coop.Implementation{File: "checkout.tsx"}))
 	require.NoError(t, node.SetAppSurface(attempt.Number, coop.AppSurface{URL: "http://localhost:4242/checkout"}))
-	require.NoError(t, node.ReconcileAutomaticResults(attempt.Number, now.Add(time.Nanosecond), []coop.CheckResult{{
+	reconcileAutomaticEvaluationForTest(t, node, attempt.Number, now.Add(time.Nanosecond), []coop.CheckResult{{
 		ID: "state.checkout", Kind: coop.CheckState, Importance: coop.CheckRequired,
 		Status: coop.CheckUnavailable, Detail: "Stripe read unavailable", UpdatedAt: now,
-	}}))
+	}})
 	writeTestSession(t, store, m.session)
 
 	result, _ := m.Update(tea.KeyPressMsg{Code: 'c', Text: "c"})
@@ -330,7 +343,11 @@ func TestUpdateKeyConfirmReportsAtomicLimitedCoverageDecision(t *testing.T) {
 		if nodeErr != nil {
 			return nodeErr
 		}
-		return storedNode.ReconcileAutomaticResults(attempt.Number, now.Add(time.Second), []coop.CheckResult{{
+		token, beginErr := storedNode.BeginAutomaticCheck(attempt.Number, now.Add(time.Second))
+		if beginErr != nil {
+			return beginErr
+		}
+		return storedNode.ReconcileAutomaticEvaluation(attempt.Number, token, []coop.CheckResult{{
 			ID: "state.checkout", Kind: coop.CheckState, Importance: coop.CheckRequired,
 			Status: coop.CheckUnavailable, Detail: "Stripe read unavailable", UpdatedAt: now,
 		}})

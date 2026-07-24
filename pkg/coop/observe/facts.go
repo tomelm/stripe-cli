@@ -44,7 +44,6 @@ type Discovery struct {
 // EventFact is the bounded identity of a v1 or v2 Stripe event.
 type EventFact struct {
 	Type        string
-	ID          string
 	Discoveries []Discovery
 }
 
@@ -103,7 +102,7 @@ func requestFact(payload logtailing.EventPayload) (Fact, bool) {
 }
 
 func v1EventFact(payload proxy.StripeEvent) (Fact, bool) {
-	fact, ok := newEventFact(payload.Type, payload.ID)
+	fact, ok := newEventFact(payload.Type)
 	if !ok {
 		return Fact{}, false
 	}
@@ -114,7 +113,7 @@ func v1EventFact(payload proxy.StripeEvent) (Fact, bool) {
 }
 
 func v2EventFact(payload proxy.V2EventPayload) (Fact, bool) {
-	fact, ok := newEventFact(payload.Type, payload.ID)
+	fact, ok := newEventFact(payload.Type)
 	if !ok {
 		return Fact{}, false
 	}
@@ -122,15 +121,12 @@ func v2EventFact(payload proxy.V2EventPayload) (Fact, bool) {
 	return Fact{Event: fact}, true
 }
 
-func newEventFact(eventType, eventID string) (*EventFact, bool) {
+func newEventFact(eventType string) (*EventFact, bool) {
 	eventType = safeEventType(eventType)
 	if eventType == "" {
 		return nil, false
 	}
-	return &EventFact{
-		Type: eventType,
-		ID:   safeToken(eventID, maxIdentifierBytes),
-	}, true
+	return &EventFact{Type: eventType}, true
 }
 
 func discoveryFrom(rawType, rawID interface{}) []Discovery {

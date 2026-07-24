@@ -31,9 +31,8 @@ func TestMatchSessionFailureRequiresUniqueOpenAttempt(t *testing.T) {
 	require.NotNil(t, match.Attribution)
 	assert.Equal(t, TriggerTarget{NodeNumber: 1, AttemptNumber: 1}, match.Attribution.Target)
 	require.NotNil(t, match.Attribution.Fact.Request)
-	require.NotNil(t, match.Attribution.Failure)
-	assert.Equal(t, 500, match.Attribution.Failure.Status)
-	assert.Equal(t, "api_error", match.Attribution.Failure.ErrorCode)
+	assert.Equal(t, 500, match.Attribution.Fact.Request.Status)
+	assert.Equal(t, "api_error", match.Attribution.Fact.Request.ErrorCode)
 }
 
 func TestMatchSessionMissingOrUnmatchedFailureProducesNothing(t *testing.T) {
@@ -63,7 +62,6 @@ func TestSuccessfulRequestAndEventAreTriggersNotPasses(t *testing.T) {
 		Method: "POST", Path: "/v1/checkout/sessions", Status: 200,
 	}})
 	require.NotNil(t, match.Attribution)
-	assert.Nil(t, match.Attribution.Failure)
 	assert.Equal(t, 200, match.Attribution.Fact.Request.Status)
 
 	typeOfAttribution := reflect.TypeOf(*match.Attribution)
@@ -83,7 +81,6 @@ func TestSuccessfulRequestAndEventAreTriggersNotPasses(t *testing.T) {
 		Discoveries: []Discovery{{Type: "checkout.session", ID: "cs_123"}},
 	}})
 	require.NotNil(t, eventMatch.Attribution)
-	assert.Nil(t, eventMatch.Attribution.Failure)
 	assert.Equal(t, []Discovery{{Type: "checkout.session", ID: "cs_123"}}, eventMatch.Attribution.Fact.Event.Discoveries)
 }
 
@@ -124,7 +121,6 @@ func TestMismatchedEventMayReplaceOnlyObservedCandidate(t *testing.T) {
 		match  bool
 	}{
 		{name: "candidate", source: coop.BindingObservedCandidate, match: true},
-		{name: "validated observed", source: coop.BindingObserved},
 		{name: "agent", source: coop.BindingAgent},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -251,7 +247,8 @@ func TestMatchSessionMatchesNamedTestHelperRequest(t *testing.T) {
 	}})
 	require.NotNil(t, match.Attribution)
 	assert.Equal(t, TriggerTarget{NodeNumber: 1, AttemptNumber: 2}, match.Attribution.Target)
-	require.NotNil(t, match.Attribution.Failure)
+	require.NotNil(t, match.Attribution.Fact.Request)
+	assert.Equal(t, 400, match.Attribution.Fact.Request.Status)
 }
 
 func TestMatchSessionRoutesSameStepRequestToReportedOpenedUI(t *testing.T) {
@@ -276,8 +273,8 @@ func TestMatchSessionRoutesSameStepRequestToReportedOpenedUI(t *testing.T) {
 	assert.Equal(t, []TriggerTarget{{NodeNumber: 2, AttemptNumber: 2}}, match.Triggers)
 	require.NotNil(t, match.Attribution)
 	assert.Equal(t, TriggerTarget{NodeNumber: 2, AttemptNumber: 2}, match.Attribution.Target)
-	require.NotNil(t, match.Attribution.Failure)
-	assert.Equal(t, "api_error", match.Attribution.Failure.ErrorCode)
+	require.NotNil(t, match.Attribution.Fact.Request)
+	assert.Equal(t, "api_error", match.Attribution.Fact.Request.ErrorCode)
 }
 
 func TestMatchSessionRequiresUIOwnedEventDeclaration(t *testing.T) {

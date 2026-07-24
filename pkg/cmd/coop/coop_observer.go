@@ -568,7 +568,8 @@ func supportingResult(attribution *observe.Attribution, observedAt time.Time) (c
 		}, true
 	}
 	request := attribution.Fact.Request
-	if request == nil || (attribution.Failure == nil && (request.Status < 200 || request.Status >= 300)) {
+	if request == nil || request.Status < 200 || request.Status > 599 ||
+		(request.Status >= 300 && request.Status < 400) {
 		return coop.CheckResult{}, false
 	}
 	observed := fmt.Sprintf("HTTP %d", request.Status)
@@ -580,13 +581,13 @@ func supportingResult(attribution *observe.Attribution, observedAt time.Time) (c
 		Detail:   boundedVerificationText(fmt.Sprintf("Stripe observed %s %s return %s; direct checks decide completion.", request.Method, request.Path, observed)),
 		Observed: boundedVerificationText(observed), UpdatedAt: observedAt.UTC(),
 	}
-	if failure := attribution.Failure; failure != nil {
-		code := failure.DeclineCode
+	if request.Status >= 400 {
+		code := request.DeclineCode
 		if code == "" {
-			code = failure.ErrorCode
+			code = request.ErrorCode
 		}
 		if code == "" {
-			code = failure.ErrorType
+			code = request.ErrorType
 		}
 		if code != "" {
 			observed += " " + code

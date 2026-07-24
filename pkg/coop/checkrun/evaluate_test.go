@@ -884,8 +884,10 @@ func TestEvaluateBoundsCompiledTargets(t *testing.T) {
 		assert.False(t, seen[key], "duplicate bounded result %s", result.ID)
 		seen[key] = true
 	}
-	require.NoError(t, node.ReconcileAutomaticResults(1, observed, report.Results),
-		"the exact maximum snapshot must remain persistable")
+	token, err := node.BeginAutomaticCheck(1, observed)
+	require.NoError(t, err)
+	require.NoError(t, node.ReconcileAutomaticEvaluation(1, token, report.Results),
+		"the exact maximum snapshot must remain persistable by its lease owner")
 }
 
 func TestEvaluateOversizedCandidateEvidenceFailsClosed(t *testing.T) {

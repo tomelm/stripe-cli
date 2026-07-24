@@ -176,39 +176,6 @@ func (node *SessionNode) UpsertResult(number int, result CheckResult) error {
 	return nil
 }
 
-// ReconcileAutomaticResults atomically replaces one complete evaluator
-// snapshot while retaining supporting request/event evidence. This unowned
-// helper is used by deterministic local callers; workflow evaluations use the
-// lease-owning variant below.
-func (node *SessionNode) ReconcileAutomaticResults(number int, snapshotAt time.Time, results []CheckResult) error {
-	attempt, err := node.currentAttemptNumber(number)
-	if err != nil {
-		return err
-	}
-	if snapshotAt.IsZero() {
-		return errors.New("automatic result snapshot time is required")
-	}
-	snapshotAt = snapshotAt.UTC()
-	ownsLease := attempt.AutomaticCheckStartedAt != nil && attempt.AutomaticCheckStartedAt.Equal(snapshotAt)
-	if attempt.AutomaticCheckPending() && !ownsLease {
-		return ErrAutomaticCheckBusy
-	}
-	if attempt.AutomaticResultsAt != nil && !snapshotAt.After(*attempt.AutomaticResultsAt) {
-		return ErrStaleResultSnapshot
-	}
-	if err := replaceAutomaticResults(attempt, snapshotAt, results); err != nil {
-		if ownsLease {
-			attempt.AutomaticCheckStartedAt = nil
-		}
-		return err
-	}
-	if ownsLease {
-		attempt.AutomaticCheckStartedAt = nil
-	}
-	attempt.AutomaticRefreshPending = false
-	return nil
-}
-
 // ReconcileAutomaticEvaluation accepts results only from the attempt's exact
 // live lease owner. A completion whose lease expired and was reacquired can
 // never overwrite newer evidence or mutate retry scheduling.
@@ -314,19 +281,6 @@ func (node *SessionNode) MarkAutomaticRefresh(number int) error {
 	return nil
 }
 
-// FinishAutomaticCheck releases the lease only for its exact owner.
-func (node *SessionNode) FinishAutomaticCheck(number int, token time.Time) error {
-	attempt, err := node.currentAttemptNumber(number)
-	if err != nil {
-		return err
-	}
-	if attempt.AutomaticCheckStartedAt == nil || !attempt.AutomaticCheckStartedAt.Equal(token.UTC()) {
-		return ErrStaleResultSnapshot
-	}
-	attempt.AutomaticCheckStartedAt = nil
-	return nil
-}
-
 // InvalidateAutomaticCheck releases the exact owner and records that its
 // frozen inputs changed. A late expired owner cannot dirty a newer lease.
 func (node *SessionNode) InvalidateAutomaticCheck(number int, token time.Time) error {
@@ -365,9 +319,9 @@ func sameCheckResult(left, right CheckResult) bool {
 }
 
 // UpsertResource inserts or replaces a role binding on the current attempt.
-// Passive discovery candidates may replace one another until an authoritative
-// read promotes one to observed. Validated observed and agent bindings remain
-// first-wins; an explicit agent report may correct either observed form.
+// Passive discovery candidates may replace one another until the agent reports
+// an authoritative binding. Agent bindings remain first-wins; an explicit
+// agent report may correct a candidate.
 func (node *SessionNode) UpsertResource(number int, binding ResourceBinding) error {
 	attempt, err := node.currentAttemptNumber(number)
 	if err != nil {
@@ -383,9 +337,6 @@ func (node *SessionNode) UpsertResource(number int, binding ResourceBinding) err
 		if attempt.Resources[index].Role == binding.Role {
 			existing := attempt.Resources[index]
 			if binding.Source == BindingObservedCandidate && existing.Source != BindingObservedCandidate {
-				return nil
-			}
-			if binding.Source == BindingObserved && existing.Source != BindingObservedCandidate {
 				return nil
 			}
 			attempt.Resources[index] = binding
@@ -586,7 +537,7 @@ func validateResourceBinding(binding ResourceBinding) error {
 	if !IsSafeStripeObjectID(id) {
 		return errors.New("resource binding ID must be a safe Stripe object ID, not a credential or client secret")
 	}
-	if binding.Source != BindingObservedCandidate && binding.Source != BindingObserved && binding.Source != BindingAgent {
+	if binding.Source != BindingObservedCandidate && binding.Source != BindingAgent {
 		return fmt.Errorf("invalid resource binding source %q", binding.Source)
 	}
 	return nil

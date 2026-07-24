@@ -81,7 +81,6 @@ type BindingSource string
 
 const (
 	BindingObservedCandidate BindingSource = "observed_candidate"
-	BindingObserved          BindingSource = "observed"
 	BindingAgent             BindingSource = "agent"
 )
 

@@ -11,6 +11,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func reconcileAutomaticEvaluationForTest(
+	t *testing.T,
+	node *SessionNode,
+	attemptNumber int,
+	requestedAt time.Time,
+	results []CheckResult,
+) time.Time {
+	t.Helper()
+	token, err := node.BeginAutomaticCheck(attemptNumber, requestedAt)
+	require.NoError(t, err)
+	require.NoError(t, node.ReconcileAutomaticEvaluation(attemptNumber, token, results))
+	return token
+}
+
 func TestNodeAttemptLifecycleRetainsHistory(t *testing.T) {
 	node := testSessionNode("node", "Node", NodeActive)
 	started := time.Date(2026, time.July, 21, 12, 0, 0, 123, time.FixedZone("offset", -7*60*60))
@@ -147,14 +161,14 @@ func TestAutomaticCheckMarkerIsMonotonicAndTracksPendingRead(t *testing.T) {
 	node := testSessionNode("node", "Node", NodeActive)
 	attempt, err := node.StartAttempt(now, "")
 	require.NoError(t, err)
-	require.NoError(t, node.ReconcileAutomaticResults(attempt.Number, now.Add(time.Second), nil))
+	reconcileAutomaticEvaluationForTest(t, &node, attempt.Number, now.Add(time.Second), nil)
 
 	startedAt, err := node.BeginAutomaticCheck(attempt.Number, now)
 	require.NoError(t, err)
 	assert.True(t, startedAt.After(*attempt.AutomaticResultsAt))
 	assert.True(t, attempt.AutomaticCheckPending())
 
-	require.NoError(t, node.ReconcileAutomaticResults(attempt.Number, startedAt, nil))
+	require.NoError(t, node.ReconcileAutomaticEvaluation(attempt.Number, startedAt, nil))
 	assert.False(t, attempt.AutomaticCheckPending())
 }
 
@@ -287,7 +301,7 @@ func TestUpsertResultIgnoresAnUnchangedPollTimestamp(t *testing.T) {
 	assert.Equal(t, now, attempt.Results[0].UpdatedAt)
 }
 
-func TestReconcileAutomaticResultsClearsRecoveredUnavailableAndRetainsEvidence(t *testing.T) {
+func TestReconcileAutomaticEvaluationClearsRecoveredUnavailableAndRetainsEvidence(t *testing.T) {
 	now := time.Now().UTC()
 	node := testSessionNode("node", "Node", NodeActive)
 	attempt, err := node.StartAttempt(now, "")
@@ -300,57 +314,61 @@ func TestReconcileAutomaticResultsClearsRecoveredUnavailableAndRetainsEvidence(t
 		ID: "event.checkout", Kind: CheckEvent, Importance: CheckAdvisory,
 		Status: CheckObserved, UpdatedAt: now,
 	}))
-	require.NoError(t, node.ReconcileAutomaticResults(attempt.Number, now.Add(time.Second), []CheckResult{{
+	reconcileAutomaticEvaluationForTest(t, &node, attempt.Number, now.Add(time.Second), []CheckResult{{
 		ID: "resource.checkout.exists", Kind: CheckResource, Importance: CheckRequired,
 		Status: CheckPassed,
-	}}))
+	}})
 
 	require.Len(t, attempt.Results, 2)
 	assert.Equal(t, []CheckKind{CheckEvent, CheckResource}, []CheckKind{attempt.Results[0].Kind, attempt.Results[1].Kind})
 }
 
-func TestReconcileAutomaticResultsEmptySnapshotClearsAutomaticFindings(t *testing.T) {
+func TestReconcileAutomaticEvaluationEmptySnapshotClearsAutomaticFindings(t *testing.T) {
 	now := time.Now().UTC()
 	node := testSessionNode("node", "Node", NodeActive)
 	attempt, err := node.StartAttempt(now, "")
 	require.NoError(t, err)
-	require.NoError(t, node.ReconcileAutomaticResults(attempt.Number, now.Add(time.Second), []CheckResult{{
+	reconcileAutomaticEvaluationForTest(t, &node, attempt.Number, now.Add(time.Second), []CheckResult{{
 		ID: "automatic.account-scope", Kind: CheckCoverage, Importance: CheckRequired, Status: CheckUnavailable,
-	}}))
+	}})
 	require.NoError(t, node.UpsertResult(attempt.Number, CheckResult{
 		ID: "event.checkout", Kind: CheckEvent, Importance: CheckAdvisory,
 		Status: CheckObserved, UpdatedAt: now.Add(1500 * time.Millisecond),
 	}))
 
-	require.NoError(t, node.ReconcileAutomaticResults(attempt.Number, now.Add(2*time.Second), nil))
+	reconcileAutomaticEvaluationForTest(t, &node, attempt.Number, now.Add(2*time.Second), nil)
 	require.Len(t, attempt.Results, 1)
 	assert.Equal(t, CheckEvent, attempt.Results[0].Kind)
 	require.NotNil(t, attempt.AutomaticResultsAt)
 	assert.Equal(t, now.Add(2*time.Second), *attempt.AutomaticResultsAt)
 }
 
-func TestReconcileAutomaticResultsRejectsWholeOlderOrEqualSnapshot(t *testing.T) {
+func TestReconcileAutomaticEvaluationRejectsNonOwnerSnapshots(t *testing.T) {
 	now := time.Now().UTC()
 	node := testSessionNode("node", "Node", NodeActive)
 	attempt, err := node.StartAttempt(now, "")
 	require.NoError(t, err)
 	newerAt := now.Add(2 * time.Second)
-	require.NoError(t, node.ReconcileAutomaticResults(attempt.Number, newerAt, []CheckResult{{
+	reconcileAutomaticEvaluationForTest(t, &node, attempt.Number, newerAt, []CheckResult{{
 		ID: "resource.checkout.exists", Kind: CheckResource, Importance: CheckRequired, Status: CheckPassed,
-	}}))
+	}})
 
 	stale := []CheckResult{{
 		ID: "automatic.account-scope", Kind: CheckCoverage, Importance: CheckRequired, Status: CheckUnavailable,
 	}}
-	require.ErrorIs(t, node.ReconcileAutomaticResults(attempt.Number, now.Add(time.Second), stale), ErrStaleResultSnapshot)
-	require.ErrorIs(t, node.ReconcileAutomaticResults(attempt.Number, newerAt, stale), ErrStaleResultSnapshot)
+	owner, err := node.BeginAutomaticCheck(attempt.Number, now.Add(time.Second))
+	require.NoError(t, err)
+	assert.True(t, owner.After(newerAt), "lease tokens must advance past prior snapshots")
+	require.ErrorIs(t, node.ReconcileAutomaticEvaluation(attempt.Number, now.Add(time.Second), stale), ErrStaleResultSnapshot)
+	require.ErrorIs(t, node.ReconcileAutomaticEvaluation(attempt.Number, newerAt, stale), ErrStaleResultSnapshot)
 	require.Len(t, attempt.Results, 1)
 	assert.Equal(t, "resource.checkout.exists", attempt.Results[0].ID)
 	assert.Equal(t, CheckPassed, attempt.Results[0].Status)
 	assert.Equal(t, newerAt, *attempt.AutomaticResultsAt)
+	require.NoError(t, node.ReconcileAutomaticEvaluation(attempt.Number, owner, stale))
 }
 
-func TestReconcileAutomaticResultsAdvancesOrderingWatermarkForIdenticalSnapshot(t *testing.T) {
+func TestReconcileAutomaticEvaluationAdvancesOrderingWatermarkForIdenticalSnapshot(t *testing.T) {
 	now := time.Now().UTC()
 	node := testSessionNode("node", "Node", NodeActive)
 	attempt, err := node.StartAttempt(now, "")
@@ -360,11 +378,11 @@ func TestReconcileAutomaticResultsAdvancesOrderingWatermarkForIdenticalSnapshot(
 		Status: CheckPending, Detail: "still processing",
 	}
 	firstSnapshot := now.Add(time.Second)
-	require.NoError(t, node.ReconcileAutomaticResults(attempt.Number, firstSnapshot, []CheckResult{result}))
+	reconcileAutomaticEvaluationForTest(t, &node, attempt.Number, firstSnapshot, []CheckResult{result})
 	firstResultAt := attempt.Results[0].UpdatedAt
 
 	secondSnapshot := now.Add(2 * time.Second)
-	require.NoError(t, node.ReconcileAutomaticResults(attempt.Number, secondSnapshot, []CheckResult{result}))
+	reconcileAutomaticEvaluationForTest(t, &node, attempt.Number, secondSnapshot, []CheckResult{result})
 
 	require.NotNil(t, attempt.AutomaticResultsAt)
 	assert.Equal(t, secondSnapshot, *attempt.AutomaticResultsAt)
@@ -385,21 +403,21 @@ func TestAttemptResourceAndAppSurfaceUpserts(t *testing.T) {
 	}))
 	assert.Equal(t, "cus_new_candidate", attempt.Resources[0].ID)
 	require.NoError(t, node.UpsertResource(attempt.Number, ResourceBinding{
-		Role: "customer", Type: "customer", ID: "cus_observed", Source: BindingObserved,
+		Role: "customer", Type: "customer", ID: "cus_agent", Source: BindingAgent,
 	}))
-	assert.Equal(t, BindingObserved, attempt.Resources[0].Source)
+	assert.Equal(t, BindingAgent, attempt.Resources[0].Source)
 	require.NoError(t, node.UpsertResource(attempt.Number, ResourceBinding{
 		Role: "customer", Type: "customer", ID: "cus_ignored_candidate", Source: BindingObservedCandidate,
 	}))
-	assert.Equal(t, "cus_observed", attempt.Resources[0].ID)
+	assert.Equal(t, "cus_agent", attempt.Resources[0].ID)
 	require.NoError(t, node.UpsertResource(attempt.Number, ResourceBinding{
-		Role: "customer", Type: "customer", ID: "cus_agent", Source: BindingAgent,
+		Role: "customer", Type: "customer", ID: "cus_corrected", Source: BindingAgent,
 	}))
 	require.NoError(t, node.UpsertResource(attempt.Number, ResourceBinding{
-		Role: "customer", Type: "customer", ID: "cus_unrelated", Source: BindingObserved,
+		Role: "customer", Type: "customer", ID: "cus_unrelated", Source: BindingObservedCandidate,
 	}))
 	require.Len(t, attempt.Resources, 1)
-	assert.Equal(t, "cus_agent", attempt.Resources[0].ID)
+	assert.Equal(t, "cus_corrected", attempt.Resources[0].ID)
 	assert.Equal(t, BindingAgent, attempt.Resources[0].Source)
 
 	for _, secret := range []string{

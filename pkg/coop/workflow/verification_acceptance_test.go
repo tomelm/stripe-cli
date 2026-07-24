@@ -438,7 +438,6 @@ func TestVerificationAcceptancePassiveFailureCannotBlameOrWakeAgent(t *testing.T
 	store, session := newVerificationAcceptanceStore(t, coop.NodeCLICommand)
 	clock := newAcceptanceClock()
 	observedFailure := requiredAcceptanceResult("passive.request", coop.CheckRequest, coop.CheckFailed)
-	observedFailure.Importance = coop.CheckAdvisory
 	observedFailure.Detail = "Stripe observed a matching request fail"
 	observedFailure.UpdatedAt = clock.Now().Add(-time.Second)
 	evaluator := &acceptanceEvaluator{evaluations: []Evaluation{{}}}
@@ -456,6 +455,9 @@ func TestVerificationAcceptancePassiveFailureCannotBlameOrWakeAgent(t *testing.T
 	assert.NotEqual(t, string(decisionNeedsAgent), response.Decision)
 	node := acceptanceNode(t, readAcceptanceSession(t, store, session.ID))
 	assert.Len(t, node.Attempts, 1, "advisory account-wide evidence cannot create a correction attempt")
+	require.Len(t, node.Attempts[0].Results, 1)
+	assert.Equal(t, coop.CheckAdvisory, node.Attempts[0].Results[0].Importance,
+		"the persistence boundary must downgrade all passive evidence")
 }
 
 func TestVerificationAcceptanceObserverPollsSameEvaluatorUntilPass(t *testing.T) {

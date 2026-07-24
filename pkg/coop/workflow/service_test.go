@@ -231,7 +231,11 @@ func TestConfirmReviewAttemptsBlocksDeterministicFailureAtomically(t *testing.T)
 		if firstErr != nil {
 			return firstErr
 		}
-		if reconcileErr := first.ReconcileAutomaticResults(refs[0].Attempt, now, []coop.CheckResult{{
+		firstToken, beginErr := first.BeginAutomaticCheck(refs[0].Attempt, now)
+		if beginErr != nil {
+			return beginErr
+		}
+		if reconcileErr := first.ReconcileAutomaticEvaluation(refs[0].Attempt, firstToken, []coop.CheckResult{{
 			ID: "state.pending", Kind: coop.CheckState, Importance: coop.CheckRequired,
 			Status: coop.CheckPending, UpdatedAt: now,
 		}}); reconcileErr != nil {
@@ -241,7 +245,11 @@ func TestConfirmReviewAttemptsBlocksDeterministicFailureAtomically(t *testing.T)
 		if secondErr != nil {
 			return secondErr
 		}
-		return second.ReconcileAutomaticResults(refs[1].Attempt, now, []coop.CheckResult{{
+		secondToken, beginErr := second.BeginAutomaticCheck(refs[1].Attempt, now)
+		if beginErr != nil {
+			return beginErr
+		}
+		return second.ReconcileAutomaticEvaluation(refs[1].Attempt, secondToken, []coop.CheckResult{{
 			ID: "resource.mismatch", Kind: coop.CheckResource, Importance: coop.CheckRequired,
 			Status: coop.CheckFailed, Detail: "Observed configuration contradicts the blueprint.",
 			Repair: "Update the Stripe resource and report the corrected attempt.", UpdatedAt: now,

@@ -12,26 +12,11 @@ type TriggerTarget struct {
 	AttemptNumber int
 }
 
-// RequestFailure is bounded 4xx/5xx supporting evidence associated by
-// method/path with one plausible open attempt. Stripe request logs are
-// account-wide, so this is never proof that the attempt made the request and
-// never carries a workflow action.
-type RequestFailure struct {
-	Status      int
-	RequestID   string
-	ErrorType   string
-	ErrorCode   string
-	DeclineCode string
-}
-
 // Attribution associates bounded supporting evidence with exactly one
 // plausible attempt. It has no pass, completion, or workflow-decision field.
-// Failure is present only when one open attempt matched, but remains advisory
-// until the stream has a stronger correlation key.
 type Attribution struct {
-	Target  TriggerTarget
-	Fact    Fact
-	Failure *RequestFailure
+	Target TriggerTarget
+	Fact   Fact
 }
 
 // SessionMatch contains every open attempt whose verification rules should be
@@ -59,17 +44,7 @@ func MatchSession(session *coop.Session, fact Fact) SessionMatch {
 		return match
 	}
 
-	attribution := &Attribution{Target: match.Triggers[0], Fact: cloneFact(fact)}
-	if request := fact.Request; request != nil && request.Status >= 400 && request.Status <= 599 {
-		attribution.Failure = &RequestFailure{
-			Status:      request.Status,
-			RequestID:   request.RequestID,
-			ErrorType:   request.ErrorType,
-			ErrorCode:   request.ErrorCode,
-			DeclineCode: request.DeclineCode,
-		}
-	}
-	match.Attribution = attribution
+	match.Attribution = &Attribution{Target: match.Triggers[0], Fact: cloneFact(fact)}
 	return match
 }
 

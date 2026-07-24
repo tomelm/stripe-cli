@@ -199,7 +199,7 @@ func (run *evaluation) resourceTarget(check checks.ResourceCheck, discovery targ
 	group := targetGroup(check.Role, check.ResourceType)
 	unboundAfterOpen := !bound && run.uiOpened() && !hasBindingRole(run.attempt, check.Role)
 	persistedCandidate := binding.Source == coop.BindingObservedCandidate && bindingAttempt == run.attempt
-	reviewBinding := (binding.Source == coop.BindingObservedCandidate || binding.Source == coop.BindingObserved) &&
+	reviewBinding := binding.Source == coop.BindingObservedCandidate &&
 		bindingAttempt == run.attempt && discovery.reviewActive
 	return target{
 		meta: check.CheckMeta, kind: coop.CheckResource,
@@ -219,7 +219,7 @@ func (run *evaluation) stateTarget(check checks.StateCheck, discovery targetDisc
 	binding, bindingAttempt, bound := run.binding(check.Source, check.Role, check.ResourceType)
 	persistedCandidate := bound && binding.Source == coop.BindingObservedCandidate && bindingAttempt == run.attempt
 	unboundAfterOpen := binding.ID == "" && run.uiOpened() && !hasBindingRole(run.attempt, check.Role)
-	reviewBinding := bound && (binding.Source == coop.BindingObservedCandidate || binding.Source == coop.BindingObserved) &&
+	reviewBinding := bound && binding.Source == coop.BindingObservedCandidate &&
 		bindingAttempt == run.attempt && discovery.reviewActive
 	return target{
 		meta: check.CheckMeta, kind: coop.CheckState,

@@ -849,13 +849,7 @@ func (s *Service) RecordSupportingResult(sessionID string, nodeNumber, attemptNu
 	if result.Status != coop.CheckObserved && result.Status != coop.CheckFailed {
 		return errors.New("supporting evidence must be observed or failed")
 	}
-	if result.Status == coop.CheckObserved {
-		result.Importance = coop.CheckAdvisory
-	} else if result.Importance != coop.CheckRequired {
-		// An attributed request failure may be required. Every other passive
-		// observation remains advisory and can never decide completion.
-		result.Importance = coop.CheckAdvisory
-	}
+	result.Importance = coop.CheckAdvisory
 	_, err := s.store.Update(sessionID, func(session *coop.Session) error {
 		if err := requireActiveSession(session); err != nil {
 			return err
