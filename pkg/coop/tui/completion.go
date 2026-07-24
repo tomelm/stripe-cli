@@ -236,9 +236,10 @@ func completionEvidenceLabel(node *coop.SessionNode) string {
 	if attempt == nil {
 		return "No verification evidence recorded"
 	}
+	assessment := coop.AssessAttempts(attempt)
 
 	var labels []string
-	if hasPassedDirectCheck(attempt) {
+	if assessment.DirectPassed > 0 {
 		labels = append(labels, "Co-op checked")
 	}
 	if humanConfirmedAttempt(node, attempt) {
@@ -251,8 +252,9 @@ func completionEvidenceLabel(node *coop.SessionNode) string {
 	} else if completedWithoutAutomaticVerification(node) {
 		labels = append(labels, "Agent reported; no direct automatic check")
 	}
-	if hasCoverageGap(attempt) && attempt.Override == nil &&
-		(!completedWithUnavailableVerification(node) || hasAdvisoryCoverageGap(attempt)) {
+	hasCoverageGap := assessment.RequiredCoverageUnavailable > 0 || assessment.AdvisoryCoverageUnavailable > 0
+	if hasCoverageGap && attempt.Override == nil &&
+		(!completedWithUnavailableVerification(node) || assessment.AdvisoryCoverageUnavailable > 0) {
 		labels = append(labels, "Coverage gap")
 	}
 	if attempt.Override != nil {
@@ -269,43 +271,6 @@ func humanConfirmedAttempt(node *coop.SessionNode, attempt *coop.NodeAttempt) bo
 		return false
 	}
 	return node.Type == coop.NodeUIComponent || node.Type == coop.NodeDashboard
-}
-
-func hasPassedDirectCheck(attempt *coop.NodeAttempt) bool {
-	if attempt == nil {
-		return false
-	}
-	for _, result := range attempt.Results {
-		if (result.Kind == coop.CheckResource || result.Kind == coop.CheckState) && result.Status == coop.CheckPassed {
-			return true
-		}
-	}
-	return false
-}
-
-func hasCoverageGap(attempt *coop.NodeAttempt) bool {
-	if attempt == nil {
-		return false
-	}
-	for _, result := range attempt.Results {
-		if result.Kind == coop.CheckCoverage && result.Status == coop.CheckUnavailable {
-			return true
-		}
-	}
-	return false
-}
-
-func hasAdvisoryCoverageGap(attempt *coop.NodeAttempt) bool {
-	if attempt == nil {
-		return false
-	}
-	for _, result := range attempt.Results {
-		if result.Kind == coop.CheckCoverage && result.Status == coop.CheckUnavailable &&
-			result.Importance != coop.CheckRequired {
-			return true
-		}
-	}
-	return false
 }
 
 func wrapPlainText(s string, width int) []string {

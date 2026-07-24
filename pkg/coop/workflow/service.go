@@ -907,14 +907,8 @@ func alreadyMovedResponse(session *coop.Session, nodeNumber int, state coop.Node
 		case coop.AttemptCompletedUnverified:
 			response.State = string(decisionUnverified)
 			response.Decision = string(decisionUnverified)
-			unavailable := false
-			for _, result := range attempt.Results {
-				if result.Importance == coop.CheckRequired && result.Status == coop.CheckUnavailable {
-					unavailable = true
-					break
-				}
-			}
-			response.Message = unverifiedCompletionMessage(nodeNumber, node, unavailable)
+			assessment := coop.AssessAttempts(attempt)
+			response.Message = unverifiedCompletionMessage(nodeNumber, node, len(assessment.RequiredUnavailable) > 0)
 		case coop.AttemptConfirmed:
 			response.Decision = string(decisionConfirmed)
 		}

@@ -66,14 +66,14 @@ func ReviewAttemptsReadiness(session *coop.Session, refs []AttemptRef) (ReviewRe
 			}
 		}
 
-		policy := decideResults(attempt.Results, attempt.AgentChecks, true)
-		readiness.Blocking = append(readiness.Blocking, policy.failed...)
+		assessment := coop.AssessAttempts(attempt)
+		readiness.Blocking = append(readiness.Blocking, assessment.Blocking...)
 
-		incomplete := len(policy.pending) > 0 ||
-			len(policy.unavailable) > 0 ||
+		incomplete := len(assessment.RequiredPending) > 0 ||
+			len(assessment.RequiredUnavailable) > 0 ||
 			attempt.AutomaticRefreshPending ||
 			attempt.AutomaticCheckPending() ||
-			attemptHasObservedCandidate(attempt)
+			assessment.HasObservedCandidate
 		if node.Type == coop.NodeUIComponent {
 			incomplete = incomplete ||
 				attempt.AppSurface.OpenedAt == nil ||

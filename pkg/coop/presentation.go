@@ -17,20 +17,10 @@ func AsyncHandlerCompletionSummary(node *SessionNode) string {
 		return ""
 	}
 
-	required, statePassed := 0, false
-	for _, result := range attempt.Results {
-		if result.Importance != CheckRequired {
-			continue
-		}
-		required++
-		if result.Status != CheckPassed {
-			return ""
-		}
-		if result.Kind == CheckState {
-			statePassed = true
-		}
-	}
-	if required == 0 || !statePassed {
+	assessment := AssessAttempts(attempt)
+	if assessment.Required == 0 ||
+		assessment.RequiredPassed != assessment.Required ||
+		!assessment.RequiredStatePassed {
 		return ""
 	}
 	return AsyncHandlerStateVerifiedSummary

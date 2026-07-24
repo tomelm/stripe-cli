@@ -102,47 +102,15 @@ type resultPolicy struct {
 	passed      int
 }
 
-// decideResults contains no Stripe fields or product switches. It treats only
-// catalog importance and typed factual status as workflow policy.
-func decideResults(results []coop.CheckResult, agentChecks []coop.Verification, humanReview bool) resultPolicy {
-	policy := resultPolicy{}
-	for _, result := range results {
-		if result.Importance != coop.CheckRequired {
-			continue
-		}
-		policy.required++
-		switch result.Status {
-		case coop.CheckPassed:
-			policy.passed++
-		case coop.CheckFailed:
-			policy.failed = append(policy.failed, result)
-		case coop.CheckPending:
-			policy.pending = append(policy.pending, result)
-		case coop.CheckUnavailable:
-			policy.unavailable = append(policy.unavailable, result)
-		}
-	}
-	latestAgentChecks := make(map[string]bool, len(agentChecks))
-	for _, check := range agentChecks {
-		label := strings.TrimSpace(check.Check)
-		if label != "" {
-			latestAgentChecks[label] = check.Passed
-		}
-	}
-	labels := make([]string, 0, len(latestAgentChecks))
-	for label, passed := range latestAgentChecks {
-		if !passed {
-			labels = append(labels, label)
-		}
-	}
-	sort.Strings(labels)
-	for index, label := range labels {
-		policy.failed = append(policy.failed, coop.CheckResult{
-			ID: fmt.Sprintf("agent.reported.%d", index+1), Kind: coop.CheckApp,
-			Importance: coop.CheckRequired, Status: coop.CheckFailed,
-			Detail: "Agent reported a failing check: " + label,
-			Repair: "Fix the issue and rerun this check before reporting the attempt.",
-		})
+// decideAssessment applies universal workflow policy to a pure evidence
+// projection. It contains no Stripe fields or product-specific switches.
+func decideAssessment(assessment coop.AttemptAssessment, humanReview bool) resultPolicy {
+	policy := resultPolicy{
+		failed:      assessment.Blocking,
+		pending:     assessment.RequiredPending,
+		unavailable: assessment.RequiredUnavailable,
+		required:    assessment.Required,
+		passed:      assessment.RequiredPassed,
 	}
 	switch {
 	case len(policy.failed) > 0:
@@ -530,7 +498,8 @@ func (s *Service) applyEvaluation(session *coop.Session, nodeNumber, attemptNumb
 		applied.policy.decision = decisionPending
 		return nil
 	}
-	applied.policy = decideResults(attempt.Results, attempt.AgentChecks, isHumanReviewNode(node))
+	assessment := coop.AssessAttempts(attempt)
+	applied.policy = decideAssessment(assessment, isHumanReviewNode(node))
 	if attempt.AutomaticRefreshPending {
 		// An observation arrived after this read began. Do not close the attempt
 		// from the older snapshot; the coordinator must perform the coalesced
@@ -542,7 +511,7 @@ func (s *Service) applyEvaluation(session *coop.Session, nodeNumber, attemptNumb
 		applied.policy.decision = decisionPending
 		return nil
 	}
-	normalizeEvaluationPolicy(session, node, nodeNumber, attempt, &applied.policy)
+	normalizeEvaluationPolicy(session, node, nodeNumber, assessment, &applied.policy)
 	return s.applyEvaluationPolicy(session, node, nodeNumber, attemptNumber, applied)
 }
 
@@ -577,20 +546,8 @@ func stepHasHumanReview(session *coop.Session, nodeNumber int) bool {
 	return false
 }
 
-func attemptHasObservedCandidate(attempt *coop.NodeAttempt) bool {
-	if attempt == nil {
-		return false
-	}
-	for _, binding := range attempt.Resources {
-		if binding.Source == coop.BindingObservedCandidate {
-			return true
-		}
-	}
-	return false
-}
-
-func protectCandidateCompletion(session *coop.Session, nodeNumber int, attempt *coop.NodeAttempt, policy *resultPolicy) {
-	if policy == nil || !attemptHasObservedCandidate(attempt) ||
+func protectCandidateCompletion(session *coop.Session, nodeNumber int, hasObservedCandidate bool, policy *resultPolicy) {
+	if policy == nil || !hasObservedCandidate ||
 		(policy.decision != decisionConfirmed && policy.decision != decisionUnverified) {
 		return
 	}
@@ -604,7 +561,7 @@ func protectCandidateCompletion(session *coop.Session, nodeNumber int, attempt *
 	policy.decision = decisionPending
 }
 
-func normalizeEvaluationPolicy(session *coop.Session, node *coop.SessionNode, nodeNumber int, attempt *coop.NodeAttempt, policy *resultPolicy) {
+func normalizeEvaluationPolicy(session *coop.Session, node *coop.SessionNode, nodeNumber int, assessment coop.AttemptAssessment, policy *resultPolicy) {
 	if policy == nil {
 		return
 	}
@@ -613,7 +570,7 @@ func normalizeEvaluationPolicy(session *coop.Session, node *coop.SessionNode, no
 		// developer's webhook endpoint received or processed the event.
 		policy.decision = decisionUnverified
 	}
-	protectCandidateCompletion(session, nodeNumber, attempt, policy)
+	protectCandidateCompletion(session, nodeNumber, assessment.HasObservedCandidate, policy)
 	if policy.decision == decisionUnverified && len(policy.unavailable) > 0 && stepHasHumanReview(session, nodeNumber) {
 		policy.decision = decisionNeedsHuman
 	}

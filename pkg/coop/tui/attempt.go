@@ -21,12 +21,7 @@ func completedWithUnavailableVerification(node *coop.SessionNode) bool {
 	if !completedWithoutAutomaticVerification(node) {
 		return false
 	}
-	for _, result := range presentationAttempt(node).Results {
-		if result.Importance == coop.CheckRequired && result.Status == coop.CheckUnavailable {
-			return true
-		}
-	}
-	return false
+	return len(coop.AssessAttempts(presentationAttempt(node)).RequiredUnavailable) > 0
 }
 
 func completedWithVerificationOverride(node *coop.SessionNode) bool {

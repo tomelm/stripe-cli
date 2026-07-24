@@ -147,7 +147,8 @@ func (m Model) renderReviewCardWithMaxHeight(maxHeight int) string {
 	if correction := m.reviewCorrectionLabel(target.nodeNumbers); correction != "" {
 		lines = append(lines, m.theme.AttentionStyle.Render("Agent resubmitted after feedback: ")+correction)
 	}
-	lines = append(lines, m.reviewAutomaticLabels(target.nodeNumbers)...)
+	assessment := summarizeAutomaticReview(m.session, target.nodeNumbers)
+	lines = append(lines, m.reviewAutomaticLabels(assessment)...)
 	if label := m.reviewReadinessLabel(target.nodeNumbers); label != "" {
 		lines = append(lines, label)
 	}
@@ -308,31 +309,21 @@ func (m Model) reviewCorrectionLabel(nodeNumbers []int) string {
 }
 
 func (m Model) reviewVerificationLabel(nodeNumbers []int) string {
-	passed := 0
-	total := 0
+	var attempts []*coop.NodeAttempt
 	for _, nodeNumber := range nodeNumbers {
 		node, err := m.session.NodeByNumber(nodeNumber)
-		if err != nil {
-			continue
-		}
-		attempt := presentationAttempt(node)
-		if attempt == nil {
-			continue
-		}
-		for _, v := range attempt.AgentChecks {
-			total++
-			if v.Passed {
-				passed++
-			}
+		if err == nil {
+			attempts = append(attempts, presentationAttempt(node))
 		}
 	}
-	if total == 0 {
+	assessment := coop.AssessAttempts(attempts...)
+	if assessment.AgentChecks == 0 {
 		return ""
 	}
-	if passed == total {
-		return fmt.Sprintf("%d check(s) passed", passed)
+	if assessment.AgentChecksPassed == assessment.AgentChecks {
+		return fmt.Sprintf("%d check(s) passed", assessment.AgentChecksPassed)
 	}
-	return fmt.Sprintf("%d/%d check(s) passed", passed, total)
+	return fmt.Sprintf("%d/%d check(s) passed", assessment.AgentChecksPassed, assessment.AgentChecks)
 }
 
 func (m Model) reviewAppLabels(nodeNumbers []int) []string {
@@ -355,11 +346,10 @@ func (m Model) reviewAppLabels(nodeNumbers []int) []string {
 	return labels
 }
 
-func (m Model) reviewAutomaticLabels(nodeNumbers []int) []string {
-	summary := summarizeAutomaticReview(m.session, nodeNumbers)
+func (m Model) reviewAutomaticLabels(summary coop.AttemptAssessment) []string {
 	var labels []string
-	if len(summary.blocking) > 0 {
-		result := summary.blocking[0]
+	if len(summary.RequiredFailures) > 0 {
+		result := summary.RequiredFailures[0]
 		kind := "verification"
 		switch result.Kind {
 		case coop.CheckRequest:
@@ -381,34 +371,35 @@ func (m Model) reviewAutomaticLabels(nodeNumbers []int) []string {
 		if repair := strings.TrimSpace(safeEvidenceText(result.Repair)); repair != "" {
 			labels = append(labels, m.theme.AttentionStyle.Render("How to fix: "+repair))
 		}
-		if len(summary.blocking) > 1 {
-			labels = append(labels, m.theme.AttentionStyle.Render(fmt.Sprintf("%d more blocking issue(s); open details to review them.", len(summary.blocking)-1)))
+		if len(summary.RequiredFailures) > 1 {
+			labels = append(labels, m.theme.AttentionStyle.Render(fmt.Sprintf("%d more blocking issue(s); open details to review them.", len(summary.RequiredFailures)-1)))
 		}
 	}
-	if summary.directPassed > 0 || summary.directPending > 0 {
+	if summary.DirectPassed > 0 || summary.DirectPending > 0 {
 		parts := make([]string, 0, 2)
-		if summary.directPassed > 0 {
-			parts = append(parts, fmt.Sprintf("%d passed", summary.directPassed))
+		if summary.DirectPassed > 0 {
+			parts = append(parts, fmt.Sprintf("%d passed", summary.DirectPassed))
 		}
-		if summary.directPending > 0 {
-			parts = append(parts, fmt.Sprintf("%d pending", summary.directPending))
+		if summary.DirectPending > 0 {
+			parts = append(parts, fmt.Sprintf("%d pending", summary.DirectPending))
 		}
 		labels = append(labels, m.theme.MutedStyle.Render("Co-op checked: ")+strings.Join(parts, " · "))
 	}
-	if summary.observed > 0 {
-		text := fmt.Sprintf("%d supporting signal(s)", summary.observed)
-		if summary.observedFailures > 0 {
-			text += fmt.Sprintf(" · %d failed supporting signal(s); does not block confirmation", summary.observedFailures)
+	if summary.Supporting > 0 {
+		text := fmt.Sprintf("%d supporting signal(s)", summary.Supporting)
+		if summary.SupportingFailures > 0 {
+			text += fmt.Sprintf(" · %d failed supporting signal(s); does not block confirmation", summary.SupportingFailures)
 		}
 		labels = append(labels, m.theme.MutedStyle.Render("Stripe observed: ")+text)
 	}
-	if summary.directUnavailable > 0 {
-		labels = append(labels, m.theme.MutedStyle.Render(fmt.Sprintf("Limited automatic coverage: %d unavailable", summary.directUnavailable)))
-		if len(summary.unavailableDetails) > 0 {
-			labels = append(labels, m.theme.MutedStyle.Render("Why: "+summary.unavailableDetails[0]))
+	unavailable := len(summary.DirectUnavailable) + summary.RequiredCoverageUnavailable
+	if unavailable > 0 {
+		labels = append(labels, m.theme.MutedStyle.Render(fmt.Sprintf("Limited automatic coverage: %d unavailable", unavailable)))
+		if detail := firstRequiredUnavailableDetail(summary); detail != "" {
+			labels = append(labels, m.theme.MutedStyle.Render("Why: "+detail))
 		}
 	}
-	for index, mismatch := range summary.possibleMismatches {
+	for index, mismatch := range possibleAutomaticMismatches(summary) {
 		if index == 2 {
 			labels = append(labels, m.theme.AttentionStyle.Render("Possible mismatches: open details for more"))
 			break
@@ -436,85 +427,49 @@ func (m Model) reviewReadinessLabel(nodeNumbers []int) string {
 	return ""
 }
 
-type automaticReviewSummary struct {
-	directPassed       int
-	directPending      int
-	directUnavailable  int
-	observed           int
-	observedFailures   int
-	blocking           []coop.CheckResult
-	possibleMismatches []string
-	unavailableDetails []string
-}
-
-func summarizeAutomaticReview(session *coop.Session, nodeNumbers []int) automaticReviewSummary {
-	var summary automaticReviewSummary
+func summarizeAutomaticReview(session *coop.Session, nodeNumbers []int) coop.AttemptAssessment {
 	if session == nil {
-		return summary
+		return coop.AttemptAssessment{}
 	}
+	var attempts []*coop.NodeAttempt
 	for _, nodeNumber := range nodeNumbers {
 		node, err := session.NodeByNumber(nodeNumber)
 		if err != nil || node.CurrentAttempt() == nil {
 			continue
 		}
-		for _, result := range node.CurrentAttempt().Results {
-			summary.add(result)
-		}
+		attempts = append(attempts, node.CurrentAttempt())
 	}
-	return summary
+	return coop.AssessAttempts(attempts...)
 }
 
-func (summary *automaticReviewSummary) add(result coop.CheckResult) {
-	if result.Importance == coop.CheckRequired && result.Status == coop.CheckFailed {
-		summary.blocking = append(summary.blocking, result)
-		return
-	}
-	switch result.Kind {
-	case coop.CheckRequest, coop.CheckEvent:
-		if result.Status == coop.CheckObserved || result.Status == coop.CheckFailed {
-			summary.observed++
-		}
-		if result.Status == coop.CheckFailed {
-			summary.observedFailures++
-		}
-	case coop.CheckResource, coop.CheckState:
-		summary.addDirect(result)
-	case coop.CheckCoverage:
-		if result.Importance == coop.CheckRequired && result.Status == coop.CheckUnavailable {
-			summary.directUnavailable++
-			summary.addUnavailableDetail(result.Detail)
+func firstRequiredUnavailableDetail(assessment coop.AttemptAssessment) string {
+	for _, result := range assessment.RequiredUnavailable {
+		if (result.Kind == coop.CheckResource || result.Kind == coop.CheckState || result.Kind == coop.CheckCoverage) &&
+			strings.TrimSpace(result.Detail) != "" {
+			return safeEvidenceText(result.Detail)
 		}
 	}
+	return ""
 }
 
-func (summary *automaticReviewSummary) addDirect(result coop.CheckResult) {
-	switch result.Status {
-	case coop.CheckPassed:
-		summary.directPassed++
-	case coop.CheckPending:
-		summary.directPending++
-	case coop.CheckUnavailable:
-		summary.directUnavailable++
-		if result.Importance == coop.CheckRequired {
-			summary.addUnavailableDetail(result.Detail)
-		}
-		if result.Importance == coop.CheckAdvisory && result.Expected != "" && result.Observed != "" {
-			summary.possibleMismatches = append(
-				summary.possibleMismatches,
-				"expected "+safeEvidenceText(result.Expected)+"; observed "+safeEvidenceText(result.Observed),
-			)
-		}
-	case coop.CheckFailed:
-		if result.Importance == coop.CheckAdvisory {
-			detail := strings.TrimSpace(safeEvidenceText(result.Detail))
-			if detail == "" && result.Expected != "" && result.Observed != "" {
-				detail = "expected " + safeEvidenceText(result.Expected) + "; observed " + safeEvidenceText(result.Observed)
+func possibleAutomaticMismatches(assessment coop.AttemptAssessment) []string {
+	var mismatches []string
+	for _, result := range assessment.AdvisoryDirectIssues {
+		if result.Status == coop.CheckUnavailable {
+			if result.Expected != "" && result.Observed != "" {
+				mismatches = append(mismatches, "expected "+safeEvidenceText(result.Expected)+"; observed "+safeEvidenceText(result.Observed))
 			}
-			if detail != "" {
-				summary.possibleMismatches = append(summary.possibleMismatches, detail)
-			}
+			continue
+		}
+		detail := strings.TrimSpace(safeEvidenceText(result.Detail))
+		if detail == "" && result.Expected != "" && result.Observed != "" {
+			detail = "expected " + safeEvidenceText(result.Expected) + "; observed " + safeEvidenceText(result.Observed)
+		}
+		if detail != "" {
+			mismatches = append(mismatches, detail)
 		}
 	}
+	return mismatches
 }
 
 func (m Model) independentUIReview(target reviewTarget) bool {
@@ -533,12 +488,6 @@ func (m Model) independentUIReview(target reviewTarget) bool {
 		}
 	}
 	return false
-}
-
-func (summary *automaticReviewSummary) addUnavailableDetail(detail string) {
-	if strings.TrimSpace(detail) != "" {
-		summary.unavailableDetails = append(summary.unavailableDetails, safeEvidenceText(detail))
-	}
 }
 
 func (m Model) reviewNodeTitleLabel(nodeNumbers []int) string {
