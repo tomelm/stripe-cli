@@ -251,12 +251,12 @@ func completionEvidenceLabel(node *coop.SessionNode) string {
 	} else if completedWithoutAutomaticVerification(node) {
 		labels = append(labels, "Agent reported; no direct automatic check")
 	}
-	if hasCoverageGap(attempt) &&
+	if hasCoverageGap(attempt) && attempt.Override == nil &&
 		(!completedWithUnavailableVerification(node) || hasAdvisoryCoverageGap(attempt)) {
 		labels = append(labels, "Coverage gap")
 	}
 	if attempt.Override != nil {
-		labels = append(labels, "Limited coverage recorded")
+		labels = append(labels, "Limited automatic coverage recorded")
 	}
 	if len(labels) == 0 {
 		return "No direct automatic check recorded"

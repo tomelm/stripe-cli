@@ -43,7 +43,13 @@ func (m Model) renderFooter() string {
 		}
 		if count := m.actionableReviewCount(); count > 0 {
 			lines = append(lines, "")
-			lines = append(lines, m.theme.AttentionStyle.Render("  Waiting for you: review step"))
+			message := "Waiting for you: review step"
+			if target, ok := m.selectedReviewTarget(); ok && m.independentUIReview(target) {
+				message = "UI ready for review while the agent continues this step"
+			}
+			for _, line := range wrapPlainText(message, max(m.width-4, 20)) {
+				lines = append(lines, m.theme.AttentionStyle.Render("  "+line))
+			}
 		}
 	}
 
@@ -121,6 +127,9 @@ func (m Model) renderReviewCardWithMaxHeight(maxHeight int) string {
 		prefix = "Review step"
 	}
 	lines = append(lines, m.theme.ReviewStyle.Render(prefix))
+	if m.independentUIReview(target) {
+		lines = append(lines, m.theme.MutedStyle.Render("This UI is ready to review while the agent continues the rest of the step."))
+	}
 	check := m.reviewPromptLabel(target.nodeNumbers)
 	if check != "" {
 		lines = append(lines, m.theme.ConfirmationHeaderStyle.Render("What to try"))
@@ -357,6 +366,33 @@ func (m Model) reviewAppLabels(nodeNumbers []int) []string {
 func (m Model) reviewAutomaticLabels(nodeNumbers []int) []string {
 	summary := summarizeAutomaticReview(m.session, nodeNumbers)
 	var labels []string
+	if len(summary.blocking) > 0 {
+		result := summary.blocking[0]
+		kind := "verification"
+		switch result.Kind {
+		case coop.CheckRequest:
+			kind = "Stripe request"
+		case coop.CheckEvent:
+			kind = "Stripe event"
+		}
+		detail := strings.TrimSpace(safeEvidenceText(result.Detail))
+		if detail == "" {
+			detail = safeEvidenceText(result.ID)
+		}
+		labels = append(labels, m.theme.AttentionStyle.Render("Co-op found a blocking "+kind+" issue: "+detail))
+		if expected := strings.TrimSpace(safeEvidenceText(result.Expected)); expected != "" {
+			labels = append(labels, m.theme.AttentionStyle.Render("Expected: "+expected))
+		}
+		if observed := strings.TrimSpace(safeEvidenceText(result.Observed)); observed != "" {
+			labels = append(labels, m.theme.AttentionStyle.Render("Observed: "+observed))
+		}
+		if repair := strings.TrimSpace(safeEvidenceText(result.Repair)); repair != "" {
+			labels = append(labels, m.theme.AttentionStyle.Render("How to fix: "+repair))
+		}
+		if len(summary.blocking) > 1 {
+			labels = append(labels, m.theme.AttentionStyle.Render(fmt.Sprintf("%d more blocking issue(s); open details to review them.", len(summary.blocking)-1)))
+		}
+	}
 	if summary.directPassed > 0 || summary.directPending > 0 {
 		parts := make([]string, 0, 2)
 		if summary.directPassed > 0 {
@@ -370,7 +406,7 @@ func (m Model) reviewAutomaticLabels(nodeNumbers []int) []string {
 	if summary.observed > 0 {
 		text := fmt.Sprintf("%d supporting signal(s)", summary.observed)
 		if summary.observedFailures > 0 {
-			text += fmt.Sprintf(" · %d failed request(s), supporting only", summary.observedFailures)
+			text += fmt.Sprintf(" · %d failed supporting signal(s); does not block confirmation", summary.observedFailures)
 		}
 		labels = append(labels, m.theme.MutedStyle.Render("Stripe observed: ")+text)
 	}
@@ -407,7 +443,7 @@ func (m Model) reviewReadinessLabel(nodeNumbers []int) string {
 		return ""
 	}
 	if len(readiness.Blocking) > 0 {
-		return m.theme.AttentionStyle.Render("Co-op found a contradiction; request agent changes before confirming.")
+		return m.theme.AttentionStyle.Render("Confirmation is blocked until the agent corrects the required check.")
 	}
 	if readiness.ContainsHumanReview && readiness.Incomplete {
 		return m.theme.MutedStyle.Render("You can confirm now; incomplete checks will remain recorded as unverified.")
@@ -421,6 +457,7 @@ type automaticReviewSummary struct {
 	directUnavailable  int
 	observed           int
 	observedFailures   int
+	blocking           []coop.CheckResult
 	possibleMismatches []string
 	unavailableDetails []string
 	unverifiedOutcomes []string
@@ -444,6 +481,10 @@ func summarizeAutomaticReview(session *coop.Session, nodeNumbers []int) automati
 }
 
 func (summary *automaticReviewSummary) add(result coop.CheckResult) {
+	if result.Importance == coop.CheckRequired && result.Status == coop.CheckFailed {
+		summary.blocking = append(summary.blocking, result)
+		return
+	}
 	switch result.Kind {
 	case coop.CheckRequest, coop.CheckEvent:
 		if result.Status == coop.CheckObserved || result.Status == coop.CheckFailed {
@@ -483,7 +524,35 @@ func (summary *automaticReviewSummary) addDirect(result coop.CheckResult) {
 				"expected "+safeEvidenceText(result.Expected)+"; observed "+safeEvidenceText(result.Observed),
 			)
 		}
+	case coop.CheckFailed:
+		if result.Importance == coop.CheckAdvisory {
+			detail := strings.TrimSpace(safeEvidenceText(result.Detail))
+			if detail == "" && result.Expected != "" && result.Observed != "" {
+				detail = "expected " + safeEvidenceText(result.Expected) + "; observed " + safeEvidenceText(result.Observed)
+			}
+			if detail != "" {
+				summary.possibleMismatches = append(summary.possibleMismatches, detail)
+			}
+		}
 	}
+}
+
+func (m Model) independentUIReview(target reviewTarget) bool {
+	if m.session == nil || target.kind != "node" || len(target.nodeNumbers) != 1 ||
+		target.stepIndex < 0 || target.stepIndex >= len(m.session.Steps) {
+		return false
+	}
+	node, err := m.session.NodeByNumber(target.nodeNumbers[0])
+	if err != nil || node.Type != coop.NodeUIComponent || node.State != coop.NodeReview {
+		return false
+	}
+	for index := range m.session.Steps[target.stepIndex].Nodes {
+		sibling := &m.session.Steps[target.stepIndex].Nodes[index]
+		if sibling != node && sibling.State == coop.NodeActive {
+			return true
+		}
+	}
+	return false
 }
 
 func (summary *automaticReviewSummary) addUnavailableDetail(detail string) {

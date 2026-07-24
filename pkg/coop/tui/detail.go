@@ -6,6 +6,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/stripe/stripe-cli/pkg/coop"
+	"github.com/stripe/stripe-cli/pkg/coop/workflow"
 )
 
 var detailSections = []string{"Summary", "Files", "Checks", "Reference"}
@@ -97,7 +98,7 @@ func (m Model) renderStepDetail(stepIndex int) string {
 	content := strings.TrimSpace(md.String())
 	suffix := ""
 	if target, ok := m.selectedReviewTarget(); ok && target.kind == "step" {
-		suffix = "\n" + m.attentionWrapped("Waiting for you: c confirm all · r request changes", innerW)
+		suffix = "\n" + m.reviewActionSuffix(target, innerW)
 	}
 	if content == "" && suffix == "" {
 		return ""
@@ -510,10 +511,10 @@ func (m Model) writeAutomaticResults(md *strings.Builder, node *coop.SessionNode
 	}
 	for _, result := range attempt.Results {
 		label := "Co-op checked"
-		if result.Kind == coop.CheckRequest || result.Kind == coop.CheckEvent {
+		if result.Status == coop.CheckUnavailable {
+			label = "Limited automatic coverage"
+		} else if result.Kind == coop.CheckRequest || result.Kind == coop.CheckEvent {
 			label = "Stripe observed"
-		} else if result.Status == coop.CheckUnavailable {
-			label = "Automatic check unavailable"
 		}
 		symbol := "↻"
 		switch result.Status {
@@ -522,7 +523,7 @@ func (m Model) writeAutomaticResults(md *strings.Builder, node *coop.SessionNode
 		case coop.CheckFailed:
 			symbol = "✗"
 		case coop.CheckUnavailable:
-			symbol = "!"
+			symbol = "•"
 		}
 		line := "- " + symbol + " " + prefix + label + ": " + safeEvidenceText(result.Detail)
 		if result.Detail == "" {
@@ -566,9 +567,35 @@ func safeEvidenceText(value string) string {
 func (m Model) renderDetailSuffix(node *coop.SessionNode, width int) string {
 	var suffix string
 	if target, ok := m.selectedReviewTarget(); ok && target.kind == "node" && node.State == coop.NodeReview {
-		suffix = "\n" + m.attentionWrapped("Waiting for you: c confirm · r request changes", width)
+		suffix = "\n" + m.reviewActionSuffix(target, width)
 	}
 	return suffix
+}
+
+func (m Model) reviewActionSuffix(selected reviewTarget, width int) string {
+	target, ok := m.selectedConfirmationTarget()
+	if !ok {
+		return ""
+	}
+	refs, err := m.attemptRefs(target.nodeNumbers)
+	if err == nil {
+		if readiness, readinessErr := workflow.ReviewAttemptsReadiness(m.session, refs); readinessErr == nil && len(readiness.Blocking) > 0 {
+			blocker := readiness.Blocking[0]
+			detail := strings.TrimSpace(safeEvidenceText(blocker.Detail))
+			if detail == "" {
+				detail = safeEvidenceText(blocker.ID)
+			}
+			return m.attentionWrapped("Cannot confirm: "+detail+" · r request changes", width)
+		}
+	}
+
+	action := "Waiting for your review: c confirm · r request changes"
+	if target.kind == "step" {
+		action = "Waiting for your review: c confirm all · r request changes"
+	} else if m.independentUIReview(selected) {
+		action = "UI ready for your review while the agent continues: c confirm UI · r request changes"
+	}
+	return m.attentionWrapped(action, width)
 }
 
 func (m Model) attentionWrapped(text string, width int) string {

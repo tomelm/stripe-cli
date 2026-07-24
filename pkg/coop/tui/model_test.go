@@ -236,7 +236,7 @@ func TestAppSurfaceRemainsAvailableWhileLaterNodeIsActive(t *testing.T) {
 	assert.Equal(t, "http://localhost:3000/checkout", selection.url)
 	assertContainsPlain(t, m.renderFooter(), "Ready to exercise: Checkout page")
 	assertContainsPlain(t, m.renderFooter(), "press o, optional")
-	assertContainsPlain(t, m.renderFooter(), "Waiting for you: review step")
+	assertContainsPlain(t, m.renderFooter(), "UI ready for review while the agent continues this step")
 	assertContainsPlain(t, m.renderFooter(), "c confirm")
 	assertContainsPlain(t, m.renderFooter(), "r changes")
 	assertContainsPlain(t, m.renderStepLine(m.session.Steps[0], 0, false), "App ready to exercise")

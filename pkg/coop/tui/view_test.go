@@ -382,7 +382,8 @@ func TestRenderRequiredApplicationOutcomesDoesNotDuplicateChecksEvidence(t *test
 	m.detailTab = 2
 	checks := m.renderDetail()
 	plainChecks := strings.Join(strings.Fields(strings.ReplaceAll(ansi.Strip(checks), "│", " ")), " ")
-	assert.Contains(t, plainChecks, "Automatic check unavailable")
+	assert.Contains(t, plainChecks, "Limited automatic coverage")
+	assert.NotContains(t, plainChecks, "! Automatic check unavailable")
 	assert.Contains(t, plainChecks, "No trusted application observation is configured")
 	assert.NotContains(t, plainChecks, "Required application outcomes")
 }
@@ -610,6 +611,89 @@ func TestRenderReviewCardGroupsAutomaticAndSupportingEvidence(t *testing.T) {
 	assertContainsPlain(t, card, "You can confirm now")
 }
 
+func TestRenderReviewCardShowsActionableRequiredBlockerAndSeparatesSupportingFailure(t *testing.T) {
+	m := testModel()
+	node := &m.session.Steps[0].Nodes[0]
+	node.Type = coop.NodeDashboard
+	node.State = coop.NodeReview
+	m.session.Steps[0].Nodes[1].State = coop.NodeDone
+	m.selectionCursor = 0
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	node.Attempts = []coop.NodeAttempt{{
+		Number: 1, StartedAt: now,
+		Results: []coop.CheckResult{
+			{
+				ID: "request.checkout.create", Kind: coop.CheckRequest,
+				Importance: coop.CheckRequired, Status: coop.CheckFailed,
+				Detail:    "Checkout creation returned an attributable error.",
+				Expected:  "a successful Checkout Session creation",
+				Observed:  "HTTP 400: missing success_url",
+				Repair:    "Pass a valid success_url and retry the flow.",
+				UpdatedAt: now,
+			},
+			{
+				ID: "request.unattributed", Kind: coop.CheckRequest,
+				Importance: coop.CheckAdvisory, Status: coop.CheckFailed,
+				Detail: "Another request returned HTTP 500.", UpdatedAt: now,
+			},
+		},
+	}}
+
+	card := m.renderReviewCard()
+	plainCard := strings.Join(strings.Fields(strings.ReplaceAll(ansi.Strip(card), "│", " ")), " ")
+
+	assert.Contains(t, plainCard, "Co-op found a blocking Stripe request issue:")
+	assert.Contains(t, plainCard, "Checkout creation returned an attributable error.")
+	assert.Contains(t, plainCard, "Expected: a successful Checkout Session creation")
+	assert.Contains(t, plainCard, "Observed: HTTP 400: missing success_url")
+	assert.Contains(t, plainCard, "How to fix: Pass a valid success_url and retry the flow.")
+	assert.Contains(t, plainCard, "1 supporting signal(s)")
+	assert.Contains(t, plainCard, "1 failed supporting signal(s); does not block confirmation")
+	assert.Contains(t, plainCard, "Confirmation is blocked")
+}
+
+func TestExpandedReviewDoesNotAdvertiseConfirmWhenRequiredCheckFailed(t *testing.T) {
+	m := testModel()
+	node := &m.session.Steps[0].Nodes[0]
+	node.Type = coop.NodeDashboard
+	node.State = coop.NodeReview
+	m.session.Steps[0].Nodes[1].State = coop.NodeDone
+	m.selectionCursor = 0
+	m.expanded = true
+	testPresentationAttempt(node).Results = []coop.CheckResult{{
+		ID: "resource.price.active", Kind: coop.CheckResource,
+		Importance: coop.CheckRequired, Status: coop.CheckFailed,
+		Detail:   "The submitted Price is inactive.",
+		Expected: "active=true", Observed: "active=false",
+		Repair: "Activate the Price or submit an active Price.",
+	}}
+
+	detail := m.renderDetail()
+
+	assertContainsPlain(t, detail, "Cannot confirm: The submitted Price is inactive.")
+	assertContainsPlain(t, detail, "r request changes")
+	assertNotContainsPlain(t, detail, "c confirm")
+}
+
+func TestIndependentlyReviewableUIExplainsAgentCanContinue(t *testing.T) {
+	m := testModel()
+	m.ready = true
+	m.height = 50
+	node := &m.session.Steps[0].Nodes[0]
+	node.Type = coop.NodeUIComponent
+	node.State = coop.NodeReview
+	m.session.Steps[0].Nodes[1].State = coop.NodeActive
+	m.selectionCursor = 0
+	testPresentationAttempt(node).AppSurface = &coop.AppSurface{URL: "http://localhost:3000/checkout"}
+
+	assertContainsPlain(t, m.renderFooter(), "UI ready for review while the agent continues this step")
+	assertContainsPlain(t, m.renderReviewCard(), "ready to review while the agent continues the rest of the step")
+
+	m.expanded = true
+	assertContainsPlain(t, m.renderDetail(), "UI ready for your review while the agent continues")
+	assertContainsPlain(t, m.renderDetail(), "c confirm UI")
+}
+
 func TestRenderReviewCardFallsBackToBlueprintConfirmation(t *testing.T) {
 	m := testModel()
 	m.session.Steps[0].Nodes[0].State = coop.NodeReview
@@ -803,7 +887,8 @@ func TestCompletionVerificationReportDisclosesLimitedCoverage(t *testing.T) {
 	report := m.renderCompletionBody()
 	plain := strings.Join(strings.Fields(ansi.Strip(report)), " ")
 
-	assert.Contains(t, plain, "Create product — Co-op checked · You reviewed · Coverage gap · Limited coverage recorded")
+	assert.Contains(t, plain, "Create product — Co-op checked · You reviewed · Limited automatic coverage recorded")
+	assert.NotContains(t, plain, "Coverage gap · Limited")
 	assert.Contains(t, plain, "application persistence, access control, and webhook")
 }
 
