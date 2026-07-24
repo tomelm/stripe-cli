@@ -917,13 +917,14 @@ func (m *Model) handleConfirm() tea.Cmd {
 		m.syncViewport()
 		return nil
 	}
+	limitedCoverage := confirmedWithLimitedCoverage(session, refs)
 	m.session = session
 	m.lastVersion = m.session.Version
 	if target.kind == "node" && len(target.nodeNumbers) > 0 {
 		m.selectNode(target.nodeNumbers[0] - 1)
 	}
 	m.userMoved = false
-	m.setStatus(m.confirmationStatus(readiness.Incomplete), 5*time.Second)
+	m.setStatus(m.confirmationStatus(limitedCoverage), 5*time.Second)
 	m.clearRejectionState()
 	if m.session.IsComplete() {
 		m.resetSelectionState()
@@ -937,6 +938,20 @@ func (m *Model) handleConfirm() tea.Cmd {
 		return m.returnToParent()
 	}
 	return nil
+}
+
+func confirmedWithLimitedCoverage(session *coop.Session, refs []workflow.AttemptRef) bool {
+	for _, ref := range refs {
+		node, err := session.NodeByNumber(ref.Node)
+		if err != nil {
+			continue
+		}
+		attempt, err := node.AttemptByNumber(ref.Attempt)
+		if err == nil && attempt.Override != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Model) startReject() tea.Cmd {

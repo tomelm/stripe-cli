@@ -302,6 +302,51 @@ func TestUpdateKeyConfirmUnavailableSucceedsWithOnePress(t *testing.T) {
 	assert.Equal(t, coop.CheckUnavailable, storedAttempt.Results[0].Status)
 }
 
+func TestUpdateKeyConfirmReportsAtomicLimitedCoverageDecision(t *testing.T) {
+	dir := t.TempDir()
+	store, err := coop.NewStoreAt(dir)
+	require.NoError(t, err)
+
+	m := readyModel()
+	m.store = store
+	m.session.ID = "atomic_override_test"
+	m.sessionID = m.session.ID
+	node := &m.session.Steps[0].Nodes[0]
+	node.Type = coop.NodeUIComponent
+	node.State = coop.NodeReview
+	m.session.Steps[0].Nodes[1].State = coop.NodeDone
+	m.selectionCursor = 0
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	attempt, err := node.StartAttempt(now, "")
+	require.NoError(t, err)
+	require.NoError(t, node.ReportAttempt(attempt.Number, now, &coop.Implementation{File: "checkout.tsx"}))
+	require.NoError(t, node.SetAppSurface(attempt.Number, coop.AppSurface{URL: "http://localhost:4242/checkout"}))
+	writeTestSession(t, store, m.session)
+
+	// Simulate an observer persisting incomplete coverage after the TUI's last
+	// snapshot but before the developer confirms.
+	_, err = store.Update(m.session.ID, func(session *coop.Session) error {
+		storedNode, nodeErr := session.NodeByNumber(1)
+		if nodeErr != nil {
+			return nodeErr
+		}
+		return storedNode.ReconcileAutomaticResults(attempt.Number, now.Add(time.Second), []coop.CheckResult{{
+			ID: "state.checkout", Kind: coop.CheckState, Importance: coop.CheckRequired,
+			Status: coop.CheckUnavailable, Detail: "Stripe read unavailable", UpdatedAt: now,
+		}})
+	})
+	require.NoError(t, err)
+	require.Empty(t, node.CurrentAttempt().Results, "the TUI snapshot should remain stale for this regression")
+
+	result, _ := m.Update(tea.KeyPressMsg{Code: 'c', Text: "c"})
+	updated := result.(Model)
+
+	assert.Contains(t, updated.statusMessage, "limited automatic coverage")
+	confirmed := presentationAttempt(&updated.session.Steps[0].Nodes[0])
+	require.NotNil(t, confirmed)
+	require.NotNil(t, confirmed.Override)
+}
+
 func TestViewProgressBarReflectsSessionProgress(t *testing.T) {
 	m := readyModel()
 
