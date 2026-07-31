@@ -376,7 +376,10 @@ func renderFix(r *FixReport) {
 			fmt.Println(okLine(line + "  reparse clean"))
 		}
 	}
-	if len(r.Files) == 0 {
+	for _, sk := range r.Skipped {
+		fmt.Println(warnLine(fmt.Sprintf("skipped %s:%d %s — %s", sk.File, sk.Line, mutedStyle.Render("["+sk.Intent+"]"), sk.Reason)))
+	}
+	if len(r.Files) == 0 && len(r.Skipped) == 0 {
 		fmt.Println(infoLine("nothing to fix"))
 	}
 }
