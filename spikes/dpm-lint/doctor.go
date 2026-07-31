@@ -298,8 +298,11 @@ func verdict(intent, value string, f *accountFacts) string {
 	}
 }
 
-// buildDoctorReport combines scan findings with account facts.
-func buildDoctorReport(findings []Finding, profile string) (*DoctorReport, error) {
+// buildDoctorReport combines scan findings with account facts. The rule
+// decides the judgment style: the dpm pack gets full account verdicts;
+// advise packs get ADVISE verdicts carrying the rule's remediation message
+// (their account precondition is the version window, shown as context).
+func buildDoctorReport(findings []Finding, profile string, rule Rule) (*DoctorReport, error) {
 	key, err := loadTestKey(profile)
 	if err != nil {
 		return nil, err
@@ -330,7 +333,15 @@ func buildDoctorReport(findings []Finding, profile string) (*DoctorReport, error
 	}
 	for _, f := range findings {
 		intent := classifyIntent(f.Value)
-		v := verdict(intent, f.Value, facts)
+		var v string
+		if rule.Action == "advise" {
+			v = "ADVISE: " + rule.Message
+			if rule.IntroducedIn != "" {
+				v += " (API " + rule.IntroducedIn + ")"
+			}
+		} else {
+			v = verdict(intent, f.Value, facts)
+		}
 		class := v
 		if i := strings.Index(v, ":"); i > 0 {
 			class = v[:i]

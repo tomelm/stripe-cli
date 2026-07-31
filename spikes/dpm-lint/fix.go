@@ -7,6 +7,7 @@ package main
 // valid. Nothing is written to disk.
 
 import (
+	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -89,6 +90,9 @@ func skipWS(src []byte, i, dir int) int {
 // and — only when apply is true AND the reparse is clean — writes the file.
 // A file that fails reparse is never written.
 func fixRun(root string, rule Rule, apply, includeAll bool) (*FixReport, error) {
+	if rule.Action != "remove" {
+		return nil, fmt.Errorf("rule %s is action=%q: it detects and advises but has no automatic fix — run `doctor` and follow %s", rule.ID, rule.Action, rule.Docs)
+	}
 	type fileEdit struct {
 		spec  langSpec
 		spans []span

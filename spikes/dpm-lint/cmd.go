@@ -35,7 +35,21 @@ var (
 // packs is the registry of migration topics. Adding a migration means adding
 // an entry here — the verbs never change.
 var packs = map[string]Rule{
-	"dpm": dpmRule,
+	"dpm":               dpmRule,
+	"tax-percent":       taxPercentRule,
+	"collection-method": collectionMethodRule,
+	"prorate":           prorateRule,
+	"source-types":      sourceTypesRule,
+}
+
+// topicList renders the registry for help and error text.
+func topicList() string {
+	var names []string
+	for n := range packs {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }
 
 func exitWith(code int) { os.Exit(code) }
@@ -70,7 +84,7 @@ func topicAndDir(args []string) (string, string, error) {
 	// With two args, the first must be a topic; two non-topics means the
 	// first was a typo'd topic, not a directory.
 	if len(nonTopic) > 1 || (len(args) == 2 && len(nonTopic) == 2) {
-		return "", "", fmt.Errorf("unknown topic %q (available: dpm)", nonTopic[0])
+		return "", "", fmt.Errorf("unknown topic %q (available: %s)", nonTopic[0], topicList())
 	}
 	if len(nonTopic) == 1 {
 		dir = nonTopic[0]
@@ -83,8 +97,10 @@ func newRootCmd() *cobra.Command {
 		Use:   "stripe",
 		Short: "Migration doctor (demo) — diagnose, remediate, and verify API migrations",
 		Long: `Diagnose and remediate Stripe API migrations. The engine is generic;
-migrations are rule packs named by topic (currently: dpm — Dynamic Payment
-Methods).
+migrations are rule packs named by topic.
+
+Topics: dpm (Dynamic Payment Methods, fixable) · tax-percent · 
+collection-method · prorate · source-types (advise-only renames/removals).
 
 Humans: start with ` + "`stripe demo dpm`" + `. Agents: start with ` + "`stripe guide`" + `.`,
 		SilenceUsage:  true,
@@ -127,16 +143,16 @@ runtime behavior (webhook round-trip via stripe listen/trigger).`,
 
 			var rep *DoctorReport
 			if offline {
-				rep = scanOnlyReport(topic, findings, stats, "offline requested (--offline)")
+				rep = scanOnlyReport(topic, rule, findings, stats, "offline requested (--offline)")
 			} else {
 				err := withSpinnerUnlessJSON("Fetching account facts (read-only)", func() error {
 					var derr error
-					rep, derr = buildDoctorReport(findings, flagProfile)
+					rep, derr = buildDoctorReport(findings, flagProfile, rule)
 					return derr
 				})
 				if err != nil {
 					// Graceful degradation: no creds -> scan-only, clearly labeled.
-					rep = scanOnlyReport(topic, findings, stats, err.Error())
+					rep = scanOnlyReport(topic, rule, findings, stats, err.Error())
 				} else {
 					rep.Topic = topic
 					rep.Stats = stats
@@ -177,13 +193,21 @@ runtime behavior (webhook round-trip via stripe listen/trigger).`,
 	return c
 }
 
-func scanOnlyReport(topic string, findings []Finding, stats ScanStats, why string) *DoctorReport {
+func scanOnlyReport(topic string, rule Rule, findings []Finding, stats ScanStats, why string) *DoctorReport {
 	rep := &DoctorReport{Command: "doctor", Topic: topic, Degraded: why, Summary: map[string]int{}, Stats: stats}
 	for _, f := range findings {
 		intent := classifyIntent(f.Value)
-		rep.Findings = append(rep.Findings, DoctorFinding{Finding: f, Intent: intent,
-			Verdict: "UNKNOWN: account facts unavailable — " + why, Class: "UNKNOWN"})
-		rep.Summary["UNKNOWN"]++
+		v, class := "UNKNOWN: account facts unavailable — "+why, "UNKNOWN"
+		if rule.Action == "advise" {
+			// An advise verdict is a version fact, not an account fact — it
+			// needs no credentials.
+			v, class = "ADVISE: "+rule.Message, "ADVISE"
+			if rule.IntroducedIn != "" {
+				v += " (API " + rule.IntroducedIn + ")"
+			}
+		}
+		rep.Findings = append(rep.Findings, DoctorFinding{Finding: f, Intent: intent, Verdict: v, Class: class})
+		rep.Summary[class]++
 	}
 	return rep
 }
@@ -425,15 +449,15 @@ func runDemo(topic, dir string, skipLive bool) {
 	}
 	var rep *DoctorReport
 	if skipLive {
-		rep = scanOnlyReport(topic, findings, stats, "--skip-live")
+		rep = scanOnlyReport(topic, rule, findings, stats, "--skip-live")
 	} else {
 		err := withSpinner("Fetching account facts (read-only)", func() error {
 			var derr error
-			rep, derr = buildDoctorReport(findings, flagProfile)
+			rep, derr = buildDoctorReport(findings, flagProfile, rule)
 			return derr
 		})
 		if err != nil {
-			rep = scanOnlyReport(topic, findings, stats, err.Error())
+			rep = scanOnlyReport(topic, rule, findings, stats, err.Error())
 		} else {
 			rep.Topic = topic
 			rep.Stats = stats
@@ -517,7 +541,16 @@ func newGuideCmd() *cobra.Command {
 
 const agentGuide = `# Migration doctor — agent playbook
 
-Verbs are generic; the migration is a topic argument (currently: dpm).
+Verbs are generic; the migration is a topic argument. Topics:
+  dpm                remove payment_method_types (fixable: doctor -> fix -> doctor)
+  tax-percent        tax_percent removed 2020-08-27 (advise: needs TaxRate objects)
+  collection-method  billing -> collection_method rename, 2019-10-17 (advise)
+  prorate            prorate -> proration_behavior, 2020-08-27 (advise)
+  source-types       allowed_source_types -> payment_method_types, 2019-02-11 (advise)
+Advise topics: doctor detects (verdict_class ADVISE, works offline) and the
+message names the replacement; fix exits 2 by design — apply the rename per
+the docs, then re-run doctor for exit 0. For source-types, run topic dpm
+afterwards: the renamed param is dpm's target.
 Every command supports --json (single JSON object on stdout; logs on stderr)
 and --yes (auto-approve confirmations). Exit codes: 0 clean/verified,
 1 findings-present/not-verified, 2 operational error.

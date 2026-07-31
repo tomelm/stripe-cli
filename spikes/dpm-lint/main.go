@@ -25,20 +25,29 @@ type ParamMatch struct {
 	Operations []string // "POST /v1/payment_intents"
 }
 
-// Rule is a lint check: "these operations must not receive this parameter."
+// Rule is a lint check over request parameters. Action declares what the
+// remediation is: "remove" rules are auto-fixable (span deletion); "advise"
+// rules detect and explain but never edit (renames, value changes, and
+// anything whose fix needs a primitive the engine doesn't have yet).
+// IntroducedIn is the API version that made the change — packs become
+// selectable by the user's version window.
 type Rule struct {
-	ID       string
-	Severity string
-	Message  string
-	Docs     string
-	Match    []ParamMatch
+	ID           string
+	Severity     string
+	Action       string // "remove" (fixable) | "advise" (detect-only)
+	IntroducedIn string // API version the change shipped in, "" = not versioned
+	Message      string
+	Docs         string
+	Match        []ParamMatch
 }
 
 var dpmRule = Rule{
-	ID:       "dpm/no-payment-method-types",
-	Severity: "warn",
-	Message:  "Remove `payment_method_types` so payment methods are managed in the Dashboard.",
-	Docs:     "https://docs.stripe.com/payments/payment-methods/dynamic-payment-methods",
+	ID:           "dpm/no-payment-method-types",
+	Severity:     "warn",
+	Action:       "remove",
+	IntroducedIn: "2023-08-16",
+	Message:      "Remove `payment_method_types` so payment methods are managed in the Dashboard.",
+	Docs:         "https://docs.stripe.com/payments/payment-methods/dynamic-payment-methods",
 	Match: []ParamMatch{{
 		Param: "payment_method_types",
 		Operations: []string{
