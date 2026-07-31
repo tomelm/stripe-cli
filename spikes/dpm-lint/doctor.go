@@ -118,9 +118,11 @@ func fetchAccountFacts(key string) (*accountFacts, error) {
 	if err := stripeGET(key, "/v1/payment_method_configurations", &pmc); err != nil {
 		return nil, err
 	}
-	f.ConfigCount = len(pmc.Data)
 	for _, cfg := range pmc.Data {
 		active, _ := cfg["active"].(bool)
+		if active {
+			f.ConfigCount++ // deactivated demo leftovers shouldn't inflate this
+		}
 		isDefault, _ := cfg["is_default"].(bool)
 		if !active || (!isDefault && f.ActiveConfig != "") {
 			continue

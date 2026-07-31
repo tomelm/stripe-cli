@@ -1,8 +1,20 @@
 package main
 
-// cmd.go — the command surface, following the CLI's cobra conventions.
-// Every command supports --json (machine contract on stdout, logs on stderr)
-// and the exit-code contract documented in reports.go and `dpm guide`.
+// cmd.go — the command surface, shaped like the real product would be:
+// generic verbs (doctor, fix, demo) with the migration TOPIC as an argument,
+// mirroring the architecture (generic engine, rule packs as data).
+//
+//	stripe doctor [topic] [dir]   diagnose; degrades to scan-only without creds
+//	stripe fix    [topic] [dir]   remediate; dry-run default, --apply writes
+//	stripe demo   [topic]         guided walkthrough
+//	stripe guide                  agent playbook
+//
+// scan/drill/experiment/cleanup are no longer commands: scan is doctor's
+// credential-less degradation, the webhook drill is `doctor --live`, and the
+// config experiment lives inside `demo` (cleanup stays as a hidden janitor).
+//
+// Every command supports --json (pure JSON on stdout, logs on stderr) and the
+// exit-code contract: 0 clean/verified, 1 findings/not-verified, 2 error.
 
 import (
 	"encoding/json"
@@ -19,6 +31,12 @@ var (
 	flagProfile string
 	flagYes     bool
 )
+
+// packs is the registry of migration topics. Adding a migration means adding
+// an entry here — the verbs never change.
+var packs = map[string]Rule{
+	"dpm": dpmRule,
+}
 
 func exitWith(code int) { os.Exit(code) }
 
@@ -37,15 +55,38 @@ func fail(err error) {
 	exitWith(2)
 }
 
+// topicAndDir resolves the optional [topic] [dir] argument pair: an argument
+// naming a known pack is the topic; anything else is the directory.
+func topicAndDir(args []string) (string, string, error) {
+	topic, dir := "dpm", "."
+	var nonTopic []string
+	for _, a := range args {
+		if _, ok := packs[a]; ok {
+			topic = a
+		} else {
+			nonTopic = append(nonTopic, a)
+		}
+	}
+	// With two args, the first must be a topic; two non-topics means the
+	// first was a typo'd topic, not a directory.
+	if len(nonTopic) > 1 || (len(args) == 2 && len(nonTopic) == 2) {
+		return "", "", fmt.Errorf("unknown topic %q (available: dpm)", nonTopic[0])
+	}
+	if len(nonTopic) == 1 {
+		dir = nonTopic[0]
+	}
+	return topic, dir, nil
+}
+
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
-		Use:   "dpm",
-		Short: "Dynamic Payment Methods migration toolkit (demo)",
-		Long: `Scan for hardcoded payment_method_types across 7 languages, judge each
-finding against live account facts, preview/apply span-verified removals,
-and prove the migration's runtime behavior with local experiments.
+		Use:   "stripe",
+		Short: "Migration doctor (demo) — diagnose, remediate, and verify API migrations",
+		Long: `Diagnose and remediate Stripe API migrations. The engine is generic;
+migrations are rule packs named by topic (currently: dpm — Dynamic Payment
+Methods).
 
-Humans: start with ` + "`dpm demo`" + `. Agents: start with ` + "`dpm guide`" + `.`,
+Humans: start with ` + "`stripe demo dpm`" + `. Agents: start with ` + "`stripe guide`" + `.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
@@ -53,136 +94,171 @@ Humans: start with ` + "`dpm demo`" + `. Agents: start with ` + "`dpm guide`" + 
 	root.PersistentFlags().StringVar(&flagProfile, "profile", "default", "Stripe CLI config profile for account access")
 	root.PersistentFlags().BoolVarP(&flagYes, "yes", "y", false, "assume yes for confirmations (non-interactive)")
 
-	root.AddCommand(newScanCmd(), newDoctorCmd(), newFixCmd(), newDrillCmd(),
-		newExperimentCmd(), newDemoCmd(), newGuideCmd(), newCleanupCmd(), newDumpCmd())
+	root.AddCommand(newDoctorCmd(), newFixCmd(), newDemoCmd(), newGuideCmd(),
+		newCleanupCmd(), newDumpCmd())
 	return root
-}
-
-// ---------- scan ----------
-
-func newScanCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "scan [dir]",
-		Short: "Find hardcoded payment_method_types (exit 1 if findings)",
-		Args:  cobra.MaximumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			root := argOr(args, ".")
-			findings, scanned, parsed := scan(root, dpmRule)
-			sortFindings(findings)
-			rep := ScanReport{Command: "scan", Findings: findings,
-				Stats: ScanStats{FilesScanned: scanned, FilesParsed: parsed, Skipped: scanned - parsed}}
-			if flagJSON {
-				emitJSON(rep)
-			} else {
-				renderScan(rep)
-			}
-			if len(findings) > 0 {
-				exitWith(1)
-			}
-			return nil
-		},
-	}
-}
-
-func renderScan(rep ScanReport) {
-	if len(rep.Findings) == 0 {
-		fmt.Println(okLine(fmt.Sprintf("no hardcoded payment_method_types — %d files scanned, %d parsed",
-			rep.Stats.FilesScanned, rep.Stats.FilesParsed)))
-		return
-	}
-	for _, f := range rep.Findings {
-		fmt.Printf("%s %s\n", warnStyle.Render("●"), titleStyle.Render(fmt.Sprintf("%s:%d:%d", f.File, f.Line, f.Col)))
-		fmt.Println(kv("value", f.Value))
-		fmt.Println(kv("resolved via", f.Via))
-		fmt.Println(kv("in", f.Anchor))
-	}
-	fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("%d finding(s) — %d files scanned, %d parsed (%d skipped by prefilter) — %s",
-		len(rep.Findings), rep.Stats.FilesScanned, rep.Stats.FilesParsed, rep.Stats.Skipped, dpmRule.Docs)))
 }
 
 // ---------- doctor ----------
 
 func newDoctorCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "doctor [dir]",
-		Short: "Scan plus account-aware verdicts (read-only API calls)",
-		Args:  cobra.MaximumNArgs(1),
+	var live, offline bool
+	c := &cobra.Command{
+		Use:   "doctor [topic] [dir]",
+		Short: "Diagnose a migration: code findings + account verdicts (read-only)",
+		Long: `Scans the directory for the topic's findings and judges each against live
+account facts (API versions in recent traffic, Dashboard configuration).
+Without credentials it degrades to scan-only. --live additionally proves
+runtime behavior (webhook round-trip via stripe listen/trigger).`,
+		Args: cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			root := argOr(args, ".")
-			var rep *DoctorReport
-			err := withSpinnerUnlessJSON("Scanning and fetching account facts", func() error {
-				findings, scanned, parsed := scan(root, dpmRule)
-				sortFindings(findings)
-				var derr error
-				rep, derr = buildDoctorReport(findings, flagProfile)
-				if rep != nil {
-					rep.Stats = ScanStats{FilesScanned: scanned, FilesParsed: parsed, Skipped: scanned - parsed}
-				}
-				return derr
-			})
+			topic, dir, err := topicAndDir(args)
 			if err != nil {
 				fail(err)
 			}
+			rule := packs[topic]
+
+			findings, scanned, parsed := scan(dir, rule)
+			sortFindings(findings)
+			stats := ScanStats{FilesScanned: scanned, FilesParsed: parsed, Skipped: scanned - parsed}
+
+			var rep *DoctorReport
+			if offline {
+				rep = scanOnlyReport(topic, findings, stats, "offline requested (--offline)")
+			} else {
+				err := withSpinnerUnlessJSON("Fetching account facts (read-only)", func() error {
+					var derr error
+					rep, derr = buildDoctorReport(findings, flagProfile)
+					return derr
+				})
+				if err != nil {
+					// Graceful degradation: no creds -> scan-only, clearly labeled.
+					rep = scanOnlyReport(topic, findings, stats, err.Error())
+				} else {
+					rep.Topic = topic
+					rep.Stats = stats
+				}
+			}
+
+			failedLive := false
+			if live {
+				var drill *DrillReport
+				err := withSpinnerUnlessJSON("Live check: webhook round-trip (listen + trigger)", func() error {
+					var derr error
+					drill, derr = drillRun()
+					return derr
+				})
+				if err != nil {
+					fail(err)
+				}
+				rep.LiveDrill = drill
+				failedLive = !drill.Verified
+			}
+
 			if flagJSON {
 				emitJSON(rep)
 			} else {
 				renderDoctor(rep)
 			}
-			if len(rep.Findings) > 0 {
+			if len(rep.Findings) > 0 || failedLive {
 				exitWith(1)
 			}
 			return nil
 		},
 	}
+	c.Flags().BoolVar(&live, "live", false, "also run behavioral checks (spawns stripe listen/trigger)")
+	c.Flags().BoolVar(&offline, "offline", false, "skip account facts; scan-only")
+	return c
+}
+
+func scanOnlyReport(topic string, findings []Finding, stats ScanStats, why string) *DoctorReport {
+	rep := &DoctorReport{Command: "doctor", Topic: topic, Degraded: why, Summary: map[string]int{}, Stats: stats}
+	for _, f := range findings {
+		intent := classifyIntent(f.Value)
+		rep.Findings = append(rep.Findings, DoctorFinding{Finding: f, Intent: intent,
+			Verdict: "UNKNOWN: account facts unavailable — " + why, Class: "UNKNOWN"})
+		rep.Summary["UNKNOWN"]++
+	}
+	return rep
 }
 
 func renderDoctor(r *DoctorReport) {
-	a := r.Account
-	name := a.ID
-	if a.Name != "" {
-		name += " (" + a.Name + ")"
+	if r.Degraded != "" {
+		fmt.Println(warnLine("scan-only: " + r.Degraded))
+	} else {
+		a := r.Account
+		name := a.ID
+		if a.Name != "" {
+			name += " (" + a.Name + ")"
+		}
+		fmt.Println(titleStyle.Render("Account ") + name + mutedStyle.Render("  test mode"))
+		var vs []string
+		for v, n := range a.EventVersions {
+			vs = append(vs, fmt.Sprintf("%s ×%d", v, n))
+		}
+		sort.Strings(vs)
+		fmt.Println(kv("event API versions", strings.Join(vs, ", ")))
+		verLine := fmt.Sprintf("all at/after %s", a.Cutoff)
+		if !a.VersionsOK {
+			verLine = failStyle.Render(fmt.Sprintf("traffic predates %s", a.Cutoff))
+		}
+		fmt.Println(kv("DPM version cutoff", verLine))
+		cfg := fmt.Sprintf("%d configuration(s), %d methods on / %d off", a.Configs, a.MethodsOn, a.MethodsOff)
+		if a.ActiveConfig != "" {
+			cfg += mutedStyle.Render(" — active: " + a.ActiveConfig)
+		}
+		fmt.Println(kv("dashboard methods", cfg))
 	}
-	fmt.Println(titleStyle.Render("Account ") + name + mutedStyle.Render("  test mode"))
-
-	var vs []string
-	for v, n := range a.EventVersions {
-		vs = append(vs, fmt.Sprintf("%s ×%d", v, n))
-	}
-	sort.Strings(vs)
-	fmt.Println(kv("event API versions", strings.Join(vs, ", ")))
-	verLine := fmt.Sprintf("all at/after %s", a.Cutoff)
-	if !a.VersionsOK {
-		verLine = failStyle.Render(fmt.Sprintf("traffic predates %s", a.Cutoff))
-	}
-	fmt.Println(kv("DPM version cutoff", verLine))
-	cfg := fmt.Sprintf("%d configuration(s), %d methods on / %d off", a.Configs, a.MethodsOn, a.MethodsOff)
-	if a.ActiveConfig != "" {
-		cfg += mutedStyle.Render(" — active: " + a.ActiveConfig)
-	}
-	fmt.Println(kv("dashboard methods", cfg))
 
 	if len(r.Findings) == 0 {
-		fmt.Println("\n" + okLine("no hardcoded payment_method_types found — nothing to migrate"))
-		return
-	}
-	fmt.Printf("\n%s\n", titleStyle.Render(fmt.Sprintf("Verdicts (%d findings)", len(r.Findings))))
-	for _, f := range r.Findings {
-		glyph := warnLine
-		switch f.Class {
-		case "CANDIDATE":
-			glyph = okLine
-		case "BLOCKED":
-			glyph = failLine
+		fmt.Println("\n" + okLine(fmt.Sprintf("no findings — %d files scanned, %d parsed", r.Stats.FilesScanned, r.Stats.FilesParsed)))
+	} else {
+		// An account-level verdict (BLOCKED/CAUTION/UNKNOWN) is one fact, not
+		// N facts: state it once as a headline and list findings compactly.
+		shared := r.Findings[0].Verdict
+		sharedClass := r.Findings[0].Class
+		for _, f := range r.Findings {
+			if f.Verdict != shared {
+				shared = ""
+				break
+			}
 		}
-		fmt.Println(glyph(fmt.Sprintf("%s:%d  %s %s", f.File, f.Line, mutedStyle.Render("["+f.Intent+"]"), f.Value)))
-		fmt.Println(kv("", f.Verdict))
+		accountLevel := shared != "" && (sharedClass == "BLOCKED" || sharedClass == "CAUTION" || sharedClass == "UNKNOWN")
+
+		fmt.Printf("\n%s\n", titleStyle.Render(fmt.Sprintf("Findings (%d)", len(r.Findings))))
+		if accountLevel {
+			glyph := failLine
+			if sharedClass != "BLOCKED" {
+				glyph = warnLine
+			}
+			fmt.Println(glyph(titleStyle.Render("all findings: ") + shared))
+			fmt.Println()
+		}
+		for _, f := range r.Findings {
+			glyph := warnLine
+			switch f.Class {
+			case "CANDIDATE":
+				glyph = okLine
+			case "BLOCKED":
+				glyph = failLine
+			}
+			fmt.Println(glyph(fmt.Sprintf("%s:%d  %s %s", f.File, f.Line, mutedStyle.Render("["+f.Intent+"]"), f.Value)))
+			if !accountLevel {
+				fmt.Println(kv("", f.Verdict))
+			}
+		}
+		var sum []string
+		for class, n := range r.Summary {
+			sum = append(sum, fmt.Sprintf("%s ×%d", class, n))
+		}
+		sort.Strings(sum)
+		fmt.Println("\n" + mutedStyle.Render("  "+strings.Join(sum, "  ")))
 	}
-	var sum []string
-	for class, n := range r.Summary {
-		sum = append(sum, fmt.Sprintf("%s ×%d", class, n))
+
+	if r.LiveDrill != nil {
+		fmt.Println()
+		renderDrill(r.LiveDrill)
 	}
-	sort.Strings(sum)
-	fmt.Println("\n" + mutedStyle.Render("  "+strings.Join(sum, "  ")))
 }
 
 // ---------- fix ----------
@@ -190,19 +266,23 @@ func renderDoctor(r *DoctorReport) {
 func newFixCmd() *cobra.Command {
 	var apply bool
 	c := &cobra.Command{
-		Use:   "fix [dir]",
-		Short: "Preview span-verified removals (dry-run); --apply writes reparse-clean files",
-		Args:  cobra.MaximumNArgs(1),
+		Use:   "fix [topic] [dir]",
+		Short: "Remediate findings: span-verified removals (dry-run; --apply writes)",
+		Args:  cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			root := argOr(args, ".")
+			topic, dir, err := topicAndDir(args)
+			if err != nil {
+				fail(err)
+			}
 			if apply && !confirm("Apply removals in place? (only reparse-clean files are written)", flagYes) {
 				fmt.Println(infoLine("aborted; nothing written"))
 				exitWith(1)
 			}
-			rep, err := fixRun(root, dpmRule, apply)
+			rep, err := fixRun(dir, packs[topic], apply)
 			if err != nil {
 				fail(err)
 			}
+			rep.Topic = topic
 			if flagJSON {
 				emitJSON(rep)
 			} else {
@@ -249,37 +329,8 @@ func renderFix(r *FixReport) {
 	}
 }
 
-// ---------- drill ----------
-
-func newDrillCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "drill",
-		Short: "Verify delayed-notification webhooks end to end (listen + trigger)",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			var rep *DrillReport
-			err := withSpinnerUnlessJSON("Running webhook drill (listen, trigger, verify signatures)", func() error {
-				var derr error
-				rep, derr = drillRun()
-				return derr
-			})
-			if err != nil {
-				fail(err)
-			}
-			if flagJSON {
-				emitJSON(rep)
-			} else {
-				renderDrill(rep)
-			}
-			if !rep.Verified {
-				exitWith(1)
-			}
-			return nil
-		},
-	}
-}
-
 func renderDrill(r *DrillReport) {
-	fmt.Println(titleStyle.Render("Delayed-notification drill"))
+	fmt.Println(titleStyle.Render("Live check: delayed-notification webhooks"))
 	if r.ListenReady {
 		fmt.Println(okLine("stripe listen ready (signing secret captured, not shown)"))
 	}
@@ -294,49 +345,116 @@ func renderDrill(r *DrillReport) {
 		}
 	}
 	if r.Verified {
-		fmt.Println(okLine(titleStyle.Render("verified: the doc's handler round-trips end to end")))
+		fmt.Println(okLine(titleStyle.Render("verified: the handler round-trips end to end")))
 	} else {
 		fmt.Println(warnLine("not fully verified" + mutedStyle.Render(" — "+r.Note)))
 	}
 }
 
-// ---------- experiment ----------
+// ---------- demo ----------
 
-func newExperimentCmd() *cobra.Command {
-	var keep bool
+func newDemoCmd() *cobra.Command {
+	var dir string
+	var skipLive bool
 	c := &cobra.Command{
-		Use:   "experiment",
-		Short: "Prove Dashboard config drives methods (ephemeral test-mode config, auto-cleaned)",
+		Use:   "demo [topic]",
+		Short: "Guided walkthrough: diagnose → remediation preview → live proof",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if !confirm("Create an ephemeral TEST-mode payment-method configuration? (your Default config is never touched)", flagYes) {
-				fmt.Println(infoLine("aborted"))
-				exitWith(1)
+			topic := "dpm"
+			if len(args) > 0 {
+				topic = args[0]
 			}
-			var rep *ExperimentReport
-			err := withSpinnerUnlessJSON("Running config→session experiment", func() error {
-				var derr error
-				rep, derr = experimentRun(flagProfile, keep)
-				return derr
-			})
-			if err != nil {
-				if rep != nil && flagJSON {
-					emitJSON(rep)
-				}
-				fail(err)
+			if _, ok := packs[topic]; !ok {
+				fail(fmt.Errorf("unknown topic %q", topic))
 			}
-			if flagJSON {
-				emitJSON(rep)
-			} else {
-				renderExperiment(rep)
-			}
-			if !rep.Verified {
-				exitWith(1)
-			}
+			runDemo(topic, dir, skipLive)
 			return nil
 		},
 	}
-	c.Flags().BoolVar(&keep, "keep-active", false, "leave the ephemeral config active (clean up with `dpm cleanup <id>`)")
+	c.Flags().StringVar(&dir, "dir", "testdata", "directory to scan")
+	c.Flags().BoolVar(&skipLive, "skip-live", false, "skip steps that call the Stripe API")
 	return c
+}
+
+func runDemo(topic, dir string, skipLive bool) {
+	rule := packs[topic]
+	fmt.Println(banner("Dynamic Payment Methods — migration walkthrough",
+		"docs.stripe.com/payments/dashboard-payment-methods, executed and verified locally"))
+
+	total := 4
+	// 1. doctor (code + account together — the product's core loop)
+	fmt.Print(stepHeader(1, total, "Diagnose: code findings judged against account facts"))
+	findings, scanned, parsed := scan(dir, rule)
+	sortFindings(findings)
+	stats := ScanStats{FilesScanned: scanned, FilesParsed: parsed, Skipped: scanned - parsed}
+	if len(findings) == 0 {
+		fmt.Println(okLine("no findings — nothing to migrate"))
+		return
+	}
+	var rep *DoctorReport
+	if skipLive {
+		rep = scanOnlyReport(topic, findings, stats, "--skip-live")
+	} else {
+		err := withSpinner("Fetching account facts (read-only)", func() error {
+			var derr error
+			rep, derr = buildDoctorReport(findings, flagProfile)
+			return derr
+		})
+		if err != nil {
+			rep = scanOnlyReport(topic, findings, stats, err.Error())
+		} else {
+			rep.Topic = topic
+			rep.Stats = stats
+		}
+	}
+	renderDoctor(rep)
+
+	// 2. remediation preview
+	fmt.Print(stepHeader(2, total, "Remediation preview (dry-run, span-verified)"))
+	if fr, err := fixRun(dir, rule, false); err == nil {
+		renderFix(fr)
+		fmt.Println(infoLine("apply for real with " + accentStyle.Render(fmt.Sprintf("stripe fix %s %s --apply", topic, dir))))
+	}
+
+	// 3. live experiment
+	fmt.Print(stepHeader(3, total, "Live proof: Dashboard config drives the method list"))
+	if skipLive {
+		fmt.Println(infoLine("skipped (--skip-live)"))
+	} else if confirm("Create an ephemeral TEST-mode config and diff two sessions?", flagYes) {
+		var er *ExperimentReport
+		err := withSpinner("Creating config, sessions, and diffing", func() error {
+			var derr error
+			er, derr = experimentRun(flagProfile, false)
+			return derr
+		})
+		if err != nil {
+			fmt.Println(warnLine(err.Error()))
+		} else {
+			renderExperiment(er)
+		}
+	}
+
+	// 4. live webhook check
+	fmt.Print(stepHeader(4, total, "Live proof: delayed-notification webhooks round-trip"))
+	if skipLive {
+		fmt.Println(infoLine("skipped (--skip-live)"))
+	} else if confirm("Run stripe listen + trigger to verify the handler end to end?", flagYes) {
+		var dr *DrillReport
+		err := withSpinner("Listening, triggering, verifying signatures", func() error {
+			var derr error
+			dr, derr = drillRun()
+			return derr
+		})
+		if err != nil {
+			fmt.Println(warnLine(err.Error()))
+		} else {
+			renderDrill(dr)
+		}
+	}
+
+	fmt.Println("\n" + banner("Walkthrough complete",
+		fmt.Sprintf("next: stripe fix %s --apply, then stripe doctor %s (exit 0 = migrated) — agents: stripe guide", topic, topic)))
 }
 
 func renderExperiment(r *ExperimentReport) {
@@ -351,110 +469,9 @@ func renderExperiment(r *ExperimentReport) {
 		fmt.Println(warnLine("unexpected diff — inspect manually"))
 	}
 	fmt.Println(kv("cleanup", r.Cleanup))
-	if r.Before.URL != "" {
-		fmt.Println(kv("hosted page (before)", mutedStyle.Render(r.Before.URL)))
-	}
 }
 
-// ---------- demo (human walkthrough) ----------
-
-func newDemoCmd() *cobra.Command {
-	var target string
-	var skipLive bool
-	c := &cobra.Command{
-		Use:   "demo",
-		Short: "Guided walkthrough: scan → doctor → fix preview → live experiment → webhook drill",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			runDemo(target, skipLive)
-			return nil
-		},
-	}
-	c.Flags().StringVar(&target, "dir", "testdata", "directory to scan")
-	c.Flags().BoolVar(&skipLive, "skip-live", false, "skip steps that call the Stripe API")
-	return c
-}
-
-func runDemo(dir string, skipLive bool) {
-	fmt.Println(banner("Dynamic Payment Methods — migration walkthrough",
-		"docs.stripe.com/payments/dashboard-payment-methods, executed and verified locally"))
-
-	total := 5
-	// 1. scan
-	fmt.Print(stepHeader(1, total, "Scan for hardcoded payment_method_types"))
-	findings, scanned, parsed := scan(dir, dpmRule)
-	sortFindings(findings)
-	renderScan(ScanReport{Findings: findings, Stats: ScanStats{FilesScanned: scanned, FilesParsed: parsed, Skipped: scanned - parsed}})
-	if len(findings) == 0 {
-		fmt.Println("\n" + okLine("nothing to migrate — you're done"))
-		return
-	}
-
-	// 2. doctor
-	fmt.Print(stepHeader(2, total, "Judge findings against live account facts"))
-	if skipLive {
-		fmt.Println(infoLine("skipped (--skip-live)"))
-	} else {
-		var rep *DoctorReport
-		err := withSpinner("Fetching account facts (read-only)", func() error {
-			var derr error
-			rep, derr = buildDoctorReport(findings, flagProfile)
-			return derr
-		})
-		if err != nil {
-			fmt.Println(warnLine("account facts unavailable: " + err.Error()))
-		} else {
-			renderDoctor(rep)
-		}
-	}
-
-	// 3. fix preview
-	fmt.Print(stepHeader(3, total, "Preview span-verified removals (dry-run)"))
-	if rep, err := fixRun(dir, dpmRule, false); err == nil {
-		renderFix(rep)
-		fmt.Println(infoLine("apply for real with " + accentStyle.Render("dpm fix --apply "+dir)))
-	}
-
-	// 4. experiment
-	fmt.Print(stepHeader(4, total, "Live experiment: Dashboard config drives the method list"))
-	if skipLive {
-		fmt.Println(infoLine("skipped (--skip-live)"))
-	} else if confirm("Create an ephemeral TEST-mode config and diff two sessions?", flagYes) {
-		var rep *ExperimentReport
-		err := withSpinner("Creating config, sessions, and diffing", func() error {
-			var derr error
-			rep, derr = experimentRun(flagProfile, false)
-			return derr
-		})
-		if err != nil {
-			fmt.Println(warnLine(err.Error()))
-		} else {
-			renderExperiment(rep)
-		}
-	}
-
-	// 5. drill
-	fmt.Print(stepHeader(5, total, "Webhook drill: delayed-notification handling"))
-	if skipLive {
-		fmt.Println(infoLine("skipped (--skip-live)"))
-	} else if confirm("Run stripe listen + trigger to verify the handler end to end?", flagYes) {
-		var rep *DrillReport
-		err := withSpinner("Listening, triggering, verifying signatures", func() error {
-			var derr error
-			rep, derr = drillRun()
-			return derr
-		})
-		if err != nil {
-			fmt.Println(warnLine(err.Error()))
-		} else {
-			renderDrill(rep)
-		}
-	}
-
-	fmt.Println("\n" + banner("Walkthrough complete",
-		"next: dpm fix --apply, then rerun dpm scan (exit 0 = migrated) — agents: dpm guide"))
-}
-
-// ---------- guide (agent playbook) ----------
+// ---------- guide ----------
 
 func newGuideCmd() *cobra.Command {
 	return &cobra.Command{
@@ -466,62 +483,60 @@ func newGuideCmd() *cobra.Command {
 	}
 }
 
-const agentGuide = `# DPM migration — agent playbook
+const agentGuide = `# Migration doctor — agent playbook
 
+Verbs are generic; the migration is a topic argument (currently: dpm).
 Every command supports --json (single JSON object on stdout; logs on stderr)
 and --yes (auto-approve confirmations). Exit codes: 0 clean/verified,
 1 findings-present/not-verified, 2 operational error.
 
-Run the steps in order; each step's output is evidence for the next.
-
-## 1. Inventory
-    dpm scan <dir> --json
+## 1. Diagnose
+    stripe doctor dpm <dir> --json
 Exit 0 → nothing to migrate; stop. Exit 1 → .findings[] each with
-file/line/col, via (resolution mechanism), value, param.
-
-## 2. Judge
-    dpm doctor <dir> --json
-Adds .account (event_api_versions, versions_at_or_after_cutoff,
-dashboard_configured, methods_on) and per-finding verdict_class:
-  CANDIDATE  safe removal target, preconditions met
+file/line/col, via (resolution mechanism), value, and verdict_class:
+  CANDIDATE  safe removal target, account preconditions met
   SKIP       deliberate restriction — do not remove
   REVIEW     needs human judgment (dynamic value / static multi)
   CAUTION/BLOCKED  account API version predates 2023-08-16 — removal
-             without automatic_payment_methods[enabled]=true drops methods.
-             STOP and surface to the human.
-Only proceed to step 3 for CANDIDATE findings.
+             without automatic_payment_methods[enabled]=true drops
+             methods. STOP and surface to the human.
+  UNKNOWN    account facts unavailable (.degraded says why) — treat
+             as REVIEW.
+.account carries the evidence (event_api_versions, dashboard_configured).
+Only proceed to step 2 for CANDIDATE findings.
 
-## 3. Preview the edit
-    dpm fix <dir> --json
-Dry-run. Per file: edits[] (byte spans + label), reparse must be "clean".
+## 2. Preview the remediation
+    stripe fix dpm <dir> --json
+Dry-run. Per file: edits[] (byte spans + label); reparse must be "clean".
 
-## 4. Apply
-    dpm fix <dir> --apply --yes --json
-Writes only reparse-clean files (.files[].written=true). Nothing else is
-touched.
+## 3. Apply
+    stripe fix dpm <dir> --apply --yes --json
+Writes only reparse-clean files (.files[].written=true).
 
-## 5. Confirm the code change
-    dpm scan <dir> --json
+## 4. Confirm the code change
+    stripe doctor dpm <dir> --json
 Exit 0 proves the parameter is gone.
 
-## 6. Confirm runtime behavior (optional but recommended)
-    dpm experiment --yes --json     # Dashboard config drives sessions
-    dpm drill --json                # delayed-notification webhooks round-trip
-Both must report "verified": true. experiment creates an ephemeral TEST-mode
-payment-method configuration and deactivates it; it never touches the
-account's Default configuration.
+## 5. Confirm runtime behavior (recommended)
+    stripe doctor dpm --live --json
+Adds .live_drill (webhook round-trip via stripe listen/trigger); require
+.live_drill.verified == true.
 
-## Cleanup safety net
-    dpm cleanup <pmc_id>            # deactivate an orphaned ephemeral config
+## Notes
+- The demo's config experiment (stripe demo dpm) creates an ephemeral
+  TEST-mode payment-method configuration and deactivates it; it never
+  touches the account's Default configuration.
+- Orphaned ephemeral config? stripe cleanup <pmc_id>.
 `
 
-// ---------- cleanup / dump ----------
+// ---------- hidden: cleanup / parse-dump ----------
 
 func newCleanupCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "cleanup <payment-method-configuration-id>",
-		Short: "Deactivate an ephemeral demo configuration",
-		Args:  cobra.ExactArgs(1),
+		Use:    "cleanup <payment-method-configuration-id>",
+		Short:  "Deactivate an ephemeral demo configuration",
+		Hidden: true,
+		Args:   cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			key, err := loadTestKey(flagProfile)
 			if err != nil {
@@ -543,19 +558,16 @@ func newDumpCmd() *cobra.Command {
 		Hidden: true,
 		Args:   cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			dumpTrees(argOr(args, "testdata"))
+			d := "testdata"
+			if len(args) > 0 {
+				d = args[0]
+			}
+			dumpTrees(d)
 		},
 	}
 }
 
 // ---------- helpers ----------
-
-func argOr(args []string, def string) string {
-	if len(args) > 0 {
-		return args[0]
-	}
-	return def
-}
 
 func sortFindings(findings []Finding) {
 	sort.Slice(findings, func(i, j int) bool {
