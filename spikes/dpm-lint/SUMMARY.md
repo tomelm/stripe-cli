@@ -1,6 +1,6 @@
 # DPM migration tooling — session summary and outcomes
 
-**Branch:** `tomer/dpm-test` · **Date:** 2026-07-30 · **Code:** `spikes/dpm-lint/` (self-contained Go module, excluded from the CLI build)
+**Branches:** `tomer/dpm-test` (core) · `tomer/dpm-packs` (multi-pack, superset) · **Updated:** 2026-07-31 · **Code:** `spikes/dpm-lint/` (self-contained Go module, excluded from the CLI build)
 
 ## Goal
 
@@ -98,6 +98,42 @@ CGO_ENABLED=0 go run . doctor dpm <dir>       # diagnose (degrades to scan-only 
 CGO_ENABLED=0 go run . doctor dpm --live      # + webhook round-trip proof
 CGO_ENABLED=0 go run . fix dpm <dir>          # dry-run removals; --apply writes
 ```
+
+## After the adversarial reviews (2026-07-31)
+
+Six independent review lenses (product, design, code, migration efficacy,
+generalization, breaking-changes) attacked the prototype; the material findings
+were fixed the same day:
+
+- **Fail properly**: bad paths/typo'd topics exit 2 with did-you-mean hints —
+  never a green false all-clear; JSON field names now match the documented agent
+  contract; confirmations fail fast on non-TTY; live keys refused; vendored trees
+  skipped.
+- **Verdicts gate the dangerous verb**: `fix` skips dynamic/deliberate findings
+  into `.skipped` with reasons (`--all` overrides); per-file write errors don't
+  abort; a half-applied tree still reports completely.
+- **Resolution hardened**: function-scoped variable following (cross-function
+  false-positive class closed) and per-`(param, operations)` tokens.
+- **Doctor honesty**: no-events accounts get `REVIEW`, not fabricated `BLOCKED`;
+  hardcoded methods are diffed against Dashboard-enabled methods (CAUTION by
+  name); `.webhook_handlers` checks the USER'S code for the three
+  delayed-notification events; `.frontend_warnings` flags legacy Card Element.
+- **Multi-pack proven** (`tomer/dpm-packs`): Rule gained `Action`
+  (remove/advise) + `IntroducedIn`; four packs authored by parallel agents from
+  changelog/spec/SDK-history research (tax-percent, collection-method, prorate,
+  source-types), 29 fixtures asserted in `TestPacks`; `fix` refuses advise packs
+  with a docs pointer. The research corrected two of our own assumptions and
+  found a real engine bug (substring token collision, documented, unfixed).
+- **Breaking-changes scaling analyzed** (82 changes surveyed): ~20% mechanical
+  request-side (rule data + three bounded span primitives), ~38% response-side
+  (per-rule polarity inversion), ~22% behavior (versionless advisory tier);
+  version explosion is linear via `introduced_in` windows — the real new cost is
+  per-callsite start-point resolution.
+
+Honest efficacy against the full migration docs: the param removal is verified to
+a high standard; three more requirements are now checked (method diff, handler
+presence, frontend signals); the rest remains out of scope and the verdict
+language says so.
 
 ## Recommended next steps (proposal phase 0)
 
