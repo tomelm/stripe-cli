@@ -65,17 +65,17 @@ var dpmRule = Rule{
 // ---------- Findings ----------
 
 type Finding struct {
-	File     string
-	Line     int
-	Col      int
-	RuleID   string
-	Severity string
-	Param    string
-	Anchor   string // the matched param-bag text, trimmed
-	Via      string // how it resolved: direct, var:<name>, type:<name>
-	Value    string // the parameter's value expression, for intent ranking
-	Message  string
-	Docs     string
+	File     string `json:"file"`
+	Line     int    `json:"line"`
+	Col      int    `json:"col"`
+	RuleID   string `json:"rule"`
+	Severity string `json:"severity"`
+	Param    string `json:"param"`
+	Anchor   string `json:"anchor"` // the matched param-bag text, trimmed
+	Via      string `json:"via"`    // how it resolved: direct, var:<name>, type:<name>
+	Value    string `json:"value"`  // the parameter's value expression, for intent ranking
+	Message  string `json:"message"`
+	Docs     string `json:"docs"`
 }
 
 // ---------- Engine ----------
@@ -87,7 +87,14 @@ func main() {
 	}
 }
 
-func scan(root string, rule Rule) (findings []Finding, scanned, parsed int) {
+func scan(root string, rule Rule) (findings []Finding, scanned, parsed int, err error) {
+	info, statErr := os.Stat(root)
+	if statErr != nil {
+		return nil, 0, 0, fmt.Errorf("cannot scan %q: %w", root, statErr)
+	}
+	if !info.IsDir() {
+		return nil, 0, 0, fmt.Errorf("cannot scan %q: not a directory", root)
+	}
 	// Resource names the rule's operations imply, e.g. "payment_intents".
 	resources := map[string]bool{}
 	for _, m := range rule.Match {
@@ -98,8 +105,16 @@ func scan(root string, rule Rule) (findings []Finding, scanned, parsed int) {
 		}
 	}
 
-	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+	walkErr := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			// Never scan (or edit) vendored/generated trees.
+			switch d.Name() {
+			case "node_modules", "vendor", ".git", "dist", "build":
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		spec, ok := specs[strings.ToLower(filepath.Ext(path))]
@@ -134,13 +149,32 @@ func scan(root string, rule Rule) (findings []Finding, scanned, parsed int) {
 			return nil
 		}
 
-		// Every SDK token the rule's resources can appear as in this language.
+		// Union of every SDK token the rule's resources can appear as (for
+		// the file index); resolution re-filters per ParamMatch below.
 		var tokens []string
 		for r := range resources {
 			tokens = append(tokens, spec.resourceTokens(r)...)
 		}
 		sort.Strings(tokens)
 		idx := buildIndex(tree.RootNode(), spec, lang, src, tokens)
+
+		// Per-ParamMatch tokens: a nested rule scoped to subscriptions must
+		// not resolve against a PaymentIntent call, and vice versa.
+		pmTokens := make([][]string, len(rule.Match))
+		for i, pm := range rule.Match {
+			set := map[string]bool{}
+			for _, op := range pm.Operations {
+				if r := resourceFromOperation(op); r != "" {
+					for _, t := range spec.resourceTokens(r) {
+						set[t] = true
+					}
+				}
+			}
+			for t := range set {
+				pmTokens[i] = append(pmTokens[i], t)
+			}
+			sort.Strings(pmTokens[i])
+		}
 
 		seen := map[string]bool{}
 		for _, m := range q.Execute(tree) {
@@ -150,7 +184,7 @@ func scan(root string, rule Rule) (findings []Finding, scanned, parsed int) {
 				}
 				keyText := strings.Trim(c.Text(src), `"'`)
 
-				for _, pm := range rule.Match {
+				for pmIdx, pm := range rule.Match {
 					if keyText != spec.spell(leafParam(pm.Param)) {
 						continue
 					}
@@ -160,7 +194,7 @@ func scan(root string, rule Rule) (findings []Finding, scanned, parsed int) {
 					if !pathSatisfied(c.Node, pm.Param, spec, lang, src) {
 						continue
 					}
-					res := resolve(c.Node, spec, lang, src, tokens, idx)
+					res := resolve(c.Node, spec, lang, src, pmTokens[pmIdx], idx)
 					if !res.confirmed {
 						continue
 					}
@@ -188,7 +222,10 @@ func scan(root string, rule Rule) (findings []Finding, scanned, parsed int) {
 		}
 		return nil
 	})
-	return findings, scanned, parsed
+	if walkErr != nil {
+		return nil, scanned, parsed, walkErr
+	}
+	return findings, scanned, parsed, nil
 }
 
 // extractValue returns the value expression paired with a matched key: the

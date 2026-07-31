@@ -79,6 +79,11 @@ func confirm(prompt string, assumeYes bool) bool {
 		fmt.Fprintln(w, infoLine(prompt+" "+mutedStyle.Render("(auto-approved by --yes)")))
 		return true
 	}
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		// Never hang a CI/agent session on an invisible prompt.
+		fmt.Fprintln(os.Stderr, failLine("confirmation required but stdin is not a terminal — pass --yes"))
+		return false
+	}
 	fmt.Printf("  %s %s ", accentStyle.Render("?"), prompt+" [y/N]")
 	r := bufio.NewReader(os.Stdin)
 	line, _ := r.ReadString('\n')

@@ -36,12 +36,18 @@ type fileIndex struct {
 	callSites []callSite
 	// typedDecls are declarations naming a params type, e.g.
 	// `PaymentIntentCreateOptions options;` for C# target-typed new().
-	typedDecls []string
+	typedDecls []typedDecl
+}
+
+type typedDecl struct {
+	text  string
+	start uint32
 }
 
 type callSite struct {
 	callee string
 	args   string
+	start  uint32 // for function-scope checks
 }
 
 func buildIndex(root *ts.Node, spec langSpec, lang *ts.Language, src []byte, tokens []string) fileIndex {
@@ -51,12 +57,12 @@ func buildIndex(root *ts.Node, spec langSpec, lang *ts.Language, src []byte, tok
 		if containsStr(spec.anchorKinds, kind) {
 			callee, args := splitCall(n, src)
 			if containsAny(callee, tokens) {
-				idx.callSites = append(idx.callSites, callSite{callee: callee, args: args})
+				idx.callSites = append(idx.callSites, callSite{callee: callee, args: args, start: n.StartByte()})
 			}
 		}
 		if containsStr(spec.declKinds, kind) {
 			if t := nodeText(n, src); containsAny(t, tokens) {
-				idx.typedDecls = append(idx.typedDecls, t)
+				idx.typedDecls = append(idx.typedDecls, typedDecl{text: t, start: n.StartByte()})
 			}
 		}
 	})
@@ -79,16 +85,20 @@ func resolve(key *ts.Node, spec langSpec, lang *ts.Language, src []byte, tokens 
 	}
 
 	// 2. Indirect: the bag is bound to a variable. Follow it to a call that
-	//    takes it, or to a declaration that types it.
+	//    takes it, or to a declaration that types it — but only within the
+	//    same enclosing function: a `params` here must not resolve against a
+	//    Stripe call in an unrelated function.
+	scopeStart, scopeEnd := enclosingFunc(key, spec, lang)
+	inScope := func(pos uint32) bool { return pos >= scopeStart && pos < scopeEnd }
 	if name, _ := boundVariable(key, spec, lang, src); name != "" {
 		for _, cs := range idx.callSites {
-			if hasWord(cs.args, name) {
+			if inScope(cs.start) && containsAny(cs.callee, tokens) && hasWord(cs.args, name) {
 				return resolution{true, "var:" + name, firstLine(cs.callee + "(" + cs.args + ")")}
 			}
 		}
 		for _, d := range idx.typedDecls {
-			if hasWord(d, name) {
-				return resolution{true, "type:" + name, firstLine(d)}
+			if inScope(d.start) && containsAny(d.text, tokens) && hasWord(d.text, name) {
+				return resolution{true, "type:" + name, firstLine(d.text)}
 			}
 		}
 	}
@@ -99,13 +109,24 @@ func resolve(key *ts.Node, spec langSpec, lang *ts.Language, src []byte, tokens 
 		if recv := anchor.NamedChild(0); recv != nil {
 			rname := strings.TrimSpace(nodeText(recv, src))
 			for _, d := range idx.typedDecls {
-				if hasWord(d, rname) {
-					return resolution{true, "recv:" + rname, firstLine(d)}
+				if inScope(d.start) && containsAny(d.text, tokens) && hasWord(d.text, rname) {
+					return resolution{true, "recv:" + rname, firstLine(d.text)}
 				}
 			}
 		}
 	}
 	return resolution{}
+}
+
+// enclosingFunc returns the byte span of the key's enclosing function body,
+// or the whole file when the key is at top level.
+func enclosingFunc(key *ts.Node, spec langSpec, lang *ts.Language) (uint32, uint32) {
+	for cur := key.Parent(); cur != nil; cur = cur.Parent() {
+		if containsStr(spec.funcKinds, cur.Type(lang)) {
+			return cur.StartByte(), cur.EndByte()
+		}
+	}
+	return 0, ^uint32(0)
 }
 
 // climbAnchor finds the enclosing param-bag node. Nearest by default. With

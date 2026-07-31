@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -40,19 +41,24 @@ type accountFacts struct {
 	OldestVersion string
 
 	// PMConfigs summarizes /v1/payment_method_configurations.
-	ConfigCount   int
-	ActiveConfig  string
-	MethodsOn     int
-	MethodsOff    int
-	ConfiguredOK  bool
-	VersionsOK    bool // every sampled event version >= dpmCutoff
-	VersionsMixed bool // some but not all versions >= dpmCutoff
+	ConfigCount    int
+	ActiveConfig   string
+	MethodsOn      int
+	MethodsOff     int
+	EnabledMethods []string // method names ON in the chosen config
+	ConfiguredOK   bool
+	NoEvents       bool // no recent events: version facts are unknowable
+	VersionsOK     bool // every sampled event version >= dpmCutoff
+	VersionsMixed  bool // some but not all versions >= dpmCutoff
 }
 
 // loadTestKey resolves a test-mode key without ever exposing it: env var
 // first (what the CLI itself honors), then the CLI's own config.toml.
 func loadTestKey(profile string) (string, error) {
 	if k := os.Getenv("STRIPE_API_KEY"); k != "" {
+		if !strings.HasPrefix(k, "sk_test_") && !strings.HasPrefix(k, "rk_test_") {
+			return "", fmt.Errorf("STRIPE_API_KEY is not a test-mode key (sk_test_/rk_test_); refusing — this tool creates test objects")
+		}
 		return k, nil
 	}
 	home, err := os.UserHomeDir()
@@ -118,19 +124,28 @@ func fetchAccountFacts(key string) (*accountFacts, error) {
 	if err := stripeGET(key, "/v1/payment_method_configurations", &pmc); err != nil {
 		return nil, err
 	}
+	// Choose ONE governing config — the default if present, else the first
+	// active — and count/collect methods from it alone (summing across
+	// configs double-counted before).
+	var chosen map[string]any
 	for _, cfg := range pmc.Data {
 		active, _ := cfg["active"].(bool)
-		if active {
-			f.ConfigCount++ // deactivated demo leftovers shouldn't inflate this
+		if !active {
+			continue // deactivated demo leftovers shouldn't inflate anything
 		}
+		f.ConfigCount++
 		isDefault, _ := cfg["is_default"].(bool)
-		if !active || (!isDefault && f.ActiveConfig != "") {
-			continue
+		if isDefault {
+			chosen = cfg
+		} else if chosen == nil {
+			chosen = cfg
 		}
-		if name, ok := cfg["name"].(string); ok {
+	}
+	if chosen != nil {
+		if name, ok := chosen["name"].(string); ok {
 			f.ActiveConfig = name
 		}
-		for field, v := range cfg {
+		for field, v := range chosen {
 			m, ok := v.(map[string]any)
 			if !ok {
 				continue
@@ -142,11 +157,12 @@ func fetchAccountFacts(key string) (*accountFacts, error) {
 			switch dp["value"] {
 			case "on":
 				f.MethodsOn++
+				f.EnabledMethods = append(f.EnabledMethods, field)
 			case "off":
 				f.MethodsOff++
 			}
-			_ = field
 		}
+		sort.Strings(f.EnabledMethods)
 	}
 	f.ConfiguredOK = f.ConfigCount > 0 && f.MethodsOn > 0
 
@@ -176,6 +192,7 @@ func fetchAccountFacts(key string) (*accountFacts, error) {
 	for _, n := range f.EventVersions {
 		total += n
 	}
+	f.NoEvents = total == 0
 	f.VersionsOK = total > 0 && ge == total
 	f.VersionsMixed = ge > 0 && ge < total
 	return f, nil
@@ -227,8 +244,22 @@ func classifyIntent(value string) string {
 	return "static"
 }
 
-// verdict combines one finding's intent with the account facts.
-func verdict(intent string, f *accountFacts) string {
+// quotedMethods extracts the static method names from a finding's value.
+func quotedMethods(value string) []string {
+	var out []string
+	for _, m := range regexp.MustCompile(`["']([a-z0-9_]+)["']`).FindAllStringSubmatch(value, -1) {
+		out = append(out, m[1])
+	}
+	return out
+}
+
+// verdict combines one finding's intent and value with the account facts.
+func verdict(intent, value string, f *accountFacts) string {
+	if f.NoEvents {
+		// No traffic sampled: fabricating a version claim would be worse
+		// than admitting ignorance.
+		return "REVIEW: no recent API traffic to infer the account's effective version — confirm it is >= " + dpmCutoff + " before removing"
+	}
 	if !f.VersionsOK {
 		if f.VersionsMixed {
 			return "CAUTION: some recent traffic predates " + dpmCutoff + " — removal there silently drops methods unless automatic_payment_methods[enabled]=true is added"
@@ -237,6 +268,23 @@ func verdict(intent string, f *accountFacts) string {
 	}
 	if !f.ConfiguredOK {
 		return "BLOCKED: no active Dashboard payment-method configuration — configure methods before removing"
+	}
+	// The doc's loudest warning: migration only keeps methods the Dashboard
+	// has ON. Diff the hardcoded list against the governing config.
+	if intent == "default-shaped" || intent == "static" {
+		var missing []string
+		enabled := map[string]bool{}
+		for _, m := range f.EnabledMethods {
+			enabled[m] = true
+		}
+		for _, m := range quotedMethods(value) {
+			if !enabled[m] {
+				missing = append(missing, m)
+			}
+		}
+		if len(missing) > 0 {
+			return "CAUTION: " + strings.Join(missing, ", ") + " hardcoded here but OFF in the Dashboard config — enable in the Dashboard first or customers lose them on removal"
+		}
 	}
 	switch intent {
 	case "default-shaped":
@@ -264,23 +312,25 @@ func buildDoctorReport(findings []Finding, profile string) (*DoctorReport, error
 	r := &DoctorReport{
 		Command: "doctor",
 		Account: AccountSummary{
-			ID:            facts.AccountID,
-			Name:          facts.DisplayName,
-			EventVersions: facts.EventVersions,
-			VersionsOK:    facts.VersionsOK,
-			VersionsMixed: facts.VersionsMixed,
-			Cutoff:        dpmCutoff,
-			Configs:       facts.ConfigCount,
-			ActiveConfig:  facts.ActiveConfig,
-			MethodsOn:     facts.MethodsOn,
-			MethodsOff:    facts.MethodsOff,
-			ConfiguredOK:  facts.ConfiguredOK,
+			ID:             facts.AccountID,
+			Name:           facts.DisplayName,
+			EventVersions:  facts.EventVersions,
+			VersionsOK:     facts.VersionsOK,
+			VersionsMixed:  facts.VersionsMixed,
+			Cutoff:         dpmCutoff,
+			Configs:        facts.ConfigCount,
+			ActiveConfig:   facts.ActiveConfig,
+			MethodsOn:      facts.MethodsOn,
+			MethodsOff:     facts.MethodsOff,
+			EnabledMethods: facts.EnabledMethods,
+			NoRecentEvents: facts.NoEvents,
+			ConfiguredOK:   facts.ConfiguredOK,
 		},
 		Summary: map[string]int{},
 	}
 	for _, f := range findings {
 		intent := classifyIntent(f.Value)
-		v := verdict(intent, facts)
+		v := verdict(intent, f.Value, facts)
 		class := v
 		if i := strings.Index(v, ":"); i > 0 {
 			class = v[:i]

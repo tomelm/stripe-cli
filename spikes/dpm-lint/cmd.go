@@ -118,7 +118,10 @@ runtime behavior (webhook round-trip via stripe listen/trigger).`,
 			}
 			rule := packs[topic]
 
-			findings, scanned, parsed := scan(dir, rule)
+			findings, scanned, parsed, err := scan(dir, rule)
+			if err != nil {
+				fail(topicHint(err, dir))
+			}
 			sortFindings(findings)
 			stats := ScanStats{FilesScanned: scanned, FilesParsed: parsed, Skipped: scanned - parsed}
 
@@ -264,7 +267,7 @@ func renderDoctor(r *DoctorReport) {
 // ---------- fix ----------
 
 func newFixCmd() *cobra.Command {
-	var apply bool
+	var apply, all bool
 	c := &cobra.Command{
 		Use:   "fix [topic] [dir]",
 		Short: "Remediate findings: span-verified removals (dry-run; --apply writes)",
@@ -278,9 +281,9 @@ func newFixCmd() *cobra.Command {
 				fmt.Println(infoLine("aborted; nothing written"))
 				exitWith(1)
 			}
-			rep, err := fixRun(dir, packs[topic], apply)
+			rep, err := fixRun(dir, packs[topic], apply, all)
 			if err != nil {
-				fail(err)
+				fail(topicHint(err, dir))
 			}
 			rep.Topic = topic
 			if flagJSON {
@@ -295,6 +298,7 @@ func newFixCmd() *cobra.Command {
 		},
 	}
 	c.Flags().BoolVar(&apply, "apply", false, "write changes (dry-run without this flag)")
+	c.Flags().BoolVar(&all, "all", false, "include dynamic/deliberate findings the gate would skip")
 	return c
 }
 
@@ -372,7 +376,7 @@ func newDemoCmd() *cobra.Command {
 			return nil
 		},
 	}
-	c.Flags().StringVar(&dir, "dir", "testdata", "directory to scan")
+	c.Flags().StringVar(&dir, "dir", ".", "directory to scan")
 	c.Flags().BoolVar(&skipLive, "skip-live", false, "skip steps that call the Stripe API")
 	return c
 }
@@ -385,7 +389,10 @@ func runDemo(topic, dir string, skipLive bool) {
 	total := 4
 	// 1. doctor (code + account together — the product's core loop)
 	fmt.Print(stepHeader(1, total, "Diagnose: code findings judged against account facts"))
-	findings, scanned, parsed := scan(dir, rule)
+	findings, scanned, parsed, err := scan(dir, rule)
+	if err != nil {
+		fail(topicHint(err, dir))
+	}
 	sortFindings(findings)
 	stats := ScanStats{FilesScanned: scanned, FilesParsed: parsed, Skipped: scanned - parsed}
 	if len(findings) == 0 {
@@ -412,7 +419,7 @@ func runDemo(topic, dir string, skipLive bool) {
 
 	// 2. remediation preview
 	fmt.Print(stepHeader(2, total, "Remediation preview (dry-run, span-verified)"))
-	if fr, err := fixRun(dir, rule, false); err == nil {
+	if fr, err := fixRun(dir, rule, false, false); err == nil {
 		renderFix(fr)
 		fmt.Println(infoLine("apply for real with " + accentStyle.Render(fmt.Sprintf("stripe fix %s %s --apply", topic, dir))))
 	}
@@ -565,6 +572,44 @@ func newDumpCmd() *cobra.Command {
 			dumpTrees(d)
 		},
 	}
+}
+
+// topicHint decorates a scan error when the "directory" looks like a typo'd
+// topic name (e.g. `doctor dmp`).
+func topicHint(err error, dir string) error {
+	for name := range packs {
+		if dir != name && editDistanceAtMost2(dir, name) {
+			return fmt.Errorf("%w (did you mean topic %q?)", err, name)
+		}
+	}
+	return err
+}
+
+func editDistanceAtMost2(a, b string) bool {
+	if len(a) > len(b) {
+		a, b = b, a
+	}
+	if len(b)-len(a) > 2 || len(b) > 12 {
+		return false
+	}
+	// tiny DP is overkill at these sizes; do full Levenshtein
+	prev := make([]int, len(a)+1)
+	cur := make([]int, len(a)+1)
+	for i := range prev {
+		prev[i] = i
+	}
+	for j := 1; j <= len(b); j++ {
+		cur[0] = j
+		for i := 1; i <= len(a); i++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			cur[i] = min(min(cur[i-1]+1, prev[i]+1), prev[i-1]+cost)
+		}
+		prev, cur = cur, prev
+	}
+	return prev[len(a)] <= 2
 }
 
 // ---------- helpers ----------

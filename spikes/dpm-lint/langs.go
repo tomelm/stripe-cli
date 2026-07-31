@@ -57,6 +57,11 @@ type langSpec struct {
 	// resourceTokens lists every token that identifies this OpenAPI resource in
 	// this SDK — a call path, a params type, or both.
 	resourceTokens func(resource string) []string
+
+	// funcKinds are node kinds that delimit a function/method body. Variable
+	// resolution is scoped to the enclosing function so a `params` in one
+	// function cannot resolve against a Stripe call in another.
+	funcKinds []string
 }
 
 var specs = map[string]langSpec{
@@ -69,6 +74,7 @@ var specs = map[string]langSpec{
 		anchorStyle:    anchorCall,
 		pairKinds:      []string{"pair"},
 		assignKinds:    []string{"assignment"},
+		funcKinds:      []string{"method", "singleton_method", "lambda", "do_block", "block"},
 		resourceTokens: func(r string) []string { return []string{pascalSingular(r)} },
 	},
 	".py": {
@@ -81,6 +87,7 @@ var specs = map[string]langSpec{
 		anchorStyle:    anchorCall,
 		pairKinds:      []string{"keyword_argument", "pair"},
 		assignKinds:    []string{"assignment"},
+		funcKinds:      []string{"function_definition"},
 		resourceTokens: func(r string) []string { return []string{pascalSingular(r)} },
 	},
 	".php": {
@@ -95,6 +102,7 @@ var specs = map[string]langSpec{
 		anchorStyle: anchorCall,
 		pairKinds:   []string{"array_element_initializer"},
 		assignKinds: []string{"assignment_expression"},
+		funcKinds:   []string{"function_definition", "method_declaration", "anonymous_function_creation_expression", "arrow_function"},
 		resourceTokens: func(r string) []string {
 			return []string{lowerCamelPlural(r), pascalSingular(r)}
 		},
@@ -108,6 +116,7 @@ var specs = map[string]langSpec{
 		anchorStyle:    anchorCall,
 		pairKinds:      []string{"pair"},
 		assignKinds:    []string{"assignment_expression", "variable_declarator"},
+		funcKinds:      []string{"function_declaration", "function_expression", "method_definition", "arrow_function", "generator_function_declaration"},
 		resourceTokens: func(r string) []string { return []string{lowerCamelPlural(r)} },
 	},
 	".ts": {
@@ -122,6 +131,7 @@ var specs = map[string]langSpec{
 		declKinds:   []string{"variable_declarator"},
 		// TS names the operation either at the call or in a type annotation:
 		// let params: Stripe.PaymentIntentCreateParams
+		funcKinds: []string{"function_declaration", "function_expression", "method_definition", "arrow_function", "generator_function_declaration"},
 		resourceTokens: func(r string) []string {
 			return []string{lowerCamelPlural(r), pascalSingular(r) + "CreateParams"}
 		},
@@ -135,6 +145,7 @@ var specs = map[string]langSpec{
 		anchorStyle:    anchorType,
 		pairKinds:      []string{"keyed_element"},
 		assignKinds:    []string{"short_var_declaration", "assignment_statement"},
+		funcKinds:      []string{"function_declaration", "method_declaration", "func_literal"},
 		resourceTokens: func(r string) []string { return []string{pascalSingular(r) + "Params"} },
 	},
 	".java": {
@@ -148,6 +159,7 @@ var specs = map[string]langSpec{
 		pairKinds:      nil,
 		assignKinds:    []string{"variable_declarator"},
 		declKinds:      []string{"local_variable_declaration"},
+		funcKinds:      []string{"method_declaration", "constructor_declaration", "lambda_expression"},
 		resourceTokens: func(r string) []string { return []string{pascalSingular(r) + "CreateParams"} },
 	},
 	".cs": {
@@ -162,6 +174,7 @@ var specs = map[string]langSpec{
 		// Target-typed `new()` puts the type on the declaration, not the
 		// literal: `PaymentIntentCreateOptions options;`
 		declKinds:      []string{"variable_declaration"},
+		funcKinds:      []string{"method_declaration", "constructor_declaration", "local_function_statement", "lambda_expression"},
 		resourceTokens: func(r string) []string { return []string{pascalSingular(r) + "CreateOptions"} },
 	},
 }

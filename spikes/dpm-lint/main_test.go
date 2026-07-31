@@ -28,7 +28,10 @@ var want = []string{
 }
 
 func TestScanExactFindings(t *testing.T) {
-	findings, scanned, parsed := scan("testdata", dpmRule)
+	findings, scanned, parsed, err := scan("testdata", dpmRule)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	var got []string
 	for _, f := range findings {
@@ -65,13 +68,15 @@ func TestScanExactFindings(t *testing.T) {
 // TestNegativesRejected names the adversarial cases explicitly so a regression
 // that starts matching them is obvious from the test name alone.
 func TestNegativesRejected(t *testing.T) {
-	findings, _, _ := scan("testdata", dpmRule)
+	findings, _, _, _ := scan("testdata", dpmRule)
 	banned := map[string]string{
 		"testdata/neg.rb":        "non-Stripe resource (MyOrderModel.create)",
 		"testdata/neg.py":        "bare variable and plain dict, not a call argument",
 		"testdata/neg.js":        "plain object literal with no enclosing call",
 		"testdata/attr_read.rb":  "reading the field off a response, not passing it",
 		"testdata/client_opt.js": "client-side Elements option, not a server API param",
+		"testdata/collide.py":    "variable in an unrelated function must not resolve cross-function",
+		"testdata/neg_pool.rb":   "(param, operation) pairing not in the rule: nested-on-PI / top-level-on-subscription",
 	}
 	for _, f := range findings {
 		if why, bad := banned[f.File]; bad {
@@ -83,7 +88,7 @@ func TestNegativesRejected(t *testing.T) {
 // TestResolutionMechanisms asserts each indirection path stays exercised, so a
 // regression in one cannot hide behind the others still passing.
 func TestResolutionMechanisms(t *testing.T) {
-	findings, _, _ := scan("testdata", dpmRule)
+	findings, _, _, _ := scan("testdata", dpmRule)
 	byFile := map[string]string{}
 	for _, f := range findings {
 		byFile[f.File] = f.Via
@@ -102,7 +107,7 @@ func TestResolutionMechanisms(t *testing.T) {
 
 // TestPrefilterSkipsCleanFiles guards the property that makes large repos fast.
 func TestPrefilterSkipsCleanFiles(t *testing.T) {
-	_, scanned, parsed := scan("testdata", dpmRule)
+	_, scanned, parsed, _ := scan("testdata", dpmRule)
 	if parsed >= scanned {
 		t.Errorf("prefilter skipped nothing: scanned=%d parsed=%d", scanned, parsed)
 	}
@@ -129,7 +134,7 @@ func BenchmarkScanSyntheticRepo(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		findings, scanned, parsed := scan(dir, dpmRule)
+		findings, scanned, parsed, _ := scan(dir, dpmRule)
 		if len(findings) != dirty {
 			b.Fatalf("got %d findings, want %d (scanned=%d parsed=%d)",
 				len(findings), dirty, scanned, parsed)

@@ -7,7 +7,6 @@ package main
 // valid. Nothing is written to disk.
 
 import (
-	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -89,15 +88,34 @@ func skipWS(src []byte, i, dir int) int {
 // fixRun computes removal spans per file, applies them in memory, reparses,
 // and — only when apply is true AND the reparse is clean — writes the file.
 // A file that fails reparse is never written.
-func fixRun(root string, rule Rule, apply bool) (*FixReport, error) {
+func fixRun(root string, rule Rule, apply, includeAll bool) (*FixReport, error) {
 	type fileEdit struct {
 		spec  langSpec
 		spans []span
 	}
 	edits := map[string]*fileEdit{}
 
-	findings, _, _ := scan(root, rule)
+	findings, _, _, err := scan(root, rule)
+	if err != nil {
+		return nil, err
+	}
+	report := &FixReport{Command: "fix", Applied: apply, AllClean: true}
 	for _, f := range findings {
+		// Gate: dynamic values and deliberate single-method restrictions are
+		// never auto-removed unless --all — the doctor's own taxonomy says
+		// they need human judgment.
+		if !includeAll {
+			switch intent := classifyIntent(f.Value); intent {
+			case "dynamic":
+				report.Skipped = append(report.Skipped, SkippedFinding{File: f.File, Line: f.Line, Intent: intent,
+					Reason: "value is computed at runtime — review the routing logic (use --all to override)"})
+				continue
+			case "deliberate":
+				report.Skipped = append(report.Skipped, SkippedFinding{File: f.File, Line: f.Line, Intent: intent,
+					Reason: "single-method restriction looks intentional — consider excluded_payment_method_types (use --all to override)"})
+				continue
+			}
+		}
 		spec := specs[strings.ToLower(ext(f.File))]
 		src, err := os.ReadFile(f.File)
 		if err != nil {
@@ -123,7 +141,6 @@ func fixRun(root string, rule Rule, apply bool) (*FixReport, error) {
 		edits[f.File].spans = append(edits[f.File].spans, sp)
 	}
 
-	report := &FixReport{Command: "fix", Applied: apply, AllClean: true}
 	var files []string
 	for f := range edits {
 		files = append(files, f)
@@ -163,7 +180,10 @@ func fixRun(root string, rule Rule, apply bool) (*FixReport, error) {
 				if werr := os.WriteFile(file, out, mode); werr == nil {
 					ff.Written = true
 				} else {
-					return nil, fmt.Errorf("write %s: %w", file, werr)
+					// Record and continue: a half-applied tree must still
+					// produce a complete report of what happened.
+					ff.Error = werr.Error()
+					report.AllClean = false
 				}
 			}
 		}
