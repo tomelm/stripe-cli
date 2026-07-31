@@ -23,15 +23,16 @@ A four-stage pipeline, each stage proven on real Stripe sample code:
    mechanisms tie a finding to an actual Stripe operation, and every finding reports
    which one (`[direct]`, `[var:params]`, `[recv:paramsBuilder]`, `[type:options]`),
    so inferences are auditable.
-3. **Doctor** (`-doctor`) — the scanner alone cannot say whether removal is *safe*;
+3. **Doctor** (`dpm doctor`) — the scanner alone cannot say whether removal is *safe*;
    that depends on account facts. Three read-only GETs using the CLI's stored
    credentials (zero CLI changes needed): account identity, Dashboard payment-method
    configuration, and the API versions recent events actually ran at. Verdicts gate
    in order: version cutoff (`2023-08-16`) → Dashboard config → intent
    (`CANDIDATE` / `SKIP` / `REVIEW` / `BLOCKED`).
-4. **Fix-dry** (`-fix-dry`) — computes the exact byte span that removes each finding
+4. **Fix** (`dpm fix`) — computes the exact byte span that removes each finding
    (pair + separator / Java chain-link / whole statement), applies edits in memory,
-   **reparses, and verifies**. Writes nothing.
+   **reparses, and verifies**. Dry-run writes nothing; `--apply` writes only files
+   whose edited form reparses clean.
 
 ## Outcomes (verified, reproducible)
 
@@ -45,7 +46,7 @@ including two negative controls):
 - Precision behaviors held under pressure: comments describing the param, test
   assertions reading it off responses, client-side camelCase Elements options, and a
   Java server already on `automatic_payment_methods` were all correctly not flagged.
-- Live `-doctor` run against a real test account (recent traffic at `2022-11-15`,
+- Live `dpm doctor` run against a real test account (recent traffic at `2022-11-15`,
   pre-cutoff) correctly **BLOCKED all removals** — the naive "remove it" advice would
   have silently dropped payment methods on the tool author's own account.
 
@@ -90,10 +91,12 @@ productionization on a wider real-repo evaluation.
 
 ```bash
 cd spikes/dpm-lint
-CGO_ENABLED=0 go test -v ./...        # full suite: 15 findings, 5 negatives, mechanisms asserted
-CGO_ENABLED=0 go run . <dir>          # scan
-CGO_ENABLED=0 go run . -doctor <dir>  # scan + account verdicts (read-only GETs)
-CGO_ENABLED=0 go run . -fix-dry <dir> # removal spans + reparse verification, writes nothing
+CGO_ENABLED=0 go test -v ./...             # full suite: findings, negatives, mechanisms asserted
+CGO_ENABLED=0 go run . demo --dir <dir>    # guided walkthrough (humans)
+CGO_ENABLED=0 go run . guide               # agent playbook: steps, schemas, exit codes
+CGO_ENABLED=0 go run . scan <dir> --json   # machine-readable findings
+CGO_ENABLED=0 go run . doctor <dir>        # scan + account verdicts (read-only GETs)
+CGO_ENABLED=0 go run . fix <dir>           # dry-run removal spans + reparse verification
 ```
 
 ## Recommended next steps (proposal phase 0)

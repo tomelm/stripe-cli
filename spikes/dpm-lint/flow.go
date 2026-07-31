@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -108,107 +109,90 @@ func createSession(key, pmcID, uiMode string) (*session, error) {
 	return &s, nil
 }
 
-// runFlow executes steps A and B headlessly, then leaves an embedded-page
-// server running for step C if -flow-serve is set.
-func runFlow(profile string, serveEmbedded bool) {
+// experimentRun proves the doc's central claim live: an EPHEMERAL
+// payment-method configuration (the account's Default config is never
+// touched) drives which methods a Checkout Session resolves. keepActive
+// leaves the config active (for the embedded server); otherwise it is
+// deactivated before returning.
+func experimentRun(profile string, keepActive bool) (*ExperimentReport, error) {
 	key, err := loadTestKey(profile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "flow: %v\n", err)
-		os.Exit(1)
+		return nil, err
 	}
+	r := &ExperimentReport{Command: "experiment", Removed: []string{}, Added: []string{}}
 
-	fmt.Println("== A. Session-diff loop (ephemeral config; your Default config is untouched)")
-
-	// A1: ephemeral configuration.
 	var pmc struct {
 		ID string `json:"id"`
 	}
 	name := fmt.Sprintf("dpm-flow-demo-%d", os.Getpid())
-	// A fresh configuration starts EMPTY (it does not inherit the account
-	// defaults — verified empirically), so enable an EUR-friendly set here.
+	// A fresh configuration starts EMPTY (it does not inherit account
+	// defaults — verified empirically), so enable an EUR-friendly set.
 	createForm := url.Values{"name": {name}}
 	for _, m := range []string{"card", "ideal", "bancontact", "eps", "sepa_debit"} {
 		createForm.Set(m+"[display_preference][preference]", "on")
 	}
 	if err := stripePOST(key, "/v1/payment_method_configurations", createForm, &pmc); err != nil {
-		fmt.Fprintf(os.Stderr, "flow: create config: %v\n", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("create ephemeral configuration: %w", err)
 	}
-	fmt.Printf("  created ephemeral payment-method configuration %s (%q)\n", pmc.ID, name)
+	r.ConfigID = pmc.ID
 
-	// A2: session 1 against it.
+	cleanup := func() {
+		if keepActive {
+			r.Cleanup = "kept-active"
+			return
+		}
+		if derr := deactivate(key, pmc.ID); derr != nil {
+			r.Cleanup = "FAILED — run `dpm cleanup " + pmc.ID + "`"
+			return
+		}
+		r.Cleanup = "deactivated"
+	}
+
 	s1, err := createSession(key, pmc.ID, "hosted")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "flow: session 1: %v\n", err)
-		os.Exit(1)
+		cleanup()
+		return r, fmt.Errorf("session 1: %w", err)
 	}
 	sort.Strings(s1.PaymentMethodTypes)
-	fmt.Printf("  session 1 %s resolves %d methods: %s\n", s1.ID, len(s1.PaymentMethodTypes), strings.Join(s1.PaymentMethodTypes, ", "))
+	r.Before = SessionInfo{ID: s1.ID, URL: s1.URL, Methods: s1.PaymentMethodTypes}
 
-	// A3: toggle one non-card method off on the ephemeral config.
-	toggle := ""
 	for _, m := range s1.PaymentMethodTypes {
 		if m != "card" {
-			toggle = m
+			r.Toggled = m
 			break
 		}
 	}
-	if toggle == "" {
-		fmt.Println("  only card present; nothing to toggle — skipping diff")
-	} else {
-		form := url.Values{}
-		form.Set(toggle+"[display_preference][preference]", "off")
-		var upd map[string]any
-		if err := stripePOST(key, "/v1/payment_method_configurations/"+pmc.ID, form, &upd); err != nil {
-			fmt.Fprintf(os.Stderr, "flow: toggle %s off: %v\n", toggle, err)
-		} else {
-			fmt.Printf("  toggled %q OFF on the ephemeral config\n", toggle)
-		}
-
-		// A4: session 2, diff.
-		s2, err := createSession(key, pmc.ID, "hosted")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "flow: session 2: %v\n", err)
-			os.Exit(1)
-		}
-		sort.Strings(s2.PaymentMethodTypes)
-		fmt.Printf("  session 2 %s resolves %d methods: %s\n", s2.ID, len(s2.PaymentMethodTypes), strings.Join(s2.PaymentMethodTypes, ", "))
-
-		removed, added := diffSets(s1.PaymentMethodTypes, s2.PaymentMethodTypes)
-		fmt.Printf("  DIFF: removed=%v added=%v\n", removed, added)
-		if len(removed) == 1 && removed[0] == toggle && len(added) == 0 {
-			fmt.Println("  VERIFIED: the dashboard config change alone changed what customers see — no code change involved")
-		} else {
-			fmt.Println("  UNEXPECTED DIFF — inspect manually")
-		}
-		fmt.Printf("  hosted URLs for browser verification:\n    before: %s\n    after:  %s\n", s1.URL, s2.URL)
+	if r.Toggled == "" {
+		cleanup()
+		return r, fmt.Errorf("only card resolved; nothing to toggle")
+	}
+	form := url.Values{}
+	form.Set(r.Toggled+"[display_preference][preference]", "off")
+	var upd map[string]any
+	if err := stripePOST(key, "/v1/payment_method_configurations/"+pmc.ID, form, &upd); err != nil {
+		cleanup()
+		return r, fmt.Errorf("toggle %s off: %w", r.Toggled, err)
 	}
 
-	// B: delayed-notification drill.
-	fmt.Println("\n== B. Delayed-notification webhook drill (doc's recommended step)")
-	drillOK := webhookDrill()
-
-	if !drillOK {
-		fmt.Println("  NOTE: webhook drill did not fully verify — see above")
+	s2, err := createSession(key, pmc.ID, "hosted")
+	if err != nil {
+		cleanup()
+		return r, fmt.Errorf("session 2: %w", err)
 	}
+	sort.Strings(s2.PaymentMethodTypes)
+	r.After = SessionInfo{ID: s2.ID, URL: s2.URL, Methods: s2.PaymentMethodTypes}
 
-	if serveEmbedded {
-		// C: embedded page server needs the config ACTIVE; deactivate later
-		// with -flow-cleanup <config-id>.
-		fmt.Printf("\n  config %s stays active while serving — run -flow-cleanup %s when done\n", pmc.ID, pmc.ID)
-		serveEmbeddedPage(key, pmc.ID)
-		return
-	}
-	deactivate(key, pmc.ID)
+	r.Removed, r.Added = diffSets(s1.PaymentMethodTypes, s2.PaymentMethodTypes)
+	r.Verified = len(r.Removed) == 1 && r.Removed[0] == r.Toggled && len(r.Added) == 0
+	cleanup()
+	return r, nil
 }
 
-func deactivate(key, id string) {
+// deactivate is silent; callers report the outcome (the experiment report's
+// cleanup field, or the cleanup command's own message).
+func deactivate(key, id string) error {
 	var deact map[string]any
-	if err := stripePOST(key, "/v1/payment_method_configurations/"+id, url.Values{"active": {"false"}}, &deact); err != nil {
-		fmt.Fprintf(os.Stderr, "  cleanup: deactivate %s: %v (deactivate manually in the dashboard)\n", id, err)
-	} else {
-		fmt.Printf("  cleanup: ephemeral config %s deactivated\n", id)
-	}
+	return stripePOST(key, "/v1/payment_method_configurations/"+id, url.Values{"active": {"false"}}, &deact)
 }
 
 func diffSets(a, b []string) (removed, added []string) {
@@ -232,59 +216,68 @@ func diffSets(a, b []string) (removed, added []string) {
 	return
 }
 
-// webhookDrill implements the doc's webhook handler and proves it works by
-// round-tripping a triggered event through `stripe listen`.
-func webhookDrill() bool {
-	received := make(chan string, 8)
+// drillRun implements the doc's delayed-notification handler and proves it
+// works by round-tripping a triggered event through `stripe listen`. The
+// local handler binds an OS-assigned port, so nothing collides with the
+// classic 4242.
+func drillRun() (*DrillReport, error) {
+	r := &DrillReport{Command: "drill", Events: []DrillEvent{}}
+	received := make(chan DrillEvent, 8)
 	var secret string
 
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return r, err
+	}
+	addr := ln.Addr().String()
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/webhook", func(w http.ResponseWriter, r *http.Request) {
-		payload, _ := io.ReadAll(r.Body)
-		sig := r.Header.Get("Stripe-Signature")
-		if !verifySignature(payload, sig, secret) {
-			w.WriteHeader(400)
-			received <- "SIGNATURE-INVALID"
-			return
-		}
+	mux.HandleFunc("/webhook", func(w http.ResponseWriter, req *http.Request) {
+		payload, _ := io.ReadAll(req.Body)
+		sig := req.Header.Get("Stripe-Signature")
 		var evt struct {
 			Type string `json:"type"`
 		}
 		_ = json.Unmarshal(payload, &evt)
-		// The doc's three cases.
+		if !verifySignature(payload, sig, secret) {
+			w.WriteHeader(400)
+			received <- DrillEvent{Type: evt.Type, Signature: "invalid"}
+			return
+		}
 		switch evt.Type {
 		case "checkout.session.completed",
 			"checkout.session.async_payment_succeeded",
 			"checkout.session.async_payment_failed":
-			received <- evt.Type
+			received <- DrillEvent{Type: evt.Type, Signature: "verified"}
 		}
 		w.WriteHeader(200)
 	})
-	srv := &http.Server{Addr: "127.0.0.1:4242", Handler: mux}
-	go func() { _ = srv.ListenAndServe() }()
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
 	defer srv.Close()
-	fmt.Println("  local handler listening on 127.0.0.1:4242/webhook (completed / async_payment_succeeded / async_payment_failed)")
 
 	stripeBin := os.Getenv("STRIPE_BIN")
 	if stripeBin == "" {
-		stripeBin = "stripe"
+		if p, err := exec.LookPath("stripe"); err == nil {
+			stripeBin = p
+		} else {
+			return r, fmt.Errorf("stripe CLI not found on PATH (set STRIPE_BIN)")
+		}
 	}
-	listen := exec.Command(stripeBin, "listen", "--forward-to", "127.0.0.1:4242/webhook",
+	listen := exec.Command(stripeBin, "listen", "--forward-to", addr+"/webhook",
 		"--events", "checkout.session.completed,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed")
-	stderr, _ := listen.StderrPipe()
+	stderrPipe, _ := listen.StderrPipe()
 	if err := listen.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "  stripe listen failed to start: %v\n", err)
-		return false
+		return r, fmt.Errorf("stripe listen: %w", err)
 	}
 	defer func() { _ = listen.Process.Kill(); _, _ = listen.Process.Wait() }()
 
-	// The signing secret is printed on stderr as "... whsec_xxx ...".
 	secretCh := make(chan string, 1)
 	go func() {
 		buf := make([]byte, 4096)
 		acc := ""
 		for {
-			n, err := stderr.Read(buf)
+			n, err := stderrPipe.Read(buf)
 			if n > 0 {
 				acc += string(buf[:n])
 				if i := strings.Index(acc, "whsec_"); i >= 0 {
@@ -303,31 +296,27 @@ func webhookDrill() bool {
 	}()
 	select {
 	case secret = <-secretCh:
-		fmt.Println("  stripe listen ready (signing secret captured, not shown)")
+		r.ListenReady = true
 	case <-time.After(20 * time.Second):
-		fmt.Fprintln(os.Stderr, "  timed out waiting for stripe listen to become ready")
-		return false
+		return r, fmt.Errorf("timed out waiting for stripe listen")
 	}
 
 	trigger := exec.Command(stripeBin, "trigger", "checkout.session.async_payment_succeeded")
-	out, err := trigger.CombinedOutput()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "  stripe trigger failed: %v\n%s\n", err, out)
-		return false
+	if out, err := trigger.CombinedOutput(); err != nil {
+		return r, fmt.Errorf("stripe trigger: %v: %s", err, out)
 	}
-	fmt.Println("  triggered checkout.session.async_payment_succeeded")
+	r.Triggered = "checkout.session.async_payment_succeeded"
 
 	want := map[string]bool{"checkout.session.completed": false, "checkout.session.async_payment_succeeded": false}
 	deadline := time.After(60 * time.Second)
 	for {
 		select {
 		case evt := <-received:
-			if evt == "SIGNATURE-INVALID" {
-				fmt.Println("  EVENT ARRIVED WITH BAD SIGNATURE — drill failed")
-				return false
+			r.Events = append(r.Events, evt)
+			if evt.Signature != "verified" {
+				return r, fmt.Errorf("event %s arrived with invalid signature", evt.Type)
 			}
-			fmt.Printf("  received %-45s signature VERIFIED\n", evt)
-			want[evt] = true
+			want[evt.Type] = true
 			all := true
 			for _, got := range want {
 				if !got {
@@ -335,18 +324,12 @@ func webhookDrill() bool {
 				}
 			}
 			if all {
-				fmt.Println("  VERIFIED: the doc's delayed-notification handler round-trips end to end")
-				return true
+				r.Verified = true
+				return r, nil
 			}
 		case <-deadline:
-			got := []string{}
-			for e, ok := range want {
-				if ok {
-					got = append(got, e)
-				}
-			}
-			fmt.Printf("  timed out; events received: %v\n", got)
-			return len(got) > 0
+			r.Note = "timed out before both events arrived"
+			return r, nil
 		}
 	}
 }

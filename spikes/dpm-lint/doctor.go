@@ -20,7 +20,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -249,46 +248,43 @@ func verdict(intent string, f *accountFacts) string {
 	}
 }
 
-// runDoctor renders the combined report.
-func runDoctor(findings []Finding, profile string) {
+// buildDoctorReport combines scan findings with account facts.
+func buildDoctorReport(findings []Finding, profile string) (*DoctorReport, error) {
 	key, err := loadTestKey(profile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "doctor: %v\ndoctor: continuing scan-only (set STRIPE_API_KEY or run `stripe login`)\n", err)
-		return
+		return nil, err
 	}
 	facts, err := fetchAccountFacts(key)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "doctor: %v\ndoctor: continuing scan-only\n", err)
-		return
+		return nil, err
 	}
 
-	fmt.Printf("\nAccount %s", facts.AccountID)
-	if facts.DisplayName != "" {
-		fmt.Printf(" (%s)", facts.DisplayName)
+	r := &DoctorReport{
+		Command: "doctor",
+		Account: AccountSummary{
+			ID:            facts.AccountID,
+			Name:          facts.DisplayName,
+			EventVersions: facts.EventVersions,
+			VersionsOK:    facts.VersionsOK,
+			VersionsMixed: facts.VersionsMixed,
+			Cutoff:        dpmCutoff,
+			Configs:       facts.ConfigCount,
+			ActiveConfig:  facts.ActiveConfig,
+			MethodsOn:     facts.MethodsOn,
+			MethodsOff:    facts.MethodsOff,
+			ConfiguredOK:  facts.ConfiguredOK,
+		},
+		Summary: map[string]int{},
 	}
-	fmt.Println(" — test mode")
-
-	var vs []string
-	for v, n := range facts.EventVersions {
-		vs = append(vs, fmt.Sprintf("%s ×%d", v, n))
-	}
-	sort.Strings(vs)
-	if len(vs) == 0 {
-		fmt.Println("  recent event API versions: none sampled")
-	} else {
-		fmt.Printf("  recent event API versions: %s\n", strings.Join(vs, ", "))
-	}
-	fmt.Printf("  DPM cutoff %s: versionsOK=%v mixed=%v\n", dpmCutoff, facts.VersionsOK, facts.VersionsMixed)
-	fmt.Printf("  payment-method configurations: %d (active: %q) — %d methods on, %d off\n",
-		facts.ConfigCount, facts.ActiveConfig, facts.MethodsOn, facts.MethodsOff)
-
-	if len(findings) == 0 {
-		fmt.Println("\nNo hardcoded payment_method_types found — nothing to migrate.")
-		return
-	}
-	fmt.Printf("\nVerdicts (%d findings)\n", len(findings))
 	for _, f := range findings {
 		intent := classifyIntent(f.Value)
-		fmt.Printf("  %s:%d  [%s] %s\n      %s\n", f.File, f.Line, intent, firstLine(f.Value), verdict(intent, facts))
+		v := verdict(intent, facts)
+		class := v
+		if i := strings.Index(v, ":"); i > 0 {
+			class = v[:i]
+		}
+		r.Findings = append(r.Findings, DoctorFinding{Finding: f, Intent: intent, Verdict: v, Class: class})
+		r.Summary[class]++
 	}
+	return r, nil
 }

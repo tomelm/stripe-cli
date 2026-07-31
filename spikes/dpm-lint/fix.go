@@ -86,9 +86,10 @@ func skipWS(src []byte, i, dir int) int {
 	return i
 }
 
-// fixDry re-runs the match per file, applies all removal spans in memory,
-// reparses, and reports. Returns true if every touched file reparses clean.
-func fixDry(root string, rule Rule) bool {
+// fixRun computes removal spans per file, applies them in memory, reparses,
+// and — only when apply is true AND the reparse is clean — writes the file.
+// A file that fails reparse is never written.
+func fixRun(root string, rule Rule, apply bool) (*FixReport, error) {
 	type fileEdit struct {
 		spec  langSpec
 		spans []span
@@ -114,7 +115,6 @@ func fixDry(root string, rule Rule) bool {
 		}
 		sp, ok := removalSpan(key, spec, lang, src)
 		if !ok {
-			fmt.Printf("  %s:%d  NO-SPAN\n", f.File, f.Line)
 			continue
 		}
 		if edits[f.File] == nil {
@@ -123,7 +123,7 @@ func fixDry(root string, rule Rule) bool {
 		edits[f.File].spans = append(edits[f.File].spans, sp)
 	}
 
-	allClean := true
+	report := &FixReport{Command: "fix", Applied: apply, AllClean: true}
 	var files []string
 	for f := range edits {
 		files = append(files, f)
@@ -138,35 +138,38 @@ func fixDry(root string, rule Rule) bool {
 		// Apply spans back-to-front so offsets stay valid.
 		sort.Slice(fe.spans, func(i, j int) bool { return fe.spans[i].start > fe.spans[j].start })
 		out := src
+		ff := FixFile{Path: file}
 		for _, sp := range fe.spans {
 			if int(sp.end) > len(out) || sp.start >= sp.end {
 				continue
 			}
 			out = append(append([]byte{}, out[:sp.start]...), out[sp.end:]...)
+			ff.Edits = append(ff.Edits, FixEdit{Start: sp.start, End: sp.end, Label: sp.label})
 		}
+		ff.BytesRemoved = len(src) - len(out)
 		lang := fe.spec.lang()
 		tree, err := ts.NewParser(lang).Parse(out)
-		verdict := "REPARSE-CLEAN"
 		if err != nil || tree.RootNode().HasError() {
-			verdict = "REPARSE-ERROR (would revert)"
-			allClean = false
+			ff.Reparse = "error"
+			report.AllClean = false
+		} else {
+			ff.Reparse = "clean"
+			if apply {
+				info, statErr := os.Stat(file)
+				mode := os.FileMode(0o644)
+				if statErr == nil {
+					mode = info.Mode()
+				}
+				if werr := os.WriteFile(file, out, mode); werr == nil {
+					ff.Written = true
+				} else {
+					return nil, fmt.Errorf("write %s: %w", file, werr)
+				}
+			}
 		}
-		if os.Getenv("FIX_DRY_SHOW") != "" {
-			fmt.Printf("--- %s (edited, in memory) ---\n%s\n", file, out)
-		}
-		labels := map[string]int{}
-		for _, sp := range fe.spans {
-			labels[sp.label]++
-		}
-		var ls []string
-		for l, n := range labels {
-			ls = append(ls, fmt.Sprintf("%s×%d", l, n))
-		}
-		sort.Strings(ls)
-		fmt.Printf("  %-38s -%d bytes  %-24s %s\n",
-			file, len(src)-len(out), strings.Join(ls, ","), verdict)
+		report.Files = append(report.Files, ff)
 	}
-	return allClean
+	return report, nil
 }
 
 func ext(path string) string {

@@ -1,11 +1,11 @@
 // Spike: rule-based Stripe request-parameter linter over 7 languages,
 // cgo-free tree-sitter. Proves the engine contract, not production quality.
 //
-//	go run . [-dump] [dir]
+// Command surface (cobra): dpm scan|doctor|fix|drill|experiment|demo|guide|cleanup
+// Humans: `dpm demo`. Agents: `dpm guide` (--json + exit-code contract).
 package main
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -81,66 +81,9 @@ type Finding struct {
 // ---------- Engine ----------
 
 func main() {
-	dump := flag.Bool("dump", false, "print S-expression trees instead of linting")
-	doctor := flag.Bool("doctor", false, "add account-aware verdicts (read-only API calls)")
-	fixDryRun := flag.Bool("fix-dry", false, "compute removal spans, excise in memory, reparse-verify; writes nothing")
-	flow := flag.Bool("flow", false, "run the docs-as-experience demo: session-diff loop + webhook drill (test mode)")
-	flowServe := flag.Bool("flow-serve", false, "with -flow: also serve the embedded checkout page on :4243")
-	flowCleanup := flag.String("flow-cleanup", "", "deactivate an ephemeral payment-method configuration by id")
-	profile := flag.String("profile", "default", "CLI config profile for -doctor")
-	flag.Parse()
-	root := "testdata"
-	if flag.NArg() > 0 {
-		root = flag.Arg(0)
-	}
-
-	if *dump {
-		dumpTrees(root)
-		return
-	}
-	if *flowCleanup != "" {
-		key, err := loadTestKey(*profile)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		deactivate(key, *flowCleanup)
-		return
-	}
-	if *flow {
-		runFlow(*profile, *flowServe)
-		return
-	}
-	if *fixDryRun {
-		fmt.Println("dry-run removals (nothing written):")
-		if fixDry(root, dpmRule) {
-			fmt.Println("all touched files reparse clean")
-		} else {
-			fmt.Println("SOME FILES WOULD FAIL — those edits would be reverted")
-		}
-		return
-	}
-
-	findings, scanned, parsed := scan(root, dpmRule)
-	sort.Slice(findings, func(i, j int) bool {
-		if findings[i].File != findings[j].File {
-			return findings[i].File < findings[j].File
-		}
-		return findings[i].Line < findings[j].Line
-	})
-
-	for _, f := range findings {
-		fmt.Printf("%s:%d:%d  %s  %s\n", f.File, f.Line, f.Col, f.Severity, f.RuleID)
-		fmt.Printf("    %s\n", f.Message)
-		fmt.Printf("    in: %s  [%s]\n", f.Anchor, f.Via)
-	}
-	fmt.Printf("\n%d finding(s) — %d files scanned, %d parsed (%d skipped by prefilter)\n",
-		len(findings), scanned, parsed, scanned-parsed)
-	if len(findings) > 0 {
-		fmt.Printf("see %s\n", dpmRule.Docs)
-	}
-	if *doctor {
-		runDoctor(findings, *profile)
+	if err := newRootCmd().Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, failLine(err.Error()))
+		os.Exit(2)
 	}
 }
 
