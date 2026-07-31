@@ -84,6 +84,9 @@ func main() {
 	dump := flag.Bool("dump", false, "print S-expression trees instead of linting")
 	doctor := flag.Bool("doctor", false, "add account-aware verdicts (read-only API calls)")
 	fixDryRun := flag.Bool("fix-dry", false, "compute removal spans, excise in memory, reparse-verify; writes nothing")
+	flow := flag.Bool("flow", false, "run the docs-as-experience demo: session-diff loop + webhook drill (test mode)")
+	flowServe := flag.Bool("flow-serve", false, "with -flow: also serve the embedded checkout page on :4243")
+	flowCleanup := flag.String("flow-cleanup", "", "deactivate an ephemeral payment-method configuration by id")
 	profile := flag.String("profile", "default", "CLI config profile for -doctor")
 	flag.Parse()
 	root := "testdata"
@@ -93,6 +96,19 @@ func main() {
 
 	if *dump {
 		dumpTrees(root)
+		return
+	}
+	if *flowCleanup != "" {
+		key, err := loadTestKey(*profile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		deactivate(key, *flowCleanup)
+		return
+	}
+	if *flow {
+		runFlow(*profile, *flowServe)
 		return
 	}
 	if *fixDryRun {
