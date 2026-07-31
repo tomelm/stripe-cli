@@ -143,6 +143,9 @@ runtime behavior (webhook round-trip via stripe listen/trigger).`,
 				}
 			}
 
+			// Code signals need no credentials — attach in every mode.
+			rep.WebhookHandlers, rep.FrontendSignals = scanSignals(dir)
+
 			failedLive := false
 			if live {
 				var drill *DrillReport
@@ -256,6 +259,27 @@ func renderDoctor(r *DoctorReport) {
 		}
 		sort.Strings(sum)
 		fmt.Println("\n" + mutedStyle.Render("  "+strings.Join(sum, "  ")))
+	}
+
+	if r.WebhookHandlers != nil {
+		h := r.WebhookHandlers
+		fmt.Println("\n" + titleStyle.Render("Delayed-notification handlers in YOUR code"))
+		line := func(name string, files []string) {
+			if len(files) > 0 {
+				fmt.Println(okLine(fmt.Sprintf("%-42s %s", name, mutedStyle.Render(files[0]))))
+			} else {
+				fmt.Println(warnLine(fmt.Sprintf("%-42s not found — required if you enable delayed methods (SEPA, ACH, ...)", name)))
+			}
+		}
+		line("checkout.session.completed", h.Completed)
+		line("checkout.session.async_payment_succeeded", h.AsyncSucceeded)
+		line("checkout.session.async_payment_failed", h.AsyncFailed)
+	}
+	if len(r.FrontendSignals) > 0 {
+		fmt.Println("\n" + titleStyle.Render("Frontend warnings"))
+		for _, w := range r.FrontendSignals {
+			fmt.Println(failLine(fmt.Sprintf("legacy Card Element signal %q in %s — dashboard-managed methods cannot render there", w.Signal, w.File)))
+		}
 	}
 
 	if r.LiveDrill != nil {
@@ -415,6 +439,7 @@ func runDemo(topic, dir string, skipLive bool) {
 			rep.Stats = stats
 		}
 	}
+	rep.WebhookHandlers, rep.FrontendSignals = scanSignals(dir)
 	renderDoctor(rep)
 
 	// 2. remediation preview
@@ -512,13 +537,25 @@ file/line/col, via (resolution mechanism), value, and verdict_class:
 .account carries the evidence (event_api_versions, dashboard_configured).
 Only proceed to step 2 for CANDIDATE findings.
 
+Also in the doctor report, credentials or not:
+  .webhook_handlers  does YOUR code mention the three delayed-notification
+                     event types (all_present should be true before enabling
+                     delayed methods)
+  .frontend_warnings legacy Card Element signals — dashboard-managed methods
+                     cannot render there; server-side removal alone strands
+                     them. Surface these to the human.
+
 ## 2. Preview the remediation
     stripe fix dpm <dir> --json
 Dry-run. Per file: edits[] (byte spans + label); reparse must be "clean".
+The gate skips dynamic values and deliberate single-method restrictions
+(.skipped, with reasons) — that is intentional; --all overrides, but only
+after a human reviews each skipped finding.
 
 ## 3. Apply
     stripe fix dpm <dir> --apply --yes --json
-Writes only reparse-clean files (.files[].written=true).
+Writes only reparse-clean files (.files[].written=true). A per-file write
+failure is recorded in .files[].error and does not abort the rest.
 
 ## 4. Confirm the code change
     stripe doctor dpm <dir> --json

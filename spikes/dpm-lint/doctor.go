@@ -340,3 +340,63 @@ func buildDoctorReport(findings []Finding, profile string) (*DoctorReport, error
 	}
 	return r, nil
 }
+
+// ---------- code signals (substring-level, no credentials needed) ----------
+
+// scanSignals walks the scanned directory for two DPM-specific code facts the
+// docs care about and the param scanner cannot express:
+//
+//  1. does the USER'S code mention the three delayed-notification event types
+//     the migration doc requires handling (the --live drill only proves the
+//     toolchain works, never the user's handler);
+//  2. legacy Card Element usage — dashboard-managed methods cannot render
+//     there, so server-side removal alone strands them.
+//
+// These are honest substring signals, reported as signals — not verdicts.
+func scanSignals(root string) (*HandlerSignals, []FrontendWarning) {
+	h := &HandlerSignals{}
+	var fw []FrontendWarning
+
+	frontendNeedles := []string{
+		"confirmCardPayment", "createToken(", "elements.create('card'", `elements.create("card"`,
+	}
+
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			switch info.Name() {
+			case "node_modules", "vendor", ".git", "dist", "build":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if _, ok := specs[strings.ToLower(filepath.Ext(path))]; !ok {
+			return nil
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		s := string(src)
+		if strings.Contains(s, "checkout.session.completed") {
+			h.Completed = append(h.Completed, path)
+		}
+		if strings.Contains(s, "checkout.session.async_payment_succeeded") {
+			h.AsyncSucceeded = append(h.AsyncSucceeded, path)
+		}
+		if strings.Contains(s, "checkout.session.async_payment_failed") {
+			h.AsyncFailed = append(h.AsyncFailed, path)
+		}
+		for _, n := range frontendNeedles {
+			if strings.Contains(s, n) {
+				fw = append(fw, FrontendWarning{File: path, Signal: n})
+				break
+			}
+		}
+		return nil
+	})
+	h.AllPresent = len(h.Completed) > 0 && len(h.AsyncSucceeded) > 0 && len(h.AsyncFailed) > 0
+	return h, fw
+}
