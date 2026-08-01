@@ -41,6 +41,21 @@ type DoctorReport struct {
 	WebhookHandlers *HandlerSignals   `json:"webhook_handlers,omitempty"`
 	FrontendSignals []FrontendWarning `json:"frontend_warnings,omitempty"`
 	ManifestChecks  []ManifestCheck   `json:"manifest_checks,omitempty"`
+	// Triage: which integration from-states were detected and which migration
+	// guide applies to each — the "which of these three docs do I follow"
+	// answer, with file-level evidence.
+	Triage []TriageResult `json:"triage,omitempty"`
+}
+
+type TriageResult struct {
+	Detected  string           `json:"detected"`
+	Recommend string           `json:"recommendation"`
+	Evidence  []TriageEvidence `json:"evidence"`
+}
+
+type TriageEvidence struct {
+	File  string `json:"file"`
+	Token string `json:"token"`
 }
 
 // HandlerSignals reports whether the USER'S code mentions each webhook event

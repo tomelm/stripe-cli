@@ -162,3 +162,111 @@ var flexRule = Rule{
 		},
 	}},
 }
+
+// ---------- pe: legacy per-payment-method Elements -> Payment Element ----------
+//
+// From-state: Card/iDEAL/P24 Elements with the confirm<PM>Payment/Setup call
+// family on direct PaymentIntents/SetupIntents. The guide prints no server
+// before-code, so the pack is signal-led: no reliable server anchor exists
+// (payment_method_types-without-automatic_payment_methods is corroborating
+// evidence only — and dpm's territory). Note the guide itself steers most
+// users to ewcs; the triage topic carries that decision.
+var peRule = Rule{
+	ID:       "pe/legacy-elements-to-payment-element",
+	Severity: "info",
+	Action:   "advise",
+	Message:  "Migrate legacy per-payment-method Elements to the single Payment Element: elements.create(\"payment\") + elements.submit() + stripe.confirmPayment/confirmSetup; server adds automatic_payment_methods[enabled]=true.",
+	Docs:     "https://docs.stripe.com/payments/payment-element/migration",
+	Match:    []ParamMatch{},
+}
+
+var peSignals = PackSignals{
+	// The migrated flow is webhook-driven; the guide names these three.
+	WebhookEvents: []string{
+		"payment_intent.succeeded",
+		"payment_intent.processing",
+		"payment_intent.payment_failed",
+	},
+	FrontendTokens: []FrontendToken{
+		{Token: "confirmCardPayment", Note: "replace with elements.submit() + stripe.confirmPayment({elements, clientSecret, confirmParams}) — EXEMPT if used with a 'cardCvc' Element for CVC recollection of saved cards"},
+		{Token: "confirmP24Payment", Note: "whole confirm<PM>Payment family collapses into stripe.confirmPayment"},
+		{Token: "confirmCardSetup", Note: "replace with elements.submit() + stripe.confirmSetup({elements, clientSecret, confirmParams})"},
+		{Token: "confirmP24Setup", Note: "whole confirm<PM>Setup family collapses into stripe.confirmSetup"},
+		{Token: "elements.create('card'", Note: "per-payment-method Elements are replaced by elements.create(\"payment\")"},
+		{Token: `elements.create("card"`, Note: "per-payment-method Elements are replaced by elements.create(\"payment\")"},
+	},
+}
+
+// ---------- ct: PaymentMethod server-handoff -> Confirmation Tokens ----------
+//
+// From-state: Payment Element, server-side confirmation, client
+// stripe.createPaymentMethod({elements,...}) handing paymentMethod.id to the
+// server which passes payment_method on a confirm:true PaymentIntent create.
+// Stripe brands that from-state UNSUPPORTED, so this is effectively mandatory
+// for its audience. Server anchor choice: `payment_method` is hopelessly
+// broad and `use_stripe_sdk`/`confirm` PERSIST after migration; only
+// `mandate_data` is from-state-specific (the ConfirmationToken carries it
+// afterwards) — partial recall, honest precision. Detection burden is on the
+// signals (createPaymentMethod is the discriminator).
+//
+// Doc trap recorded during mapping: migration-ct.md's markdown rendering
+// DROPS the removed lines from its Before snippets — the authoritative
+// from-state code lives on finalize-payments-on-the-server-legacy.md.
+var ctRule = Rule{
+	ID:       "ct/payment-method-handoff-to-confirmation-tokens",
+	Severity: "warn",
+	Action:   "advise",
+	Message:  "Server-side confirmation with a manually assembled mandate_data marks the legacy PaymentMethod handoff (branded unsupported): switch the client to stripe.createConfirmationToken({elements,...}) and pass confirmation_token instead of payment_method — mandate_data/shipping/return_url then ride on the token.",
+	Docs:     "https://docs.stripe.com/payments/payment-element/migration-ct",
+	Match: []ParamMatch{{
+		Param: "mandate_data",
+		Operations: []string{
+			"POST /v1/payment_intents",
+			"POST /v1/payment_intents/{intent}/confirm",
+		},
+	}},
+}
+
+var ctSignals = PackSignals{
+	FrontendTokens: []FrontendToken{
+		{Token: "stripe.createPaymentMethod", Note: "replace with stripe.createConfirmationToken({elements, params:{payment_method_data,...}}) — the from-state is branded unsupported"},
+		{Token: "paymentMethodId", Note: "the client->server handoff key becomes confirmationTokenId (confirmationToken.id)"},
+	},
+}
+
+// ---------- elements: the "which of the three guides applies?" triage ----------
+//
+// The three Payment Element migration guides are disjoint by from-state plus
+// one orthogonal axis; a repo can be in several states at once. This topic
+// detects each from-state with file-level evidence and names the guide.
+var elementsRule = Rule{
+	ID:       "elements/triage",
+	Severity: "info",
+	Action:   "advise",
+	Message:  "Payment Element migration triage — see the 'Which migration applies' section of this report.",
+	Docs:     "https://docs.stripe.com/payments/payment-element",
+	Match:    []ParamMatch{},
+}
+
+var elementsTriage = []TriageBranch{
+	{
+		Detected:  "Charges-era integration (tokens / direct charge creation)",
+		Recommend: "PREREQUISITE: migrate Charges -> PaymentIntents first (docs.stripe.com/payments/payment-intents/migration) — none of the Payment Element guides apply until then",
+		Tokens:    []string{"stripe.createToken(", "createToken(", "/v1/charges", "Stripe::Charge.create", "stripe.charges.create", "Charge.create("},
+	},
+	{
+		Detected:  "legacy per-payment-method Elements with CLIENT-side confirmation (Card Element era)",
+		Recommend: "migrate the UI — topic `ewcs` (Stripe-recommended: Checkout Sessions manage tax/discounts/subscriptions/shipping/currency) or topic `pe` (minimal change, keep your own PaymentIntent orchestration)",
+		Tokens:    []string{"confirmCardPayment", "confirmCardSetup", "confirmP24Payment", "confirmP24Setup", "elements.create('card'", `elements.create("card"`},
+	},
+	{
+		Detected:  "Payment Element with SERVER-side confirmation via PaymentMethod handoff",
+		Recommend: "topic `ct`: adopt Confirmation Tokens — this from-state is branded unsupported by Stripe, making the migration effectively mandatory (orthogonal to pe/ewcs; can compose with either)",
+		Tokens:    []string{"stripe.createPaymentMethod", "paymentMethodCreation: 'manual'", `paymentMethodCreation: "manual"`, "handleNextAction"},
+	},
+	{
+		Detected:  "already-migrated markers (to-state code present)",
+		Recommend: "these files are on a CURRENT integration shape — cross-check against the from-states above; mixed states usually mean a migration is partially done",
+		Tokens:    []string{"initCheckoutElementsSdk", "createConfirmationToken", "confirmation_token", `elements.create("payment"`, "elements.create('payment'", "automatic_payment_methods"},
+	},
+}

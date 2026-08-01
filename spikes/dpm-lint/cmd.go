@@ -38,6 +38,7 @@ var (
 type Pack struct {
 	Rule    Rule
 	Signals *PackSignals
+	Triage  []TriageBranch
 }
 
 var packs = map[string]Pack{
@@ -48,6 +49,9 @@ var packs = map[string]Pack{
 	"source-types":      {Rule: sourceTypesRule},
 	"ewcs":              {Rule: ewcsRule, Signals: &ewcsSignals},
 	"flex":              {Rule: flexRule},
+	"pe":                {Rule: peRule, Signals: &peSignals},
+	"ct":                {Rule: ctRule, Signals: &ctSignals},
+	"elements":          {Rule: elementsRule, Triage: elementsTriage},
 }
 
 // topicList renders the registry for help and error text.
@@ -107,9 +111,9 @@ func newRootCmd() *cobra.Command {
 		Long: `Diagnose and remediate Stripe API migrations. The engine is generic;
 migrations are rule packs named by topic.
 
-Topics: dpm (Dynamic Payment Methods, fixable) · ewcs (Elements with
-Checkout Sessions readiness) · flex (flexible payment features beta→GA) ·
-tax-percent · collection-method · prorate · source-types (advise-only).
+Topics: dpm (fixable) · elements (WHICH Payment Element migration applies —
+start here if unsure) · pe · ewcs · ct (the three Payment Element guides) ·
+flex · tax-percent · collection-method · prorate · source-types (advise-only).
 
 Humans: start with ` + "`stripe demo dpm`" + `. Agents: start with ` + "`stripe guide`" + `.`,
 		SilenceUsage:  true,
@@ -170,6 +174,7 @@ runtime behavior (webhook round-trip via stripe listen/trigger).`,
 
 			// Code signals need no credentials — attach in every mode.
 			rep.WebhookHandlers, rep.FrontendSignals, rep.ManifestChecks = scanSignals(dir, packs[topic].Signals)
+			rep.Triage = scanTriage(dir, packs[topic].Triage)
 
 			failedLive := false
 			if live {
@@ -312,6 +317,20 @@ func renderDoctor(r *DoctorReport) {
 				note = "legacy client-side token"
 			}
 			fmt.Println(failLine(fmt.Sprintf("%q in %s — %s", w.Signal, w.File, note)))
+		}
+	}
+	if len(r.Triage) > 0 {
+		fmt.Println("\n" + titleStyle.Render("Which migration applies"))
+		for _, t := range r.Triage {
+			fmt.Println(okLine(titleStyle.Render("detected: ") + t.Detected))
+			fmt.Println(kv("", accentStyle.Render(t.Recommend)))
+			max := len(t.Evidence)
+			if max > 3 {
+				max = 3
+			}
+			for _, ev := range t.Evidence[:max] {
+				fmt.Println(kv("", mutedStyle.Render(fmt.Sprintf("%s  (%s)", ev.File, ev.Token))))
+			}
 		}
 	}
 	if len(r.ManifestChecks) > 0 {
@@ -489,6 +508,7 @@ func runDemo(topic, dir string, skipLive bool) {
 		}
 	}
 	rep.WebhookHandlers, rep.FrontendSignals, rep.ManifestChecks = scanSignals(dir, packs[topic].Signals)
+	rep.Triage = scanTriage(dir, packs[topic].Triage)
 	renderDoctor(rep)
 
 	// 2. remediation preview
@@ -568,6 +588,19 @@ const agentGuide = `# Migration doctor — agent playbook
 
 Verbs are generic; the migration is a topic argument. Topics:
   dpm                remove payment_method_types (fixable: doctor -> fix -> doctor)
+  elements           WHICH Payment Element migration applies? Run this first
+                     when unsure: .triage detects each from-state with file
+                     evidence — Charges-era (prerequisite migration), legacy
+                     Card Element (-> pe or ewcs), PaymentMethod server
+                     handoff (-> ct, mandatory: from-state is unsupported),
+                     and already-migrated markers
+  pe                 legacy per-PM Elements -> Payment Element (advise;
+                     signals: confirm<PM>Payment/Setup family, card Element;
+                     expected events payment_intent.succeeded/processing/
+                     payment_failed; note: Stripe prefers ewcs for most)
+  ct                 PaymentMethod handoff -> Confirmation Tokens (advise;
+                     anchor mandate_data@PI create/confirm; signals:
+                     createPaymentMethod, paymentMethodId handoff)
   ewcs               Elements with Checkout Sessions readiness report (advise;
                      recommendation-class — no version gate; the doctor report
                      carries the machine-checkable prerequisites: .findings are

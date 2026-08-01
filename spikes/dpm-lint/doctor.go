@@ -373,6 +373,63 @@ type ManifestFloor struct {
 	Min     string // "8.0.0"
 }
 
+// TriageBranch describes one detectable integration from-state and which
+// migration guide applies to it. Branches are evaluated independently — a
+// repo can legitimately be in several states at once (that is the point of
+// triage).
+type TriageBranch struct {
+	Detected  string   // what this evidence means
+	Recommend string   // which topic/guide to follow, and why
+	Tokens    []string // code tokens whose presence constitutes evidence
+}
+
+// scanTriage evaluates each branch's tokens over the tree and returns the
+// branches with evidence, in declaration order.
+func scanTriage(root string, branches []TriageBranch) []TriageResult {
+	if len(branches) == 0 {
+		return nil
+	}
+	results := make([]TriageResult, len(branches))
+	for i, b := range branches {
+		results[i] = TriageResult{Detected: b.Detected, Recommend: b.Recommend}
+	}
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			switch info.Name() {
+			case "node_modules", "vendor", ".git", "dist", "build":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if _, ok := specs[strings.ToLower(filepath.Ext(path))]; !ok {
+			return nil
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		text := string(src)
+		for i, b := range branches {
+			for _, t := range b.Tokens {
+				if strings.Contains(text, t) {
+					results[i].Evidence = append(results[i].Evidence, TriageEvidence{File: path, Token: t})
+				}
+			}
+		}
+		return nil
+	})
+	var out []TriageResult
+	for _, r := range results {
+		if len(r.Evidence) > 0 {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // scanSignals walks the scanned directory for the pack's declared signals.
 // These are honest substring/manifest checks, reported as signals — never
 // verdicts.

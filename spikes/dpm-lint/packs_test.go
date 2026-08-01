@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -55,6 +56,15 @@ func TestPacks(t *testing.T) {
 			"checkout_form.js": 0,
 			"webhook.rb":       0,
 			"negative.js":      0,
+		}},
+		"pe": {rule: peRule, expect: map[string]int{
+			"checkout.js": 0,
+			"webhook.rb":  0,
+		}},
+		"ct": {rule: ctRule, expect: map[string]int{
+			"server.js":   1,
+			"client.js":   0,
+			"migrated.js": 0,
 		}},
 		"flex": {rule: flexRule, expect: map[string]int{
 			"positive.rb": 1,
@@ -120,5 +130,58 @@ func TestPackSignals(t *testing.T) {
 	}
 	if len(fw2) == 0 {
 		t.Error("dpm: expected the Card Element warning from frontend_card.js")
+	}
+}
+
+// TestTriage pins the elements triage: a mixed-era repo must light up all
+// four branches, each with file evidence, and the ct pack's signals must stay
+// silent on already-migrated code.
+func TestTriage(t *testing.T) {
+	results := scanTriage("testdata-packs/elements", elementsTriage)
+	if len(results) != 4 {
+		t.Fatalf("expected all 4 triage branches to fire, got %d: %+v", len(results), results)
+	}
+	wantFile := map[int]string{0: "charges_old.rb", 1: "legacy_card.js", 2: "server_confirm.js", 3: "migrated_part.js"}
+	for i, r := range results {
+		if len(r.Evidence) == 0 {
+			t.Errorf("branch %d (%s): no evidence", i, r.Detected)
+			continue
+		}
+		found := false
+		for _, ev := range r.Evidence {
+			if strings.HasSuffix(ev.File, wantFile[i]) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("branch %d (%s): expected evidence from %s, got %+v", i, r.Detected, wantFile[i], r.Evidence)
+		}
+	}
+
+	// ct signals: fire on the legacy client, silent on migrated code
+	_, fw, _ := scanSignals("testdata-packs/ct", &ctSignals)
+	hitLegacy, hitMigrated := false, false
+	for _, w := range fw {
+		if strings.HasSuffix(w.File, "client.js") {
+			hitLegacy = true
+		}
+		if strings.HasSuffix(w.File, "migrated.js") {
+			hitMigrated = true
+		}
+	}
+	if !hitLegacy {
+		t.Error("ct: expected createPaymentMethod signal in client.js")
+	}
+	if hitMigrated {
+		t.Error("ct: migrated.js must not trigger from-state signals")
+	}
+
+	// pe signals: partial webhook coverage must read as not-all-present
+	h, fw2, _ := scanSignals("testdata-packs/pe", &peSignals)
+	if h.AllPresent {
+		t.Error("pe: only payment_intent.succeeded is handled; AllPresent must be false")
+	}
+	if len(fw2) == 0 {
+		t.Error("pe: expected legacy Element signals in checkout.js")
 	}
 }
