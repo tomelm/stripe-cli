@@ -354,23 +354,38 @@ func buildDoctorReport(findings []Finding, profile string, rule Rule) (*DoctorRe
 
 // ---------- code signals (substring-level, no credentials needed) ----------
 
-// scanSignals walks the scanned directory for two DPM-specific code facts the
-// docs care about and the param scanner cannot express:
-//
-//  1. does the USER'S code mention the three delayed-notification event types
-//     the migration doc requires handling (the --live drill only proves the
-//     toolchain works, never the user's handler);
-//  2. legacy Card Element usage — dashboard-managed methods cannot render
-//     there, so server-side removal alone strands them.
-//
-// These are honest substring signals, reported as signals — not verdicts.
-func scanSignals(root string) (*HandlerSignals, []FrontendWarning) {
-	h := &HandlerSignals{}
-	var fw []FrontendWarning
+// PackSignals is the pack-declared signal set: which webhook event types the
+// migrated integration is expected to handle, which legacy client-side tokens
+// indicate from-state code, and which package version floors apply.
+type PackSignals struct {
+	WebhookEvents  []string
+	FrontendTokens []FrontendToken
+	ManifestFloors []ManifestFloor
+}
 
-	frontendNeedles := []string{
-		"confirmCardPayment", "createToken(", "elements.create('card'", `elements.create("card"`,
+type FrontendToken struct {
+	Token string
+	Note  string
+}
+
+type ManifestFloor struct {
+	Package string
+	Min     string // "8.0.0"
+}
+
+// scanSignals walks the scanned directory for the pack's declared signals.
+// These are honest substring/manifest checks, reported as signals — never
+// verdicts.
+func scanSignals(root string, sig *PackSignals) (*HandlerSignals, []FrontendWarning, []ManifestCheck) {
+	if sig == nil {
+		return nil, nil, nil
 	}
+	h := &HandlerSignals{}
+	for _, ev := range sig.WebhookEvents {
+		h.Events = append(h.Events, EventSignal{Event: ev})
+	}
+	var fw []FrontendWarning
+	var mc []ManifestCheck
 
 	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -383,6 +398,11 @@ func scanSignals(root string) (*HandlerSignals, []FrontendWarning) {
 			}
 			return nil
 		}
+		base := filepath.Base(path)
+		if base == "package.json" && len(sig.ManifestFloors) > 0 {
+			mc = append(mc, checkManifest(path, sig.ManifestFloors)...)
+			return nil
+		}
 		if _, ok := specs[strings.ToLower(filepath.Ext(path))]; !ok {
 			return nil
 		}
@@ -390,24 +410,84 @@ func scanSignals(root string) (*HandlerSignals, []FrontendWarning) {
 		if err != nil {
 			return nil
 		}
-		s := string(src)
-		if strings.Contains(s, "checkout.session.completed") {
-			h.Completed = append(h.Completed, path)
+		text := string(src)
+		for i := range h.Events {
+			if strings.Contains(text, h.Events[i].Event) {
+				h.Events[i].Files = append(h.Events[i].Files, path)
+				h.Events[i].Present = true
+			}
 		}
-		if strings.Contains(s, "checkout.session.async_payment_succeeded") {
-			h.AsyncSucceeded = append(h.AsyncSucceeded, path)
-		}
-		if strings.Contains(s, "checkout.session.async_payment_failed") {
-			h.AsyncFailed = append(h.AsyncFailed, path)
-		}
-		for _, n := range frontendNeedles {
-			if strings.Contains(s, n) {
-				fw = append(fw, FrontendWarning{File: path, Signal: n})
+		for _, t := range sig.FrontendTokens {
+			if strings.Contains(text, t.Token) {
+				fw = append(fw, FrontendWarning{File: path, Signal: t.Token, Note: t.Note})
 				break
 			}
 		}
 		return nil
 	})
-	h.AllPresent = len(h.Completed) > 0 && len(h.AsyncSucceeded) > 0 && len(h.AsyncFailed) > 0
-	return h, fw
+	h.AllPresent = len(h.Events) > 0
+	for _, e := range h.Events {
+		if !e.Present {
+			h.AllPresent = false
+		}
+	}
+	return h, fw, mc
+}
+
+// checkManifest compares declared dependency versions against pack floors.
+// Absent packages are OK (the floor applies only when the package is used).
+func checkManifest(path string, floors []ManifestFloor) []ManifestCheck {
+	var out []ManifestCheck
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return out
+	}
+	var pkg struct {
+		Dependencies    map[string]string `json:"dependencies"`
+		DevDependencies map[string]string `json:"devDependencies"`
+	}
+	if json.Unmarshal(raw, &pkg) != nil {
+		return out
+	}
+	deps := map[string]string{}
+	for k, v := range pkg.Dependencies {
+		deps[k] = v
+	}
+	for k, v := range pkg.DevDependencies {
+		deps[k] = v
+	}
+	for _, f := range floors {
+		found, present := deps[f.Package]
+		c := ManifestCheck{Package: f.Package, Floor: f.Min, Found: found, File: path, OK: true}
+		if present {
+			c.OK = versionAtLeast(found, f.Min)
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// versionAtLeast does a lenient semver-ish compare: strips range prefixes and
+// compares numeric dot segments. Unparseable versions count as OK (never
+// false-alarm on what we can't read).
+func versionAtLeast(have, want string) bool {
+	clean := strings.TrimLeft(have, "^~>=v ")
+	hp := strings.Split(clean, ".")
+	wp := strings.Split(want, ".")
+	for i := 0; i < len(wp); i++ {
+		if i >= len(hp) {
+			return false
+		}
+		var hn, wn int
+		if _, err := fmt.Sscanf(strings.TrimSpace(hp[i]), "%d", &hn); err != nil {
+			return true // unparseable -> no alarm
+		}
+		if _, err := fmt.Sscanf(wp[i], "%d", &wn); err != nil {
+			return true
+		}
+		if hn != wn {
+			return hn > wn
+		}
+	}
+	return true
 }

@@ -49,6 +49,18 @@ func TestPacks(t *testing.T) {
 			"positive_create.rb":          1,
 			"positive_update.js":          1,
 		}},
+		"ewcs": {rule: ewcsRule, expect: map[string]int{
+			"server.js":        1,
+			"subscribe.rb":     1,
+			"checkout_form.js": 0,
+			"webhook.rb":       0,
+			"negative.js":      0,
+		}},
+		"flex": {rule: flexRule, expect: map[string]int{
+			"positive.rb": 1,
+			"capture.js":  1,
+			"negative.py": 0,
+		}},
 	}
 	for topic, c := range cases {
 		t.Run(topic, func(t *testing.T) {
@@ -72,5 +84,41 @@ func TestPacks(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestPackSignals pins the pack-declared signal layer: the EWCS readiness
+// fixtures must show all four expected events missing, from-state frontend
+// tokens present, and both package floors violated — while the DPM fixtures
+// keep their original three-events-present / Card-Element-warning behavior.
+func TestPackSignals(t *testing.T) {
+	h, fw, mc := scanSignals("testdata-packs/ewcs", &ewcsSignals)
+	if h.AllPresent {
+		t.Error("ewcs: expected missing checkout.session.* handlers")
+	}
+	for _, e := range h.Events {
+		if e.Present {
+			t.Errorf("ewcs: event %s unexpectedly present", e.Event)
+		}
+	}
+	if len(fw) == 0 {
+		t.Error("ewcs: expected frontend warnings in checkout_form.js")
+	}
+	bad := 0
+	for _, m := range mc {
+		if !m.OK {
+			bad++
+		}
+	}
+	if bad != 2 {
+		t.Errorf("ewcs: expected 2 failed manifest floors, got %d (%v)", bad, mc)
+	}
+
+	h2, fw2, _ := scanSignals("testdata", &dpmSignals)
+	if !h2.AllPresent {
+		t.Errorf("dpm: expected all three delayed-notification events present: %+v", h2.Events)
+	}
+	if len(fw2) == 0 {
+		t.Error("dpm: expected the Card Element warning from frontend_card.js")
 	}
 }

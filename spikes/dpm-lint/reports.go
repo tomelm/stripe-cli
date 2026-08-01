@@ -40,22 +40,38 @@ type DoctorReport struct {
 	// Code signals (substring-level, honest about their strength):
 	WebhookHandlers *HandlerSignals   `json:"webhook_handlers,omitempty"`
 	FrontendSignals []FrontendWarning `json:"frontend_warnings,omitempty"`
+	ManifestChecks  []ManifestCheck   `json:"manifest_checks,omitempty"`
 }
 
-// HandlerSignals reports whether the USER'S code mentions the three
-// delayed-notification event types the migration doc requires handling.
+// HandlerSignals reports whether the USER'S code mentions each webhook event
+// type the pack declares as expected for the migrated integration.
 type HandlerSignals struct {
-	Completed      []string `json:"checkout_session_completed,omitempty"`
-	AsyncSucceeded []string `json:"async_payment_succeeded,omitempty"`
-	AsyncFailed    []string `json:"async_payment_failed,omitempty"`
-	AllPresent     bool     `json:"all_present"`
+	Events     []EventSignal `json:"events"`
+	AllPresent bool          `json:"all_present"`
 }
 
-// FrontendWarning flags legacy Card Element usage: dashboard-managed methods
-// cannot render there, so server-side removal alone strands them.
+type EventSignal struct {
+	Event   string   `json:"event"`
+	Files   []string `json:"files,omitempty"`
+	Present bool     `json:"present"`
+}
+
+// FrontendWarning flags a pack-declared legacy client-side token found in the
+// scanned code, with the pack's explanation of why it matters.
 type FrontendWarning struct {
 	File   string `json:"file"`
 	Signal string `json:"signal"`
+	Note   string `json:"note,omitempty"`
+}
+
+// ManifestCheck reports a pack-declared package version floor against what
+// the repo's package.json actually declares.
+type ManifestCheck struct {
+	Package string `json:"package"`
+	Floor   string `json:"floor"`
+	Found   string `json:"found,omitempty"` // "" = package not present
+	File    string `json:"file,omitempty"`
+	OK      bool   `json:"ok"` // true when absent or >= floor
 }
 
 type AccountSummary struct {

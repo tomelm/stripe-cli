@@ -32,14 +32,22 @@ var (
 	flagYes     bool
 )
 
-// packs is the registry of migration topics. Adding a migration means adding
-// an entry here — the verbs never change.
-var packs = map[string]Rule{
-	"dpm":               dpmRule,
-	"tax-percent":       taxPercentRule,
-	"collection-method": collectionMethodRule,
-	"prorate":           prorateRule,
-	"source-types":      sourceTypesRule,
+// Pack pairs a rule with its declared signals (expected webhook events,
+// legacy frontend tokens, package version floors). Adding a migration means
+// adding an entry here — the verbs never change.
+type Pack struct {
+	Rule    Rule
+	Signals *PackSignals
+}
+
+var packs = map[string]Pack{
+	"dpm":               {Rule: dpmRule, Signals: &dpmSignals},
+	"tax-percent":       {Rule: taxPercentRule},
+	"collection-method": {Rule: collectionMethodRule},
+	"prorate":           {Rule: prorateRule},
+	"source-types":      {Rule: sourceTypesRule},
+	"ewcs":              {Rule: ewcsRule, Signals: &ewcsSignals},
+	"flex":              {Rule: flexRule},
 }
 
 // topicList renders the registry for help and error text.
@@ -99,8 +107,9 @@ func newRootCmd() *cobra.Command {
 		Long: `Diagnose and remediate Stripe API migrations. The engine is generic;
 migrations are rule packs named by topic.
 
-Topics: dpm (Dynamic Payment Methods, fixable) · tax-percent · 
-collection-method · prorate · source-types (advise-only renames/removals).
+Topics: dpm (Dynamic Payment Methods, fixable) · ewcs (Elements with
+Checkout Sessions readiness) · flex (flexible payment features beta→GA) ·
+tax-percent · collection-method · prorate · source-types (advise-only).
 
 Humans: start with ` + "`stripe demo dpm`" + `. Agents: start with ` + "`stripe guide`" + `.`,
 		SilenceUsage:  true,
@@ -132,7 +141,7 @@ runtime behavior (webhook round-trip via stripe listen/trigger).`,
 			if err != nil {
 				fail(err)
 			}
-			rule := packs[topic]
+			rule := packs[topic].Rule
 
 			findings, scanned, parsed, err := scan(dir, rule)
 			if err != nil {
@@ -160,7 +169,7 @@ runtime behavior (webhook round-trip via stripe listen/trigger).`,
 			}
 
 			// Code signals need no credentials — attach in every mode.
-			rep.WebhookHandlers, rep.FrontendSignals = scanSignals(dir)
+			rep.WebhookHandlers, rep.FrontendSignals, rep.ManifestChecks = scanSignals(dir, packs[topic].Signals)
 
 			failedLive := false
 			if live {
@@ -285,24 +294,37 @@ func renderDoctor(r *DoctorReport) {
 		fmt.Println("\n" + mutedStyle.Render("  "+strings.Join(sum, "  ")))
 	}
 
-	if r.WebhookHandlers != nil {
-		h := r.WebhookHandlers
-		fmt.Println("\n" + titleStyle.Render("Delayed-notification handlers in YOUR code"))
-		line := func(name string, files []string) {
-			if len(files) > 0 {
-				fmt.Println(okLine(fmt.Sprintf("%-42s %s", name, mutedStyle.Render(files[0]))))
+	if r.WebhookHandlers != nil && len(r.WebhookHandlers.Events) > 0 {
+		fmt.Println("\n" + titleStyle.Render("Expected webhook handlers in YOUR code"))
+		for _, e := range r.WebhookHandlers.Events {
+			if e.Present {
+				fmt.Println(okLine(fmt.Sprintf("%-46s %s", e.Event, mutedStyle.Render(e.Files[0]))))
 			} else {
-				fmt.Println(warnLine(fmt.Sprintf("%-42s not found — required if you enable delayed methods (SEPA, ACH, ...)", name)))
+				fmt.Println(warnLine(fmt.Sprintf("%-46s not found in scanned code", e.Event)))
 			}
 		}
-		line("checkout.session.completed", h.Completed)
-		line("checkout.session.async_payment_succeeded", h.AsyncSucceeded)
-		line("checkout.session.async_payment_failed", h.AsyncFailed)
 	}
 	if len(r.FrontendSignals) > 0 {
 		fmt.Println("\n" + titleStyle.Render("Frontend warnings"))
 		for _, w := range r.FrontendSignals {
-			fmt.Println(failLine(fmt.Sprintf("legacy Card Element signal %q in %s — dashboard-managed methods cannot render there", w.Signal, w.File)))
+			note := w.Note
+			if note == "" {
+				note = "legacy client-side token"
+			}
+			fmt.Println(failLine(fmt.Sprintf("%q in %s — %s", w.Signal, w.File, note)))
+		}
+	}
+	if len(r.ManifestChecks) > 0 {
+		fmt.Println("\n" + titleStyle.Render("Package version floors"))
+		for _, m := range r.ManifestChecks {
+			switch {
+			case m.Found == "":
+				fmt.Println(infoLine(fmt.Sprintf("%-28s not in package.json (floor %s applies only if used)", m.Package, m.Floor)))
+			case m.OK:
+				fmt.Println(okLine(fmt.Sprintf("%-28s %s (floor %s)", m.Package, m.Found, m.Floor)))
+			default:
+				fmt.Println(failLine(fmt.Sprintf("%-28s %s is below required %s", m.Package, m.Found, m.Floor)))
+			}
 		}
 	}
 
@@ -329,7 +351,7 @@ func newFixCmd() *cobra.Command {
 				fmt.Println(infoLine("aborted; nothing written"))
 				exitWith(1)
 			}
-			rep, err := fixRun(dir, packs[topic], apply, all)
+			rep, err := fixRun(dir, packs[topic].Rule, apply, all)
 			if err != nil {
 				fail(topicHint(err, dir))
 			}
@@ -433,7 +455,7 @@ func newDemoCmd() *cobra.Command {
 }
 
 func runDemo(topic, dir string, skipLive bool) {
-	rule := packs[topic]
+	rule := packs[topic].Rule
 	fmt.Println(banner("Dynamic Payment Methods — migration walkthrough",
 		"docs.stripe.com/payments/dashboard-payment-methods, executed and verified locally"))
 
@@ -466,7 +488,7 @@ func runDemo(topic, dir string, skipLive bool) {
 			rep.Stats = stats
 		}
 	}
-	rep.WebhookHandlers, rep.FrontendSignals = scanSignals(dir)
+	rep.WebhookHandlers, rep.FrontendSignals, rep.ManifestChecks = scanSignals(dir, packs[topic].Signals)
 	renderDoctor(rep)
 
 	// 2. remediation preview
@@ -546,6 +568,19 @@ const agentGuide = `# Migration doctor — agent playbook
 
 Verbs are generic; the migration is a topic argument. Topics:
   dpm                remove payment_method_types (fixable: doctor -> fix -> doctor)
+  ewcs               Elements with Checkout Sessions readiness report (advise;
+                     recommendation-class — no version gate; the doctor report
+                     carries the machine-checkable prerequisites: .findings are
+                     the create calls to migrate, .webhook_handlers diffs the
+                     four expected checkout.session.* events, .frontend_warnings
+                     lists from-state client tokens with their replacements,
+                     .manifest_checks enforces @stripe/stripe-js>=8 and
+                     @stripe/react-stripe-js>=5; the actual rewrite is agent/
+                     human work per the docs link)
+  flex               flexible payment features beta->GA (advise; account-gated,
+                     not version-gated: anchors the incremental-auth rename and
+                     final_capture semantics; the other features are param
+                     ADDITIONS a presence scanner cannot see — follow the doc)
   tax-percent        tax_percent removed 2020-08-27 (advise: needs TaxRate objects)
   collection-method  billing -> collection_method rename, 2019-10-17 (advise)
   prorate            prorate -> proration_behavior, 2020-08-27 (advise)
