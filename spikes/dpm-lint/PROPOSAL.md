@@ -61,12 +61,26 @@ enclosing function (`funcKinds` per language); resolution tokens are computed pe
 resource; `node_modules`/`vendor`/`dist`/`build`/`.git` are never scanned.
 
 **Rules are data, now with two more fields.** A rule is
-`(id, action, introduced_in, message, docs, [(param, [operations])])`.
+`(id, action, introduced_in, message, docs, [(param, [operations])], companion?)`.
 `Action` is `remove` (fixable — span deletion + reparse proof) or `advise`
 (detect-only: renames and value rewrites, primitives the fixer doesn't have yet —
 `fix` refuses them with a docs pointer, by design). `IntroducedIn` is the API
 version the change shipped in — the key to scaling (below). Operations lists are
 derived from and verified against the vendored OpenAPI spec.
+
+**Companion: remove forks into replace, by version.** A rule may declare a
+companion parameter (dpm: `automatic_payment_methods[enabled]=true` on
+PaymentIntents/SetupIntents). Before editing, `fix` consults the same
+events-census the doctor uses: traffic all at/after the cutoff → plain removal
+(the companion is default-on there); below it, mixed, or unknowable (no
+credentials, no events, `--offline`) → each eligible removal span is *spliced*
+with the language-correct companion instead — required below the cutoff
+(verified live: a bare pre-cutoff PaymentIntent resolves to card-only),
+harmless above it. Eligibility demands create evidence per SDK shape (the
+parameter is create-only; update/confirm sites are bare-removed), is scoped
+per call site (half-migrated files still get their remaining inserts), and
+dedupes per builder instance in Java. The fix report's `.companion` carries
+the decision, the account evidence, and the insert count.
 
 **Doctor** fetches three account facts read-only (identity;
 payment-method-configurations census including per-method names; API versions from
