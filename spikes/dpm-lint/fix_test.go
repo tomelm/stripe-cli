@@ -726,6 +726,254 @@ func TestScanVersionPins(t *testing.T) {
 	}
 }
 
+func TestJavaMixedListJudgedAsOneSite(t *testing.T) {
+	// Round-3 verification F1: Java splits a method list across findings;
+	// gates must judge the BUILDER, never a single link — a partial removal
+	// leaves payment_method_types beside the companion, which the API rejects.
+	confirmMixed := `import com.stripe.param.PaymentIntentCreateParams;
+
+class Demo {
+  void go() {
+    PaymentIntentCreateParams params = PaymentIntentCreateParams.builder().setAmount(1099L).setConfirm(true).addPaymentMethodType("card").addPaymentMethodType("ideal").build();
+  }
+}
+`
+	for _, all := range []bool{false, true} {
+		for _, insert := range []bool{false, true} {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "Mixed.java"), []byte(confirmMixed), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			rep, err := fixRun(dir, dpmRule, true, all, &companionDecision{insert: insert, reason: "test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := mustRead(t, dir, "Mixed.java")
+			if n := strings.Count(out, "addPaymentMethodType"); n != 2 {
+				t.Errorf("all=%v insert=%v: gated builder must be fully untouched, %d adds remain:\n%s", all, insert, n, out)
+			}
+			if strings.Contains(out, "AutomaticPaymentMethods") {
+				t.Errorf("all=%v insert=%v: no companion may coexist with the remaining list:\n%s", all, insert, out)
+			}
+			gated := false
+			for _, sk := range rep.Skipped {
+				if sk.Intent == "confirm-redirect" && strings.Contains(sk.Reason, "ideal") {
+					gated = true
+				}
+			}
+			if !gated {
+				t.Errorf("all=%v insert=%v: expected one confirm-redirect skip for the whole builder, got %+v", all, insert, rep.Skipped)
+			}
+		}
+	}
+
+	// Without confirm, a mixed safe list migrates coherently: every link
+	// removed, exactly one plain companion.
+	noConfirm := `import com.stripe.param.PaymentIntentCreateParams;
+
+class Demo {
+  void go() {
+    PaymentIntentCreateParams params = PaymentIntentCreateParams.builder().setAmount(1099L).addPaymentMethodType("card").addPaymentMethodType("oxxo").build();
+  }
+}
+`
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Safe.java"), []byte(noConfirm), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixRun(dir, dpmRule, true, false, &companionDecision{insert: true, reason: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	out := mustRead(t, dir, "Safe.java")
+	if strings.Contains(out, "addPaymentMethodType") || strings.Count(out, "setAutomaticPaymentMethods") != 1 {
+		t.Errorf("safe mixed list must fully migrate with one companion:\n%s", out)
+	}
+}
+
+func TestVarBagConfirmMutationDetected(t *testing.T) {
+	// Round-3 verification F2: confirm set on the bag VARIABLE (outside the
+	// literal) must be attributed to this site via its var: resolution.
+	jsSrc := `const stripe = require('stripe')('sk_test_x');
+const params = {
+  amount: 1099,
+  currency: 'usd',
+  payment_method_types: ['card'],
+};
+params.confirm = true;
+await stripe.paymentIntents.create(params);
+`
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "outside.js"), []byte(jsSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := fixRun(dir, dpmRule, true, false, &companionDecision{insert: false, reason: "test: omit"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := mustRead(t, dir, "outside.js")
+	if !strings.Contains(out, "allow_redirects: 'never'") {
+		t.Errorf("var-mutated confirm must pin (omit branch too):\n%s", out)
+	}
+	if len(rep.Companion.PinnedSites) != 1 {
+		t.Errorf("pinned_sites must record it, got %+v", rep.Companion.PinnedSites)
+	}
+
+	// The same shape with a redirect method gates instead.
+	jsRedirect := strings.Replace(jsSrc, "['card']", "['card', 'ideal']", 1)
+	dir2 := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir2, "outside.js"), []byte(jsRedirect), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rep2, err := fixRun(dir2, dpmRule, true, false, &companionDecision{insert: true, reason: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := mustRead(t, dir2, "outside.js"); !strings.Contains(out, "payment_method_types") {
+		t.Errorf("redirect-method var-confirm site must be gated:\n%s", out)
+	}
+	if len(rep2.Skipped) != 1 || rep2.Skipped[0].Intent != "confirm-redirect" {
+		t.Errorf("expected confirm-redirect skip, got %+v", rep2.Skipped)
+	}
+
+	// And a var-assigned return_url resolves the confirm site plainly.
+	jsWithURL := strings.Replace(jsSrc, "params.confirm = true;",
+		"params.confirm = true;\nparams.return_url = 'https://example.com/r';", 1)
+	dir3 := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir3, "outside.js"), []byte(jsWithURL), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixRun(dir3, dpmRule, true, false, &companionDecision{insert: true, reason: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if out := mustRead(t, dir3, "outside.js"); strings.Contains(out, "allow_redirects") {
+		t.Errorf("var-assigned return_url must suppress the pin:\n%s", out)
+	}
+}
+
+func TestReceiverSuffixCollision(t *testing.T) {
+	// Round-3 verification F3/NEW-1: receiver token matching must be
+	// word-bounded — `resp.` is not `p.`, `sb.` is not `b.`.
+	src := `import com.stripe.param.PaymentIntentCreateParams;
+import com.stripe.param.SetupIntentCreateParams;
+
+class Demo {
+  void go() {
+    PaymentIntentCreateParams.Builder p = PaymentIntentCreateParams.builder();
+    p.setConfirm(true);
+    p.addPaymentMethodType("card");
+    SetupIntentCreateParams.Builder resp = SetupIntentCreateParams.builder();
+    resp.setReturnUrl("https://example.com/other");
+    resp.build();
+    p.build();
+  }
+}
+`
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Collide.java"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixRun(dir, dpmRule, true, false, &companionDecision{insert: true, reason: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	out := mustRead(t, dir, "Collide.java")
+	if !strings.Contains(out, "AllowRedirects.NEVER") {
+		t.Errorf("resp.setReturnUrl must not satisfy p's return_url check — pin required:\n%s", out)
+	}
+}
+
+func TestWrappedSetConfirmDetected(t *testing.T) {
+	// Round-3 verification NEW-2: formatter-wrapped arguments must not hide
+	// the confirm (receiver scope splits on ';', not newlines).
+	src := `import com.stripe.param.PaymentIntentCreateParams;
+
+class Demo {
+  void go() {
+    PaymentIntentCreateParams.Builder p = PaymentIntentCreateParams.builder();
+    p.setConfirm(
+        true);
+    p.addPaymentMethodType("card");
+    p.build();
+  }
+}
+`
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Wrapped.java"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixRun(dir, dpmRule, true, false, &companionDecision{insert: true, reason: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if out := mustRead(t, dir, "Wrapped.java"); !strings.Contains(out, "AllowRedirects.NEVER") {
+		t.Errorf("wrapped setConfirm(true) must still pin:\n%s", out)
+	}
+}
+
+func TestScanVersionPinsIgnoresForeignAPIs(t *testing.T) {
+	// Round-3 verification E1: only lines naming Stripe count — AWS, GitHub,
+	// Azure, and prose all pin their own date-shaped API versions.
+	dir := t.TempDir()
+	files := map[string]string{
+		"aws.js":     "const s3 = new AWS.S3({apiVersion: '2006-03-01'});\n",
+		"gh.py":      "headers = {\"X-GitHub-Api-Version\": \"2022-11-28\"}\n",
+		"azure.js":   "const u = base + '?api-version=2023-05-15';\n",
+		"comment.rb": "# we upgraded our api version on 2019-04-01 during the rewrite\n",
+		"real.js":    "const stripe = require('stripe')(key, {apiVersion: '2022-11-15'});\n",
+	}
+	for n, s := range files {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldest, at := scanVersionPins(dir)
+	if oldest != "2022-11-15" || !strings.Contains(at, "real.js") {
+		t.Errorf("only the Stripe pin may count, got %q at %q", oldest, at)
+	}
+}
+
+func TestVariantFieldAndOmitCoherence(t *testing.T) {
+	// Round-3 verification F4: agents branch on structured fields — the
+	// companion edit carries .variant, and omit+inserts is explained.
+	dir := t.TempDir()
+	src := `const stripe = require('stripe')('sk_test_x');
+await stripe.paymentIntents.create({
+  amount: 1099,
+  currency: 'usd',
+  payment_method_types: ['card'],
+  confirm: true,
+});
+`
+	if err := os.WriteFile(filepath.Join(dir, "confirm.js"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := fixRun(dir, dpmRule, true, false, &companionDecision{insert: false, reason: "test: omit"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	variant := ""
+	for _, f := range rep.Files {
+		for _, e := range f.Edits {
+			if e.Variant != "" {
+				variant = e.Variant
+			}
+		}
+	}
+	if variant != "never-pin" {
+		t.Errorf("companion edit must carry variant never-pin, got %q", variant)
+	}
+	if rep.Companion.Mode != "omit" || rep.Companion.Inserts != 1 {
+		t.Fatalf("expected omit+1 insert, got %+v", rep.Companion)
+	}
+	explained := false
+	for _, n := range rep.Companion.Notes {
+		if strings.Contains(n, "omit verdict") {
+			explained = true
+		}
+	}
+	if !explained {
+		t.Errorf("omit+inserts must be explained in notes, got %v", rep.Companion.Notes)
+	}
+}
+
 func TestRemovalLeavesNoBlankArtifacts(t *testing.T) {
 	// The bed-A review finding: every deleted entry used to leave a
 	// whitespace-only line. Full-line expansion must prevent that in every

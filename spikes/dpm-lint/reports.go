@@ -176,6 +176,8 @@ type FixEdit struct {
 	Start uint32 `json:"start_byte"`
 	End   uint32 `json:"end_byte"`
 	Label string `json:"label"`
+	// Variant marks companion edits: plain | never-pin | return_url.
+	Variant string `json:"variant,omitempty"`
 }
 
 // DrillReport is the webhook round-trip evidence (doctor --live).

@@ -392,33 +392,45 @@ func newFixCmd() *cobra.Command {
 				})
 				dec.returnURL = returnURL
 			}
+			// Non-interactive JSON writes need explicit consent up front —
+			// there is no prompt to give it later, and a half-JSON abort
+			// message would corrupt the output contract.
+			if apply && flagJSON && !flagYes {
+				fail(fmt.Errorf("--apply with --json requires --yes (non-interactive write consent)"))
+			}
 			// Disclosure BEFORE consent: --apply first computes and renders
 			// the dry-run (which sites get which companion variant, what the
 			// gate skips), offers a return_url when pinned/gated confirm
-			// sites exist, and only then asks to write.
-			if apply && !flagJSON && !flagYes {
+			// sites exist, RE-RENDERS if the answer changed the edit set,
+			// and only then asks to write.
+			if apply && !flagJSON {
 				preview, err := fixRun(dir, rule, false, all, dec)
 				if err != nil {
 					fail(topicHint(err, dir))
 				}
 				preview.Topic = topic
 				renderFix(preview)
-				if dec != nil && dec.returnURL == "" && wantsReturnURL(preview) {
+				if !flagYes && dec != nil && dec.returnURL == "" && wantsReturnURL(preview) {
 					if url := promptLine("return_url for the server-side-confirmation site(s) above (blank = keep the allow_redirects:\"never\" pin / leave gated sites gated):"); url != "" {
 						if err := validateReturnURL(url); err != nil {
 							fail(err)
 						}
 						dec.returnURL = url
-						fmt.Println(infoLine("recomputing with return_url " + url))
+						// The answer changes which edits happen — the user
+						// must consent to the NEW set, not the stale one.
+						fmt.Println(infoLine("recomputed with return_url " + url + ":"))
+						preview, err = fixRun(dir, rule, false, all, dec)
+						if err != nil {
+							fail(topicHint(err, dir))
+						}
+						preview.Topic = topic
+						renderFix(preview)
 					}
 				}
 				if !confirm("Apply the changes above? (only reparse-clean files are written)", flagYes) {
 					fmt.Println(infoLine("aborted; nothing written"))
 					exitWith(1)
 				}
-			} else if apply && !confirm("Apply removals in place? (only reparse-clean files are written)", flagYes) {
-				fmt.Println(infoLine("aborted; nothing written"))
-				exitWith(1)
 			}
 			rep, err := fixRun(dir, rule, apply, all, dec)
 			if err != nil {
@@ -489,9 +501,13 @@ func renderFix(r *FixReport) {
 		if c.Account != "" {
 			who = " [" + c.Account + "]"
 		}
-		if c.Mode == "insert" {
+		switch {
+		case c.Mode == "insert":
 			fmt.Println(infoLine("companion: inserting " + c.Param + who + " — " + c.Reason))
-		} else {
+		case c.Inserts > 0:
+			fmt.Println(infoLine("companion: plain sites need none" + who + " — " + c.Reason))
+			fmt.Println(warnLine("confirm site(s) below still required an explicit companion (see edits marked never-pin / return_url)"))
+		default:
 			fmt.Println(infoLine("companion: not needed" + who + " — " + c.Reason))
 		}
 		for _, p := range c.PinnedSites {
@@ -794,7 +810,15 @@ default-on above it), so confirm sites always get explicit handling:
     a method the merchant used; removal alone would 400. ASK THE HUMAN
     for a return_url and rerun — that is the intended resolution.
   otherwise → companion + allow_redirects:"never";
-    .companion.pinned_sites lists exactly which file:line got the pin.
+    .companion.pinned_sites lists exactly which file:line got the pin,
+    and each companion edit carries .files[].edits[].variant
+    (plain | never-pin | return_url) — branch on that, not on labels.
+NOTE: .companion.mode "omit" + inserts>0 is a VALID state: confirm
+sites force an explicit companion even when plain sites need none
+(APM is default-on at that version); a note explains it.
+--apply with --json requires --yes (no interactive consent in JSON).
+Java builders are judged per BUILDER, not per method-add: a builder
+adding card+ideal is one site — gates apply to the whole list.
 .companion.account names the account whose facts decided the fork. A
 Stripe-Version pinned in CODE below the cutoff overrides an omit
 verdict (the events census only reflects the account default).

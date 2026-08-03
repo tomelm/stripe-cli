@@ -42,8 +42,10 @@ type span struct {
 	// funcText is the enclosing function's text, for create-evidence checks
 	// that the anchor alone cannot answer (Go's shared params struct).
 	funcText string
-	// replace, when non-empty, turns the deletion into a splice.
+	// replace, when non-empty, turns the deletion into a splice; variant
+	// says which companion shape it is (plain | never-pin | return_url).
 	replace string
+	variant string
 }
 
 // climbLast walks ancestors of n and returns the OUTERMOST node whose kind is
@@ -89,8 +91,14 @@ func removalSpan(key *ts.Node, spec langSpec, lang *ts.Language, src []byte) (sp
 		recv := inv.NamedChild(0)
 		fn := climbFirst(inv, spec.funcKinds, lang)
 		fnStart := uint32(0)
+		fnText := nodeText(fn, src)
 		if fn != nil {
 			fnStart = fn.StartByte()
+		} else {
+			// Top-level code has no enclosing function; the whole file is
+			// the scope (attribution checks are name-scoped, so this is
+			// safe, and missing it hides top-level confirm mutations).
+			fnText = string(src)
 		}
 		if p := inv.Parent(); p != nil && p.Type(lang) == "expression_statement" {
 			receiver := nodeText(recv, src)
@@ -98,8 +106,8 @@ func removalSpan(key *ts.Node, spec langSpec, lang *ts.Language, src []byte) (sp
 				receiver: receiver,
 				// Builder instance = receiver name scoped to its function.
 				group:    fmt.Sprintf("stmt|%d|%s", fnStart, receiver),
-				scope:    nodeText(fn, src),
-				funcText: nodeText(fn, src)}, true
+				scope:    fnText,
+				funcText: fnText}, true
 		}
 		if recv == nil {
 			return span{}, false
@@ -114,7 +122,7 @@ func removalSpan(key *ts.Node, spec langSpec, lang *ts.Language, src []byte) (sp
 		return span{start: recv.EndByte(), end: inv.EndByte(), label: "chain-link", site: "chain-link",
 			group:    fmt.Sprintf("chain|%d", outerStart),
 			scope:    nodeText(outer, src),
-			funcText: nodeText(fn, src)}, true
+			funcText: fnText}, true
 	}
 
 	// Pair-shaped languages: the enclosing pair node plus one separator.
@@ -130,10 +138,15 @@ func removalSpan(key *ts.Node, spec langSpec, lang *ts.Language, src []byte) (sp
 	}
 	site := pair.Type(lang)
 	// The companion checks are scoped to THIS param bag (the pair's parent
-	// literal) and this call's enclosing function — never the whole file.
+	// literal) and this call's enclosing function; top-level code falls
+	// back to the whole file (var-attribution checks are name-scoped).
+	pairFunc := nodeText(climbFirst(pair, spec.funcKinds, lang), src)
+	if pairFunc == "" {
+		pairFunc = string(src)
+	}
 	base := span{site: site,
 		scope:    nodeText(pair.Parent(), src),
-		funcText: nodeText(climbFirst(pair, spec.funcKinds, lang), src)}
+		funcText: pairFunc}
 	s, e := pair.StartByte(), pair.EndByte()
 	// Prefer swallowing the trailing comma; else the leading one.
 	if i := skipWS(src, int(e), +1); i < len(src) && src[i] == ',' {
@@ -224,10 +237,17 @@ func scanVersionPins(root string) (oldest, at string) {
 		if err != nil {
 			return nil
 		}
-		for _, m := range versionPinRe.FindAllSubmatch(src, -1) {
-			v := string(m[2])
-			if oldest == "" || v < oldest {
-				oldest, at = v, path
+		for _, line := range strings.Split(string(src), "\n") {
+			// Only lines that name Stripe count: AWS/GitHub/Azure clients and
+			// prose pin their own date-shaped API versions too.
+			if !strings.Contains(strings.ToLower(line), "stripe") {
+				continue
+			}
+			for _, m := range versionPinRe.FindAllStringSubmatch(line, -1) {
+				v := m[2]
+				if oldest == "" || v < oldest {
+					oldest, at = v, path
+				}
 			}
 		}
 		return nil
@@ -377,70 +397,110 @@ var confirmTrueRe = regexp.MustCompile(`(?i)(^|[^\w$])["']?confirm["']?\s*(=>|=|
 // javaConfirmRe matches the builder spelling.
 var javaConfirmRe = regexp.MustCompile(`setConfirm\(\s*true`)
 
-// siteConfirms is scoped to THIS call site — the param bag for pair
-// languages (Confirm lives in the same bag), the chain for chain links, and
-// the receiver's own statements for Java builder statements. It must NOT
-// scan the whole function: one confirming create must never pin
-// allow_redirects onto a sibling create.
-func siteConfirms(sp span) bool {
+// siteConfirmsVia is scoped to THIS call site — the param bag for pair
+// languages, the chain for chain links, the receiver's own statements for
+// Java builders — PLUS, when the bag was resolved through a variable
+// (via "var:<name>"), mutations of that variable in the enclosing function
+// (params.confirm = true / params["confirm"] = True / params.Confirm =
+// stripe.Bool(true)). It must NOT scan unrelated text: one confirming
+// create must never pin allow_redirects onto a sibling create.
+func siteConfirmsVia(sp span, via string) bool {
 	switch sp.site {
 	case "statement":
-		return sp.receiver != "" && javaConfirmRe.MatchString(receiverCalls(sp))
+		return sp.receiver != "" && javaConfirmRe.MatchString(receiverStatements(sp))
 	case "chain-link":
 		return javaConfirmRe.MatchString(sp.scope)
 	}
-	return confirmTrueRe.MatchString(sp.scope)
+	if confirmTrueRe.MatchString(sp.scope) {
+		return true
+	}
+	if name := varBagName(via); name != "" {
+		return varMutationRe(name, "confirm").MatchString(sp.funcText)
+	}
+	return false
 }
 
-// receiverCalls extracts only the lines of the enclosing function that
-// invoke THIS builder receiver, so sibling builders in the same method never
-// contaminate the check.
-func receiverCalls(sp span) string {
+// receiverStatements extracts the enclosing function's statements that
+// mention THIS builder receiver as a whole token (declaration or call), so
+// sibling builders never contaminate the check — including builders whose
+// name is a suffix of another (`b` vs `sb`), and calls whose arguments wrap
+// across lines (statements are split on ';', not newlines).
+func receiverStatements(sp span) string {
+	re := regexp.MustCompile(`(^|[^\w$])` + regexp.QuoteMeta(sp.receiver) + `\s*[.=]`)
 	var out []string
-	for _, line := range strings.Split(sp.funcText, "\n") {
-		if strings.Contains(line, sp.receiver+".") {
-			out = append(out, line)
+	for _, stmt := range strings.Split(sp.funcText, ";") {
+		if re.MatchString(stmt) {
+			out = append(out, stmt)
 		}
 	}
-	return strings.Join(out, "\n")
+	return strings.Join(out, ";")
 }
 
-// siteHasReturnURL is deliberately NARROW — the bag/chain, or this
-// receiver's own statements for Java: claiming a return_url exists when it
-// doesn't yields the runtime 400 this logic prevents; the reverse merely
-// pins allow_redirects conservatively.
-func siteHasReturnURL(sp span) bool {
+// varBagName extracts the variable name from a "var:<name>" resolution.
+func varBagName(via string) string {
+	if strings.HasPrefix(via, "var:") {
+		return strings.TrimPrefix(via, "var:")
+	}
+	return ""
+}
+
+// varMutationRe matches `<name>.<param> = true`-shaped mutations across the
+// pair SDK spellings: params.confirm = true, params["confirm"] = True,
+// params.Confirm = stripe.Bool(true), params[:confirm] = true.
+func varMutationRe(name, param string) *regexp.Regexp {
+	return regexp.MustCompile(`(?i)(^|[^\w$])` + regexp.QuoteMeta(name) +
+		`(\.|\[)["':]?` + param + `["']?\]?\s*(=|:)\s*(stripe\.Bool\()?\s*true`)
+}
+
+// varAssignRe matches any assignment of <param> onto the variable (used for
+// return_url presence, where the assigned value is a string, not a bool).
+func varAssignRe(name, param string) *regexp.Regexp {
+	return regexp.MustCompile(`(?i)(^|[^\w$])` + regexp.QuoteMeta(name) +
+		`(\.|\[)["':]?` + param + `["']?\]?\s*=`)
+}
+
+// siteHasReturnURLVia is deliberately NARROW — the bag/chain, this
+// receiver's own statements for Java, or this bag-variable's own mutations:
+// claiming a return_url exists when it doesn't yields the runtime 400 this
+// logic prevents; the reverse merely pins allow_redirects conservatively.
+func siteHasReturnURLVia(sp span, via string) bool {
 	text := sp.scope
 	if sp.site == "statement" {
-		text = receiverCalls(sp)
+		text = receiverStatements(sp)
 	}
 	for _, tok := range []string{"return_url", "ReturnURL", "ReturnUrl", "setReturnUrl"} {
 		if strings.Contains(text, tok) {
 			return true
 		}
 	}
+	if name := varBagName(via); name != "" {
+		if varAssignRe(name, "return_url").MatchString(sp.funcText) ||
+			varAssignRe(name, "ReturnURL").MatchString(sp.funcText) {
+			return true
+		}
+	}
 	return false
 }
 
-// redirectMethods are payment methods whose flows leave the page and come
-// back — the ones allow_redirects:"never" would silently disable. Curated
-// approximation, documented as such: when a confirm-site's removed hardcoded
-// list names one of these and no return_url is available, the fix GATES the
-// site instead of pinning, because pinning would drop a method the merchant
-// was explicitly using.
-var redirectMethods = map[string]bool{
-	"ideal": true, "bancontact": true, "giropay": true, "sofort": true,
-	"eps": true, "p24": true, "alipay": true, "wechat_pay": true,
-	"klarna": true, "afterpay_clearpay": true, "affirm": true,
-	"paypal": true, "twint": true, "mobilepay": true, "swish": true,
-	"blik": true, "fpx": true, "grabpay": true, "kakao_pay": true,
-	"naver_pay": true, "payco": true, "satispay": true,
+// nonRedirectMethods is a SAFELIST of methods documented to complete
+// without leaving the page (cards, bank debits, vouchers, balance, Link's
+// inline flow). Anything NOT listed — including methods added to the API
+// after this list was written — is treated as redirect-capable, so unknown
+// methods land on the conservative branch (gate, not pin).
+var nonRedirectMethods = map[string]bool{
+	"card": true, "card_present": true, "interac_present": true,
+	"us_bank_account": true, "sepa_debit": true, "bacs_debit": true,
+	"au_becs_debit": true, "acss_debit": true, "nz_bank_account": true,
+	"boleto": true, "oxxo": true, "konbini": true, "multibanco": true,
+	"customer_balance": true, "link": true,
 }
 
-func redirectMethodsIn(value string) []string {
+// methodsNeedingRedirect returns the methods in a removed value that a
+// confirm-site pin would silently disable.
+func methodsNeedingRedirect(value string) []string {
 	var hits []string
 	for _, m := range quotedMethods(value) {
-		if redirectMethods[m] {
+		if !nonRedirectMethods[m] {
 			hits = append(hits, m)
 		}
 	}
@@ -565,10 +625,6 @@ func fixRun(root string, rule Rule, apply, includeAll bool, dec *companionDecisi
 		spans []span
 	}
 	edits := map[string]*fileEdit{}
-	// Java repeats the same param as N builder statements/links on ONE
-	// builder; only the first replacement per builder may insert the
-	// companion or the call would set it twice.
-	javaSeen := map[string]bool{}
 	// Server-side-confirmation site counters for the companion notes.
 	confirmNever, confirmWithURL := 0, 0
 
@@ -584,33 +640,30 @@ func fixRun(root string, rule Rule, apply, includeAll bool, dec *companionDecisi
 		}
 		report.Companion = &CompanionReport{Param: rule.Companion.Param, Mode: mode, Reason: dec.reason, OldestVersion: dec.oldest, Account: dec.account}
 	}
+	// Pass 1: locate every finding's span (sources and trees cached per file).
+	type siteRec struct {
+		f    Finding
+		spec langSpec
+		sp   span
+	}
+	srcCache := map[string][]byte{}
+	var recs []siteRec
 	for _, f := range findings {
-		// Gate: dynamic values and deliberate single-method restrictions are
-		// never auto-removed unless --all — the doctor's own taxonomy says
-		// they need human judgment.
-		if !includeAll {
-			switch intent := classifyIntent(f.Value); intent {
-			case "dynamic":
-				report.Skipped = append(report.Skipped, SkippedFinding{File: f.File, Line: f.Line, Intent: intent,
-					Reason: "value is computed at runtime — review the routing logic (use --all to override)"})
-				continue
-			case "deliberate":
-				report.Skipped = append(report.Skipped, SkippedFinding{File: f.File, Line: f.Line, Intent: intent,
-					Reason: "single-method restriction looks intentional — consider excluded_payment_method_types (use --all to override)"})
+		spec := specs[strings.ToLower(ext(f.File))]
+		src, ok := srcCache[f.File]
+		if !ok {
+			b, rerr := os.ReadFile(f.File)
+			if rerr != nil {
 				continue
 			}
-		}
-		spec := specs[strings.ToLower(ext(f.File))]
-		src, err := os.ReadFile(f.File)
-		if err != nil {
-			continue
+			src = b
+			srcCache[f.File] = b
 		}
 		lang := spec.lang()
-		tree, err := ts.NewParser(lang).Parse(src)
-		if err != nil {
+		tree, terr := ts.NewParser(lang).Parse(src)
+		if terr != nil {
 			continue
 		}
-		// Re-locate the key node at the finding's position.
 		key := tree.RootNode().NamedNodeAtByte(byteAt(src, f.Line, f.Col))
 		if key == nil {
 			continue
@@ -619,66 +672,133 @@ func fixRun(root string, rule Rule, apply, includeAll bool, dec *companionDecisi
 		if !ok {
 			continue
 		}
+		recs = append(recs, siteRec{f: f, spec: spec, sp: sp})
+	}
+
+	// Pass 2: group records into CALL SITES. A pair-language finding is its
+	// own site; Java splits one builder's method list across N findings (one
+	// per addPaymentMethodType), which MUST be judged as a unit — a gate
+	// that skips one link but removes another would leave half a parameter
+	// next to an inserted companion, code the API rejects outright.
+	type callSite struct{ recs []siteRec }
+	var sites []*callSite
+	byGroup := map[string]*callSite{}
+	for _, r := range recs {
+		if r.sp.group == "" {
+			sites = append(sites, &callSite{recs: []siteRec{r}})
+			continue
+		}
+		k := r.f.File + "|" + r.sp.group
+		if byGroup[k] == nil {
+			byGroup[k] = &callSite{}
+			sites = append(sites, byGroup[k])
+		}
+		byGroup[k].recs = append(byGroup[k].recs, r)
+	}
+
+	// Pass 3: one decision per site — intent gate, confirm handling,
+	// companion variant — then emit all of the site's spans together.
+	for _, st := range sites {
+		lead := st.recs[0]
+		combined := lead.f.Value
+		if len(st.recs) > 1 {
+			var vs []string
+			for _, r := range st.recs {
+				vs = append(vs, r.f.Value)
+			}
+			combined = strings.Join(vs, ", ")
+		}
+		// Intent at SITE granularity: a builder adding card+ideal is a
+		// static multi-method list, not a deliberate single restriction.
+		intent := classifyIntent(lead.f.Value)
+		if len(st.recs) > 1 {
+			intent = "static"
+			for _, r := range st.recs {
+				if classifyIntent(r.f.Value) == "dynamic" {
+					intent = "dynamic"
+					break
+				}
+			}
+		}
+		if !includeAll && (intent == "dynamic" || intent == "deliberate") {
+			reason := "value is computed at runtime — review the routing logic (use --all to override)"
+			if intent == "deliberate" {
+				reason = "single-method restriction looks intentional — consider excluded_payment_method_types (use --all to override; note wallet-class methods use the wallets hash instead)"
+			}
+			report.Skipped = append(report.Skipped, SkippedFinding{File: lead.f.File, Line: lead.f.Line, Intent: intent, Reason: reason})
+			continue
+		}
+
 		// Companion handling. Server-side-confirmation sites (confirm:true,
 		// no return_url) are evaluated on BOTH branches of the version fork:
 		// after removal, automatic_payment_methods is in effect either way
 		// (inserted below the cutoff, default-on above it), so the runtime
-		// 400 exists on both. Three outcomes per confirm site:
-		//   --return-url given      → companion + return_url (keeps redirects)
-		//   old list had redirect
-		//   methods, no return_url  → GATE the site (pinning would silently
-		//                             drop a method the merchant was using;
-		//                             bare removal would 400)
-		//   otherwise               → companion + allow_redirects:"never"
-		if dec != nil && rule.Companion != nil && f.Param == rule.Companion.ForParam &&
-			!alreadyHasCompanion(sp, rule.Companion.Param) {
-			res := companionResourceFor(spec, f.Anchor, sp.funcText, rule.Companion.Resources)
-			confirmSite := res != "" && siteConfirms(sp) && !siteHasReturnURL(sp)
-			if confirmSite && dec.returnURL == "" {
-				if rm := redirectMethodsIn(f.Value); len(rm) > 0 {
-					report.Skipped = append(report.Skipped, SkippedFinding{File: f.File, Line: f.Line, Intent: "confirm-redirect",
-						Reason: "server-side confirmation uses redirect-based method(s) " + strings.Join(rm, ", ") +
-							" — removal would either fail at runtime (no return_url) or drop them (allow_redirects:\"never\"); rerun with --return-url <url>"})
-					continue
+		// 400 exists on both. Per confirm site:
+		//   --return-url given          → companion + return_url
+		//   list had redirect-capable
+		//   methods, no return_url      → GATE (pinning drops methods the
+		//                                 merchant used; removal alone 400s)
+		//   otherwise                   → companion + allow_redirects:"never"
+		var replaceText, variant string
+		if dec != nil && rule.Companion != nil && lead.f.Param == rule.Companion.ForParam &&
+			!alreadyHasCompanion(lead.sp, rule.Companion.Param) {
+			if res := companionResourceFor(lead.spec, lead.f.Anchor, lead.sp.funcText, rule.Companion.Resources); res != "" {
+				confirmSite := siteConfirmsVia(lead.sp, lead.f.Via) && !siteHasReturnURLVia(lead.sp, lead.f.Via)
+				if confirmSite && dec.returnURL == "" {
+					if rm := methodsNeedingRedirect(combined); len(rm) > 0 {
+						report.Skipped = append(report.Skipped, SkippedFinding{File: lead.f.File, Line: lead.f.Line, Intent: "confirm-redirect",
+							Reason: "server-side confirmation uses redirect-capable method(s) " + strings.Join(rm, ", ") +
+								" — removal would either fail at runtime (no return_url) or drop them (allow_redirects:\"never\"); rerun with --return-url <url>"})
+						continue
+					}
 				}
-			}
-			// Confirm sites force the explicit insert even on the omit
-			// branch — that is where the pin/return_url must live.
-			if res != "" && (dec.insert || confirmSite) {
-				jkey := f.File + "|" + sp.group
-				if sp.group == "" || !javaSeen[jkey] {
+				// Confirm sites force the explicit insert even on the omit
+				// branch — that is where the pin/return_url must live.
+				if dec.insert || confirmSite {
 					var opts companionOpts
-					variant := ""
 					if confirmSite {
 						if dec.returnURL != "" {
 							opts.returnURL = dec.returnURL
-							variant = "+return_url"
+							variant = "return_url"
 						} else {
 							opts.allowRedirectsNever = true
-							variant = `(allow_redirects:"never")`
+							variant = "never-pin"
 						}
 					}
-					if text, ok := companionText(spec, sp.site, res, sp.receiver, opts); ok {
-						sp.replace = spliceFor(sp.label, text)
-						sp.label += "→+" + rule.Companion.Param + variant
-						javaSeen[jkey] = true
-						switch {
-						case opts.returnURL != "":
-							confirmWithURL++
-						case opts.allowRedirectsNever:
-							confirmNever++
-							if report.Companion != nil {
-								report.Companion.PinnedSites = append(report.Companion.PinnedSites, SiteRef{File: f.File, Line: f.Line})
-							}
+					if text, ok := companionText(lead.spec, lead.sp.site, res, lead.sp.receiver, opts); ok {
+						replaceText = spliceFor(lead.sp.label, text)
+						if variant == "" {
+							variant = "plain"
 						}
 					}
 				}
 			}
 		}
-		if edits[f.File] == nil {
-			edits[f.File] = &fileEdit{spec: spec}
+
+		for i, r := range st.recs {
+			sp := r.sp
+			if i == 0 && replaceText != "" {
+				sp.replace = replaceText
+				sp.variant = variant
+				label := "→+" + rule.Companion.Param
+				switch variant {
+				case "never-pin":
+					label += `(allow_redirects:"never")`
+					confirmNever++
+					if report.Companion != nil {
+						report.Companion.PinnedSites = append(report.Companion.PinnedSites, SiteRef{File: r.f.File, Line: r.f.Line})
+					}
+				case "return_url":
+					label += "+return_url"
+					confirmWithURL++
+				}
+				sp.label += label
+			}
+			if edits[r.f.File] == nil {
+				edits[r.f.File] = &fileEdit{spec: r.spec}
+			}
+			edits[r.f.File].spans = append(edits[r.f.File].spans, sp)
 		}
-		edits[f.File].spans = append(edits[f.File].spans, sp)
 	}
 
 	var files []string
@@ -712,7 +832,7 @@ func fixRun(root string, rule Rule, apply, includeAll bool, dec *companionDecisi
 			if sp.replace != "" && report.Companion != nil {
 				report.Companion.Inserts++
 			}
-			ff.Edits = append(ff.Edits, FixEdit{Start: sp.start, End: sp.end, Label: sp.label})
+			ff.Edits = append(ff.Edits, FixEdit{Start: sp.start, End: sp.end, Label: sp.label, Variant: sp.variant})
 		}
 		lang := fe.spec.lang()
 		tree, err := ts.NewParser(lang).Parse(out)
@@ -740,6 +860,10 @@ func fixRun(root string, rule Rule, apply, includeAll bool, dec *companionDecisi
 		report.Files = append(report.Files, ff)
 	}
 	if report.Companion != nil {
+		if report.Companion.Mode == "omit" && (confirmNever > 0 || confirmWithURL > 0) {
+			report.Companion.Notes = append(report.Companion.Notes,
+				"confirm site(s) received an explicit companion despite the omit verdict: automatic_payment_methods is default-on at this account's version, so server-side confirmation still needs the pin or a return_url to avoid a runtime 400")
+		}
 		if confirmNever > 0 {
 			report.Companion.Notes = append(report.Companion.Notes, fmt.Sprintf(
 				"%d server-side-confirmation site(s) got allow_redirects:\"never\" (no return_url present): APM+confirm without a return_url is a runtime 400; rerun with --return-url <url> to enable redirect-based payment methods instead", confirmNever))
