@@ -138,10 +138,21 @@ type CompanionReport struct {
 	Mode          string `json:"mode"` // insert | omit
 	Reason        string `json:"reason"`
 	OldestVersion string `json:"oldest_traffic_version,omitempty"`
-	Inserts       int    `json:"inserts"` // replacements actually made
+	// Account is the Stripe account whose facts decided the fork ("" when
+	// the decision was made without account access).
+	Account string `json:"account,omitempty"`
+	Inserts int    `json:"inserts"` // replacements actually made
+	// PinnedSites lists exactly which findings received the
+	// allow_redirects:"never" pin — the structured form of the notes.
+	PinnedSites []SiteRef `json:"pinned_sites,omitempty"`
 	// Notes surface site-level caveats: server-side-confirmation sites that
 	// were pinned to allow_redirects:"never", or that gained --return-url.
 	Notes []string `json:"notes,omitempty"`
+}
+
+type SiteRef struct {
+	File string `json:"file"`
+	Line int    `json:"line"`
 }
 
 type SkippedFinding struct {

@@ -524,6 +524,208 @@ class Demo {
 	})
 }
 
+func TestConfirmSiteHandledOnOmitBranch(t *testing.T) {
+	// Round-2 review, finding A: the confirm guard must run on BOTH branches.
+	// Post-cutoff accounts (insert:false) plain-removing at a confirm site
+	// leaves APM default-on + confirm + no return_url = runtime 400.
+	dir := t.TempDir()
+	src := `const stripe = require('stripe')('sk_test_x');
+await stripe.paymentIntents.create({
+  amount: 1099,
+  currency: 'usd',
+  payment_method_types: ['card'],
+  confirm: true,
+  payment_method: 'pm_x',
+});
+`
+	if err := os.WriteFile(filepath.Join(dir, "confirm.js"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := fixRun(dir, dpmRule, true, false, &companionDecision{insert: false, reason: "test: at/after cutoff"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := mustRead(t, dir, "confirm.js")
+	if !strings.Contains(out, "allow_redirects: 'never'") {
+		t.Errorf("omit branch must still pin the confirm site:\n%s", out)
+	}
+	if len(rep.Companion.PinnedSites) != 1 {
+		t.Errorf("pinned_sites must carry the site, got %+v", rep.Companion.PinnedSites)
+	}
+}
+
+func TestConfirmSiteWithRedirectMethodsIsGated(t *testing.T) {
+	// Round-2 review, finding C: pinning allow_redirects:"never" when the
+	// removed list named redirect methods silently drops them. Gate instead.
+	dir := t.TempDir()
+	src := `const stripe = require('stripe')('sk_test_x');
+await stripe.paymentIntents.create({
+  amount: 1099,
+  currency: 'eur',
+  payment_method_types: ['card', 'ideal'],
+  confirm: true,
+});
+`
+	if err := os.WriteFile(filepath.Join(dir, "confirm.js"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, insert := range []bool{true, false} {
+		rep, err := fixRun(dir, dpmRule, true, false, &companionDecision{insert: insert, reason: "test"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := mustRead(t, dir, "confirm.js")
+		if !strings.Contains(out, "payment_method_types") {
+			t.Errorf("insert=%v: gated site must remain untouched:\n%s", insert, out)
+		}
+		found := false
+		for _, sk := range rep.Skipped {
+			if sk.Intent == "confirm-redirect" && strings.Contains(sk.Reason, "ideal") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("insert=%v: expected a confirm-redirect skip naming ideal, got %+v", insert, rep.Skipped)
+		}
+	}
+	// With a return_url the same site migrates and keeps redirect methods.
+	rep, err := fixRun(dir, dpmRule, true, false,
+		&companionDecision{insert: false, reason: "test", returnURL: "https://example.com/done"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := mustRead(t, dir, "confirm.js")
+	if !strings.Contains(out, "return_url: 'https://example.com/done'") || strings.Contains(out, "allow_redirects") {
+		t.Errorf("with return_url the site must migrate un-pinned:\n%s", out)
+	}
+	if len(rep.Skipped) != 0 {
+		t.Errorf("nothing should be gated with a return_url, got %+v", rep.Skipped)
+	}
+}
+
+func TestConfirmDetectionIsBagScoped(t *testing.T) {
+	// Round-2 review, finding B: one confirming create must not pin its
+	// siblings, and confirm-lookalike keys must not trigger at all.
+	dir := t.TempDir()
+	src := `const stripe = require('stripe')('sk_test_x');
+async function checkout() {
+  await stripe.paymentIntents.create({
+    amount: 1099,
+    currency: 'usd',
+    payment_method_types: ['card'],
+  });
+  await stripe.paymentIntents.create({
+    amount: 2099,
+    currency: 'usd',
+    payment_method_types: ['card'],
+    confirm: true,
+  });
+}
+async function audit() {
+  const auditOpts = { reconfirm: true, notify_confirmation: true };
+  await stripe.paymentIntents.create({
+    amount: 3099,
+    currency: 'usd',
+    payment_method_types: ['card'],
+    metadata: auditOpts,
+  });
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "multi.js"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := fixRun(dir, dpmRule, true, false, &companionDecision{insert: true, reason: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.AllClean {
+		t.Fatal("expected reparse clean")
+	}
+	out := mustRead(t, dir, "multi.js")
+	if n := strings.Count(out, "allow_redirects"); n != 1 {
+		t.Errorf("exactly the confirming create gets pinned, got %d pins:\n%s", n, out)
+	}
+	if n := strings.Count(out, "automatic_payment_methods"); n != 3 {
+		t.Errorf("all three creates still get the companion, got %d:\n%s", n, out)
+	}
+}
+
+func TestJavaForeignSetReturnUrlDoesNotSuppressPin(t *testing.T) {
+	// Round-2 review, finding B (Java): another builder's setReturnUrl in the
+	// same method must not convince us THIS builder has one.
+	dir := t.TempDir()
+	src := `import com.stripe.param.PaymentIntentCreateParams;
+import com.stripe.param.SetupIntentCreateParams;
+
+class Demo {
+  void go() {
+    PaymentIntentCreateParams.Builder other = PaymentIntentCreateParams.builder();
+    other.setReturnUrl("https://example.com/other");
+    other.setConfirm(true);
+    other.build();
+    SetupIntentCreateParams.Builder mine = SetupIntentCreateParams.builder();
+    mine.addPaymentMethodType("card");
+    mine.setConfirm(true);
+    mine.build();
+  }
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "Two.java"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := fixRun(dir, dpmRule, true, false, &companionDecision{insert: true, reason: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := mustRead(t, dir, "Two.java")
+	if !strings.Contains(out, "AllowRedirects.NEVER") {
+		t.Errorf("mine has confirm and NO return_url — the foreign setReturnUrl must not suppress the pin:\n%s", out)
+	}
+}
+
+func TestValidateReturnURL(t *testing.T) {
+	// Round-2 review, finding F: the URL is spliced into source verbatim.
+	for _, bad := range []string{
+		"ftp://example.com/x", "https://", "example.com/no-scheme",
+		"https://ex.com/l'orange", `https://ex.com/a"b`, "https://ex.com/a b",
+		"https://ex.com/x', extra_param: 'y",
+	} {
+		if err := validateReturnURL(bad); err == nil {
+			t.Errorf("expected rejection of %q", bad)
+		}
+	}
+	for _, good := range []string{"https://example.com/complete", "http://localhost:4242/return?x=1"} {
+		if err := validateReturnURL(good); err != nil {
+			t.Errorf("expected %q accepted, got %v", good, err)
+		}
+	}
+}
+
+func TestScanVersionPins(t *testing.T) {
+	// Round-2 review, finding E1: a Stripe-Version pinned in code below the
+	// cutoff overrides an omit census (events only show the account default).
+	dir := t.TempDir()
+	files := map[string]string{
+		"client.js": "const stripe = require('stripe')('sk_test_x', {apiVersion: '2022-11-15'});\n",
+		"api.py":    "import stripe\nstripe.api_version = \"2020-08-27\"\n",
+		"clean.rb":  "require 'stripe'\n",
+	}
+	for n, s := range files {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldest, at := scanVersionPins(dir)
+	if oldest != "2020-08-27" || !strings.Contains(at, "api.py") {
+		t.Errorf("expected oldest pin 2020-08-27 in api.py, got %q at %q", oldest, at)
+	}
+	// The offline decision carries the pin evidence in its reason.
+	dec := resolveCompanion(dpmRule, "default", "", dir, true)
+	if !dec.insert || !strings.Contains(dec.reason, "2020-08-27") {
+		t.Errorf("offline decision must cite the code pin, got %+v", dec)
+	}
+}
+
 func TestRemovalLeavesNoBlankArtifacts(t *testing.T) {
 	// The bed-A review finding: every deleted entry used to leave a
 	// whitespace-only line. Full-line expansion must prevent that in every

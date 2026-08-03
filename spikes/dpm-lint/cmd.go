@@ -19,6 +19,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -254,6 +255,12 @@ func renderDoctor(r *DoctorReport) {
 			cfg += mutedStyle.Render(" — active: " + a.ActiveConfig)
 		}
 		fmt.Println(kv("dashboard methods", cfg))
+		if len(a.Unavailable) > 0 {
+			fmt.Println(warnLine("toggled ON but NOT available (capability inactive — will not render): " + strings.Join(a.Unavailable, ", ")))
+		}
+		if a.Configs > 1 {
+			fmt.Println(infoLine(fmt.Sprintf("%d active configurations — verdicts use the default; call sites passing payment_method_configuration explicitly are governed by that config instead", a.Configs)))
+		}
 	}
 
 	if len(r.Findings) == 0 {
@@ -370,19 +377,48 @@ func newFixCmd() *cobra.Command {
 				fail(err)
 			}
 			rule := packs[topic].Rule
-			if apply && !confirm("Apply removals in place? (only reparse-clean files are written)", flagYes) {
-				fmt.Println(infoLine("aborted; nothing written"))
-				exitWith(1)
+			if returnURL != "" {
+				if err := validateReturnURL(returnURL); err != nil {
+					fail(err)
+				}
 			}
 			// Version fork: rules with a companion consult account facts to
 			// choose remove vs replace before any span is computed.
 			var dec *companionDecision
 			if rule.Companion != nil {
 				_ = withSpinnerUnlessJSON("Checking account API versions (read-only)", func() error {
-					dec = resolveCompanion(rule, flagProfile, flagStripeAccount, offline)
+					dec = resolveCompanion(rule, flagProfile, flagStripeAccount, dir, offline)
 					return nil
 				})
 				dec.returnURL = returnURL
+			}
+			// Disclosure BEFORE consent: --apply first computes and renders
+			// the dry-run (which sites get which companion variant, what the
+			// gate skips), offers a return_url when pinned/gated confirm
+			// sites exist, and only then asks to write.
+			if apply && !flagJSON && !flagYes {
+				preview, err := fixRun(dir, rule, false, all, dec)
+				if err != nil {
+					fail(topicHint(err, dir))
+				}
+				preview.Topic = topic
+				renderFix(preview)
+				if dec != nil && dec.returnURL == "" && wantsReturnURL(preview) {
+					if url := promptLine("return_url for the server-side-confirmation site(s) above (blank = keep the allow_redirects:\"never\" pin / leave gated sites gated):"); url != "" {
+						if err := validateReturnURL(url); err != nil {
+							fail(err)
+						}
+						dec.returnURL = url
+						fmt.Println(infoLine("recomputing with return_url " + url))
+					}
+				}
+				if !confirm("Apply the changes above? (only reparse-clean files are written)", flagYes) {
+					fmt.Println(infoLine("aborted; nothing written"))
+					exitWith(1)
+				}
+			} else if apply && !confirm("Apply removals in place? (only reparse-clean files are written)", flagYes) {
+				fmt.Println(infoLine("aborted; nothing written"))
+				exitWith(1)
 			}
 			rep, err := fixRun(dir, rule, apply, all, dec)
 			if err != nil {
@@ -407,6 +443,41 @@ func newFixCmd() *cobra.Command {
 	return c
 }
 
+// validateReturnURL rejects values that would break the generated code or
+// smuggle extra API parameters: the URL is spliced into source verbatim, so
+// quotes, backslashes, whitespace, and non-http schemes are refused outright.
+func validateReturnURL(s string) error {
+	u, err := url.Parse(s)
+	if err != nil {
+		return fmt.Errorf("--return-url: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("--return-url must be http(s), got %q", s)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("--return-url has no host: %q", s)
+	}
+	if strings.ContainsAny(s, "'\"\\` \t\n\r") {
+		return fmt.Errorf("--return-url contains characters that cannot be spliced into source code: %q", s)
+	}
+	return nil
+}
+
+// wantsReturnURL reports whether the preview found server-side-confirmation
+// sites that a return_url would improve: pinned sites, or confirm-redirect
+// gated skips.
+func wantsReturnURL(r *FixReport) bool {
+	if r.Companion != nil && len(r.Companion.PinnedSites) > 0 {
+		return true
+	}
+	for _, sk := range r.Skipped {
+		if sk.Intent == "confirm-redirect" {
+			return true
+		}
+	}
+	return false
+}
+
 func renderFix(r *FixReport) {
 	mode := "dry-run (nothing written)"
 	if r.Applied {
@@ -414,10 +485,17 @@ func renderFix(r *FixReport) {
 	}
 	fmt.Println(titleStyle.Render("Removals — " + mode))
 	if c := r.Companion; c != nil {
+		who := ""
+		if c.Account != "" {
+			who = " [" + c.Account + "]"
+		}
 		if c.Mode == "insert" {
-			fmt.Println(infoLine("companion: inserting " + c.Param + " — " + c.Reason))
+			fmt.Println(infoLine("companion: inserting " + c.Param + who + " — " + c.Reason))
 		} else {
-			fmt.Println(infoLine("companion: not needed — " + c.Reason))
+			fmt.Println(infoLine("companion: not needed" + who + " — " + c.Reason))
+		}
+		for _, p := range c.PinnedSites {
+			fmt.Println(warnLine(fmt.Sprintf("pinned allow_redirects:\"never\" at %s:%d — redirect-based methods stay off at this site without a return_url", p.File, p.Line)))
 		}
 		for _, n := range c.Notes {
 			fmt.Println(warnLine(n))
@@ -545,11 +623,18 @@ func runDemo(topic, dir string, skipLive bool) {
 	fmt.Print(stepHeader(2, total, "Remediation preview (dry-run, span-verified)"))
 	var dec *companionDecision
 	if rule.Companion != nil {
-		dec = resolveCompanion(rule, flagProfile, flagStripeAccount, skipLive)
+		dec = resolveCompanion(rule, flagProfile, flagStripeAccount, dir, skipLive)
 	}
 	if fr, err := fixRun(dir, rule, false, false, dec); err == nil {
 		renderFix(fr)
-		fmt.Println(infoLine("apply for real with " + accentStyle.Render(fmt.Sprintf("stripe fix %s %s --apply", topic, dir))))
+		// The recommended command must reproduce THIS preview: when the
+		// preview's fork was decided offline, say so, or a live re-resolve
+		// could choose the other branch and apply a different edit.
+		applyCmd := fmt.Sprintf("stripe fix %s %s --apply", topic, dir)
+		if skipLive {
+			applyCmd += " --offline"
+		}
+		fmt.Println(infoLine("apply for real with " + accentStyle.Render(applyCmd)))
 	}
 
 	// 3. live experiment
@@ -697,13 +782,25 @@ traffic is all at/after the cutoff and plain removal preserves behavior.
 .companion.reason carries the account evidence; --offline forces the
 insert branch (the only choice correct at any version). Checkout
 Sessions/Payment Links never get the insert (no such parameter there).
-Server-side confirmation: a PaymentIntent create with confirm:true and
-no return_url would 400 at runtime once automatic_payment_methods is on
-(...allow_redirects_without_return_url). fix detects those sites: pass
---return-url <url> to add it alongside the companion (keeps redirect-
-based methods usable), else the insert pins allow_redirects:"never" and
-.companion.notes tells you what happened. ASK THE HUMAN for a return_url
-when notes report pinned sites — it is the better end state.
+Server-side confirmation: a create with confirm:true and no return_url
+would 400 at runtime once automatic_payment_methods is in effect —
+which is BOTH branches of the fork (inserted below the cutoff,
+default-on above it), so confirm sites always get explicit handling:
+  --return-url <url> given → companion + return_url (keeps redirect
+    methods; the URL is validated — http(s), no quotes/spaces)
+  old hardcoded list named redirect-based methods (ideal, bancontact,
+    giropay, sofort, p24, ...) and no return_url → the site is GATED
+    (.skipped intent "confirm-redirect"): pinning would silently drop
+    a method the merchant used; removal alone would 400. ASK THE HUMAN
+    for a return_url and rerun — that is the intended resolution.
+  otherwise → companion + allow_redirects:"never";
+    .companion.pinned_sites lists exactly which file:line got the pin.
+.companion.account names the account whose facts decided the fork. A
+Stripe-Version pinned in CODE below the cutoff overrides an omit
+verdict (the events census only reflects the account default).
+Also in doctor's .account: enabled_but_unavailable lists methods
+toggled ON whose capability is inactive — they will NOT render; treat
+them as missing when judging method coverage.
 Connect: for direct charges (Stripe-Account header in the user's code),
 pass --stripe-account acct_... so the CONNECTED account's configuration
 and traffic govern the fork and the doctor's verdicts.
