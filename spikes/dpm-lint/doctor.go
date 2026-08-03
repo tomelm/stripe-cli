@@ -262,9 +262,9 @@ func verdict(intent, value string, f *accountFacts) string {
 	}
 	if !f.VersionsOK {
 		if f.VersionsMixed {
-			return "CAUTION: some recent traffic predates " + dpmCutoff + " — removal there silently drops methods unless automatic_payment_methods[enabled]=true is added"
+			return "CAUTION: some recent traffic predates " + dpmCutoff + " — removal there silently drops methods unless automatic_payment_methods[enabled]=true is added (`fix` inserts it on this account)"
 		}
-		return "BLOCKED: recent traffic runs before " + dpmCutoff + " — do not remove without adding automatic_payment_methods[enabled]=true"
+		return "BLOCKED: recent traffic runs before " + dpmCutoff + " — removal alone would drop methods; `fix` replaces the parameter with automatic_payment_methods[enabled]=true here"
 	}
 	if !f.ConfiguredOK {
 		return "BLOCKED: no active Dashboard payment-method configuration — configure methods before removing"

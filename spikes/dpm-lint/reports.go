@@ -119,9 +119,24 @@ type FixReport struct {
 	Applied  bool      `json:"applied"`
 	AllClean bool      `json:"all_reparse_clean"`
 	Files    []FixFile `json:"files"`
+	// Companion reports the version fork: whether removals were replaced with
+	// the rule's companion parameter, and the account evidence that decided it.
+	Companion *CompanionReport `json:"companion,omitempty"`
 	// Skipped findings the gate excluded (dynamic values, deliberate
 	// restrictions) — removed only with --all.
 	Skipped []SkippedFinding `json:"skipped,omitempty"`
+}
+
+// CompanionReport is the account-forked replace decision. Mode "insert" means
+// removals of the companioned parameter become replacements; "omit" means the
+// account's traffic is entirely at/after the rule's cutoff so plain removal is
+// behavior-preserving.
+type CompanionReport struct {
+	Param         string `json:"param"`
+	Mode          string `json:"mode"` // insert | omit
+	Reason        string `json:"reason"`
+	OldestVersion string `json:"oldest_traffic_version,omitempty"`
+	Inserts       int    `json:"inserts"` // replacements actually made
 }
 
 type SkippedFinding struct {
@@ -135,6 +150,7 @@ type FixFile struct {
 	Path         string    `json:"path"`
 	Error        string    `json:"error,omitempty"` // write failure; file NOT written
 	BytesRemoved int       `json:"bytes_removed"`
+	BytesAdded   int       `json:"bytes_added,omitempty"` // companion insertions
 	Edits        []FixEdit `json:"edits"`
 	Reparse      string    `json:"reparse"` // clean | error
 	Written      bool      `json:"written"`

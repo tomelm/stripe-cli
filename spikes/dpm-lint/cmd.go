@@ -356,7 +356,7 @@ func renderDoctor(r *DoctorReport) {
 // ---------- fix ----------
 
 func newFixCmd() *cobra.Command {
-	var apply, all bool
+	var apply, all, offline bool
 	c := &cobra.Command{
 		Use:   "fix [topic] [dir]",
 		Short: "Remediate findings: span-verified removals (dry-run; --apply writes)",
@@ -366,11 +366,21 @@ func newFixCmd() *cobra.Command {
 			if err != nil {
 				fail(err)
 			}
+			rule := packs[topic].Rule
 			if apply && !confirm("Apply removals in place? (only reparse-clean files are written)", flagYes) {
 				fmt.Println(infoLine("aborted; nothing written"))
 				exitWith(1)
 			}
-			rep, err := fixRun(dir, packs[topic].Rule, apply, all)
+			// Version fork: rules with a companion consult account facts to
+			// choose remove vs replace before any span is computed.
+			var dec *companionDecision
+			if rule.Companion != nil {
+				_ = withSpinnerUnlessJSON("Checking account API versions (read-only)", func() error {
+					dec = resolveCompanion(rule, flagProfile, offline)
+					return nil
+				})
+			}
+			rep, err := fixRun(dir, rule, apply, all, dec)
 			if err != nil {
 				fail(topicHint(err, dir))
 			}
@@ -388,6 +398,7 @@ func newFixCmd() *cobra.Command {
 	}
 	c.Flags().BoolVar(&apply, "apply", false, "write changes (dry-run without this flag)")
 	c.Flags().BoolVar(&all, "all", false, "include dynamic/deliberate findings the gate would skip")
+	c.Flags().BoolVar(&offline, "offline", false, "skip account lookups (companion rules then insert, the safe-at-any-version choice)")
 	return c
 }
 
@@ -397,6 +408,13 @@ func renderFix(r *FixReport) {
 		mode = "APPLIED"
 	}
 	fmt.Println(titleStyle.Render("Removals — " + mode))
+	if c := r.Companion; c != nil {
+		if c.Mode == "insert" {
+			fmt.Println(infoLine("companion: inserting " + c.Param + " — " + c.Reason))
+		} else {
+			fmt.Println(infoLine("companion: not needed — " + c.Reason))
+		}
+	}
 	for _, f := range r.Files {
 		labels := map[string]int{}
 		for _, e := range f.Edits {
@@ -407,7 +425,11 @@ func renderFix(r *FixReport) {
 			ls = append(ls, fmt.Sprintf("%s×%d", l, n))
 		}
 		sort.Strings(ls)
-		line := fmt.Sprintf("%s  −%d bytes  %s", f.Path, f.BytesRemoved, mutedStyle.Render(strings.Join(ls, ", ")))
+		delta := fmt.Sprintf("−%d bytes", f.BytesRemoved)
+		if f.BytesAdded > 0 {
+			delta = fmt.Sprintf("−%d/+%d bytes", f.BytesRemoved, f.BytesAdded)
+		}
+		line := fmt.Sprintf("%s  %s  %s", f.Path, delta, mutedStyle.Render(strings.Join(ls, ", ")))
 		switch {
 		case f.Reparse == "error":
 			fmt.Println(failLine(line + "  reparse ERROR — not written"))
@@ -513,7 +535,11 @@ func runDemo(topic, dir string, skipLive bool) {
 
 	// 2. remediation preview
 	fmt.Print(stepHeader(2, total, "Remediation preview (dry-run, span-verified)"))
-	if fr, err := fixRun(dir, rule, false, false); err == nil {
+	var dec *companionDecision
+	if rule.Companion != nil {
+		dec = resolveCompanion(rule, flagProfile, skipLive)
+	}
+	if fr, err := fixRun(dir, rule, false, false, dec); err == nil {
 		renderFix(fr)
 		fmt.Println(infoLine("apply for real with " + accentStyle.Render(fmt.Sprintf("stripe fix %s %s --apply", topic, dir))))
 	}
@@ -635,7 +661,10 @@ file/line/col, via (resolution mechanism), value, and verdict_class:
   REVIEW     needs human judgment (dynamic value / static multi)
   CAUTION/BLOCKED  account API version predates 2023-08-16 — removal
              without automatic_payment_methods[enabled]=true drops
-             methods. STOP and surface to the human.
+             methods. fix handles this: it forks by version and
+             REPLACES the parameter with the companion there (see
+             step 2's .companion). Surface the verdict to the human
+             but the code change remains safe to preview.
   UNKNOWN    account facts unavailable (.degraded says why) — treat
              as REVIEW.
 .account carries the evidence (event_api_versions, dashboard_configured).
@@ -652,6 +681,14 @@ Also in the doctor report, credentials or not:
 ## 2. Preview the remediation
     stripe fix dpm <dir> --json
 Dry-run. Per file: edits[] (byte spans + label); reparse must be "clean".
+.companion reports the version fork: mode "insert" means removals of
+payment_method_types on PaymentIntents/SetupIntents become REPLACEMENTS
+that splice in automatic_payment_methods[enabled]=true (required below
+the 2023-08-16 cutoff, harmless above it); mode "omit" means account
+traffic is all at/after the cutoff and plain removal preserves behavior.
+.companion.reason carries the account evidence; --offline forces the
+insert branch (the only choice correct at any version). Checkout
+Sessions/Payment Links never get the insert (no such parameter there).
 The gate skips dynamic values and deliberate single-method restrictions
 (.skipped, with reasons) — that is intentional; --all overrides, but only
 after a human reviews each skipped finding.

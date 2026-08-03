@@ -39,6 +39,20 @@ type Rule struct {
 	Message      string
 	Docs         string
 	Match        []ParamMatch
+	// Companion, when set, forks `fix` by account API version: at/after the
+	// rule's IntroducedIn cutoff the parameter is simply removed (the new
+	// behavior is the default there); below it — or when the version is
+	// unknowable — the removal becomes a REPLACEMENT that inserts this
+	// parameter, because bare removal would silently change behavior.
+	Companion *Companion
+}
+
+// Companion describes the parameter `fix` inserts in place of a removed one
+// on accounts whose traffic predates the rule's cutoff.
+type Companion struct {
+	Param     string   // canonical name, e.g. "automatic_payment_methods"
+	ForParam  string   // only replacements of THIS matched param (top-level)
+	Resources []string // API resources that accept it, e.g. payment_intents
 }
 
 var dpmRule = Rule{
@@ -48,6 +62,15 @@ var dpmRule = Rule{
 	IntroducedIn: "2023-08-16",
 	Message:      "Remove `payment_method_types` so payment methods are managed in the Dashboard.",
 	Docs:         "https://docs.stripe.com/payments/payment-methods/dynamic-payment-methods",
+	// Below the cutoff, a bare PaymentIntent/SetupIntent defaults to
+	// card-only (verified live) — the doc's migration there is
+	// remove-and-replace, not remove. Checkout Sessions and Payment Links
+	// have no automatic_payment_methods parameter, so no companion there.
+	Companion: &Companion{
+		Param:     "automatic_payment_methods",
+		ForParam:  "payment_method_types",
+		Resources: []string{"payment_intents", "setup_intents"},
+	},
 	Match: []ParamMatch{{
 		Param: "payment_method_types",
 		Operations: []string{
