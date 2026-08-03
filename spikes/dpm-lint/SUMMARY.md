@@ -92,7 +92,6 @@ productionization on a wider real-repo evaluation.
 ```bash
 cd spikes/dpm-lint
 CGO_ENABLED=0 go test -v ./...             # full suite: findings, negatives, mechanisms asserted
-CGO_ENABLED=0 go run . demo dpm --dir <dir>   # guided walkthrough (humans)
 CGO_ENABLED=0 go run . guide                  # agent playbook: steps, schemas, exit codes
 CGO_ENABLED=0 go run . doctor dpm <dir>       # diagnose (degrades to scan-only w/o creds)
 CGO_ENABLED=0 go run . doctor dpm --live      # + webhook round-trip proof

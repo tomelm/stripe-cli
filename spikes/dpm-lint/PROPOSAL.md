@@ -13,7 +13,6 @@ stripe doctor [topic] [dir]   diagnose: code findings judged against live accoun
        --offline                scan-only, explicitly
 stripe fix    [topic] [dir]   remediate: dry-run default; --apply writes only
                               reparse-verified files; risky findings are gated
-stripe demo   [topic]         guided human walkthrough
 stripe guide                  agent playbook (--json + exit-code contract)
 ```
 
@@ -107,8 +106,8 @@ and don't abort the rest — a half-applied tree still yields a complete report.
 review): nonexistent paths and typo'd topics exit 2 with did-you-mean hints —
 never a green "no findings"; the JSON field names match the guide (`Finding` is
 tagged); `STRIPE_API_KEY` must be a test-mode key; confirmations fail fast on
-non-TTY stdin instead of hanging CI; demo's ephemeral config never touches the
-account's Default configuration and auto-deactivates.
+non-TTY stdin instead of hanging CI; account access is read-only GETs that
+never write to the Stripe account.
 
 ## Scaling: packs and the breaking-changes changelog
 
@@ -193,11 +192,11 @@ what each check actually measures.
 ## Try it
 
 ```bash
-cd spikes/dpm-lint && CGO_ENABLED=0 go build -o ../../bin/stripe-demo .
-../../bin/stripe-demo demo dpm --dir testdata     # guided walkthrough (humans)
-../../bin/stripe-demo guide                       # agent playbook
-../../bin/stripe-demo doctor dpm testdata          # diagnose against your test account
-../../bin/stripe-demo doctor dpm testdata --live   # + webhook round-trip proof
+cd spikes/dpm-lint && CGO_ENABLED=0 go build -o ../../bin/stripe-migrate .
+../../bin/stripe-migrate guide                        # agent playbook
+../../bin/stripe-migrate doctor dpm testdata          # diagnose against your test account
+../../bin/stripe-migrate doctor dpm testdata --live   # + webhook round-trip proof
+../../bin/stripe-migrate fix dpm testdata             # dry-run remediation preview
 ../../bin/stripe-demo doctor collection-method testdata-packs/collection-method --offline
 ../../bin/stripe-demo fix dpm testdata             # gated dry-run; --apply to write
 CGO_ENABLED=0 go test ./...                        # full suite incl. TestPacks

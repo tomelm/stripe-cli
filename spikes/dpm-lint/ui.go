@@ -38,10 +38,6 @@ func banner(title, subtitle string) string {
 	return containerSty.Render(body)
 }
 
-func stepHeader(n int, total int, title string) string {
-	return fmt.Sprintf("\n%s %s\n", accentStyle.Render(fmt.Sprintf("Step %d/%d", n, total)), titleStyle.Render(title))
-}
-
 func okLine(s string) string   { return "  " + okStyle.Render("✓") + " " + s }
 func warnLine(s string) string { return "  " + warnStyle.Render("!") + " " + s }
 func failLine(s string) string { return "  " + failStyle.Render("✗") + " " + s }

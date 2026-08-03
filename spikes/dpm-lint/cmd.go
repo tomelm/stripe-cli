@@ -1,17 +1,15 @@
 package main
 
 // cmd.go — the command surface, shaped like the real product would be:
-// generic verbs (doctor, fix, demo) with the migration TOPIC as an argument,
+// generic verbs (doctor, fix) with the migration TOPIC as an argument,
 // mirroring the architecture (generic engine, rule packs as data).
 //
 //	stripe doctor [topic] [dir]   diagnose; degrades to scan-only without creds
 //	stripe fix    [topic] [dir]   remediate; dry-run default, --apply writes
-//	stripe demo   [topic]         guided walkthrough
 //	stripe guide                  agent playbook
 //
-// scan/drill/experiment/cleanup are no longer commands: scan is doctor's
-// credential-less degradation, the webhook drill is `doctor --live`, and the
-// config experiment lives inside `demo` (cleanup stays as a hidden janitor).
+// scan/drill are no longer commands: scan is doctor's credential-less
+// degradation and the webhook drill is `doctor --live`.
 //
 // Every command supports --json (pure JSON on stdout, logs on stderr) and the
 // exit-code contract: 0 clean/verified, 1 findings/not-verified, 2 error.
@@ -109,7 +107,7 @@ func topicAndDir(args []string) (string, string, error) {
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "stripe",
-		Short: "Migration doctor (demo) — diagnose, remediate, and verify API migrations",
+		Short: "Migration doctor — diagnose, remediate, and verify API migrations",
 		Long: `Diagnose and remediate Stripe API migrations. The engine is generic;
 migrations are rule packs named by topic.
 
@@ -117,7 +115,7 @@ Topics: dpm (fixable) · elements (WHICH Payment Element migration applies —
 start here if unsure) · pe · ewcs · ct (the three Payment Element guides) ·
 flex · tax-percent · collection-method · prorate · source-types (advise-only).
 
-Humans: start with ` + "`stripe demo dpm`" + `. Agents: start with ` + "`stripe guide`" + `.`,
+Humans: start with ` + "`stripe doctor dpm`" + `. Agents: start with ` + "`stripe guide`" + `.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
@@ -126,8 +124,7 @@ Humans: start with ` + "`stripe demo dpm`" + `. Agents: start with ` + "`stripe 
 	root.PersistentFlags().StringVar(&flagStripeAccount, "stripe-account", "", "Connect: connected account (acct_...) whose configuration governs direct charges")
 	root.PersistentFlags().BoolVarP(&flagYes, "yes", "y", false, "assume yes for confirmations (non-interactive)")
 
-	root.AddCommand(newDoctorCmd(), newFixCmd(), newDemoCmd(), newGuideCmd(),
-		newCleanupCmd(), newDumpCmd())
+	root.AddCommand(newDoctorCmd(), newFixCmd(), newGuideCmd(), newDumpCmd())
 	return root
 }
 
@@ -571,142 +568,6 @@ func renderDrill(r *DrillReport) {
 	}
 }
 
-// ---------- demo ----------
-
-func newDemoCmd() *cobra.Command {
-	var dir string
-	var skipLive bool
-	c := &cobra.Command{
-		Use:   "demo [topic]",
-		Short: "Guided walkthrough: diagnose → remediation preview → live proof",
-		Args:  cobra.MaximumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			topic := "dpm"
-			if len(args) > 0 {
-				topic = args[0]
-			}
-			if _, ok := packs[topic]; !ok {
-				fail(fmt.Errorf("unknown topic %q", topic))
-			}
-			runDemo(topic, dir, skipLive)
-			return nil
-		},
-	}
-	c.Flags().StringVar(&dir, "dir", ".", "directory to scan")
-	c.Flags().BoolVar(&skipLive, "skip-live", false, "skip steps that call the Stripe API")
-	return c
-}
-
-func runDemo(topic, dir string, skipLive bool) {
-	rule := packs[topic].Rule
-	fmt.Println(banner("Dynamic Payment Methods — migration walkthrough",
-		"docs.stripe.com/payments/dashboard-payment-methods, executed and verified locally"))
-
-	total := 4
-	// 1. doctor (code + account together — the product's core loop)
-	fmt.Print(stepHeader(1, total, "Diagnose: code findings judged against account facts"))
-	findings, scanned, parsed, err := scan(dir, rule)
-	if err != nil {
-		fail(topicHint(err, dir))
-	}
-	sortFindings(findings)
-	stats := ScanStats{FilesScanned: scanned, FilesParsed: parsed, Skipped: scanned - parsed}
-	if len(findings) == 0 {
-		fmt.Println(okLine("no findings — nothing to migrate"))
-		return
-	}
-	var rep *DoctorReport
-	if skipLive {
-		rep = scanOnlyReport(topic, rule, findings, stats, "--skip-live")
-	} else {
-		err := withSpinner("Fetching account facts (read-only)", func() error {
-			var derr error
-			rep, derr = buildDoctorReport(findings, flagProfile, flagStripeAccount, rule)
-			return derr
-		})
-		if err != nil {
-			rep = scanOnlyReport(topic, rule, findings, stats, err.Error())
-		} else {
-			rep.Topic = topic
-			rep.Stats = stats
-		}
-	}
-	rep.WebhookHandlers, rep.FrontendSignals, rep.ManifestChecks = scanSignals(dir, packs[topic].Signals)
-	rep.Triage = scanTriage(dir, packs[topic].Triage)
-	renderDoctor(rep)
-
-	// 2. remediation preview
-	fmt.Print(stepHeader(2, total, "Remediation preview (dry-run, span-verified)"))
-	var dec *companionDecision
-	if rule.Companion != nil {
-		dec = resolveCompanion(rule, flagProfile, flagStripeAccount, dir, skipLive)
-	}
-	if fr, err := fixRun(dir, rule, false, false, dec); err == nil {
-		renderFix(fr)
-		// The recommended command must reproduce THIS preview: when the
-		// preview's fork was decided offline, say so, or a live re-resolve
-		// could choose the other branch and apply a different edit.
-		applyCmd := fmt.Sprintf("stripe fix %s %s --apply", topic, dir)
-		if skipLive {
-			applyCmd += " --offline"
-		}
-		fmt.Println(infoLine("apply for real with " + accentStyle.Render(applyCmd)))
-	}
-
-	// 3. live experiment
-	fmt.Print(stepHeader(3, total, "Live proof: Dashboard config drives the method list"))
-	if skipLive {
-		fmt.Println(infoLine("skipped (--skip-live)"))
-	} else if confirm("Create an ephemeral TEST-mode config and diff two sessions?", flagYes) {
-		var er *ExperimentReport
-		err := withSpinner("Creating config, sessions, and diffing", func() error {
-			var derr error
-			er, derr = experimentRun(flagProfile, false)
-			return derr
-		})
-		if err != nil {
-			fmt.Println(warnLine(err.Error()))
-		} else {
-			renderExperiment(er)
-		}
-	}
-
-	// 4. live webhook check
-	fmt.Print(stepHeader(4, total, "Live proof: delayed-notification webhooks round-trip"))
-	if skipLive {
-		fmt.Println(infoLine("skipped (--skip-live)"))
-	} else if confirm("Run stripe listen + trigger to verify the handler end to end?", flagYes) {
-		var dr *DrillReport
-		err := withSpinner("Listening, triggering, verifying signatures", func() error {
-			var derr error
-			dr, derr = drillRun()
-			return derr
-		})
-		if err != nil {
-			fmt.Println(warnLine(err.Error()))
-		} else {
-			renderDrill(dr)
-		}
-	}
-
-	fmt.Println("\n" + banner("Walkthrough complete",
-		fmt.Sprintf("next: stripe fix %s --apply, then stripe doctor %s (exit 0 = migrated) — agents: stripe guide", topic, topic)))
-}
-
-func renderExperiment(r *ExperimentReport) {
-	fmt.Println(titleStyle.Render("Config → session experiment") + mutedStyle.Render("  (ephemeral config "+r.ConfigID+")"))
-	fmt.Println(kv("session before", strings.Join(r.Before.Methods, ", ")))
-	fmt.Println(kv("toggled off", r.Toggled))
-	fmt.Println(kv("session after", strings.Join(r.After.Methods, ", ")))
-	fmt.Println(kv("diff", fmt.Sprintf("removed=%v added=%v", r.Removed, r.Added)))
-	if r.Verified {
-		fmt.Println(okLine(titleStyle.Render("verified: the Dashboard config change alone changed what customers see")))
-	} else {
-		fmt.Println(warnLine("unexpected diff — inspect manually"))
-	}
-	fmt.Println(kv("cleanup", r.Cleanup))
-}
-
 // ---------- guide ----------
 
 func newGuideCmd() *cobra.Command {
@@ -847,33 +708,11 @@ Adds .live_drill (webhook round-trip via stripe listen/trigger); require
 .live_drill.verified == true.
 
 ## Notes
-- The demo's config experiment (stripe demo dpm) creates an ephemeral
-  TEST-mode payment-method configuration and deactivates it; it never
-  touches the account's Default configuration.
-- Orphaned ephemeral config? stripe cleanup <pmc_id>.
+- All account access is read-only GETs with the CLI's stored test-mode
+  credentials; nothing is ever written to the Stripe account.
 `
 
-// ---------- hidden: cleanup / parse-dump ----------
-
-func newCleanupCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:    "cleanup <payment-method-configuration-id>",
-		Short:  "Deactivate an ephemeral demo configuration",
-		Hidden: true,
-		Args:   cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			key, err := loadTestKey(flagProfile)
-			if err != nil {
-				fail(err)
-			}
-			if err := deactivate(key, args[0]); err != nil {
-				fail(err)
-			}
-			fmt.Println(okLine("ephemeral config " + args[0] + " deactivated"))
-			return nil
-		},
-	}
-}
+// ---------- hidden: parse-dump ----------
 
 func newDumpCmd() *cobra.Command {
 	return &cobra.Command{

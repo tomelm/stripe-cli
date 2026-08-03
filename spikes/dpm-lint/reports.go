@@ -194,22 +194,3 @@ type DrillEvent struct {
 	Type      string `json:"type"`
 	Signature string `json:"signature"` // verified | invalid
 }
-
-// ExperimentReport is the demo's config→session experiment evidence.
-type ExperimentReport struct {
-	Command  string      `json:"command"`
-	ConfigID string      `json:"ephemeral_configuration"`
-	Before   SessionInfo `json:"session_before"`
-	Toggled  string      `json:"toggled_off,omitempty"`
-	After    SessionInfo `json:"session_after,omitzero"`
-	Removed  []string    `json:"diff_removed"`
-	Added    []string    `json:"diff_added"`
-	Verified bool        `json:"verified"`
-	Cleanup  string      `json:"cleanup"` // deactivated | kept-active
-}
-
-type SessionInfo struct {
-	ID      string   `json:"id"`
-	URL     string   `json:"url,omitempty"`
-	Methods []string `json:"payment_method_types"`
-}
