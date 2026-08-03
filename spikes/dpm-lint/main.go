@@ -395,6 +395,9 @@ func leafParam(p string) string {
 }
 
 func nodeText(n *ts.Node, src []byte) string {
+	if n == nil {
+		return ""
+	}
 	s, e := n.StartByte(), n.EndByte()
 	if int(e) > len(src) {
 		return ""

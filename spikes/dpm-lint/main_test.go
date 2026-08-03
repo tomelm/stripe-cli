@@ -15,7 +15,7 @@ var want = []string{
 	"testdata/Pi.cs:10:7",          // direct
 	"testdata/Pi.java:9:10",        // direct (builder chain)
 	"testdata/Recv.java:8:19",      // recv: receiver's declared type
-	"testdata/pi.go:10:3",          // direct
+	"testdata/pi.go:13:3",          // direct
 	"testdata/pi.js:6:3",           // direct
 	"testdata/pi.php:7:4",          // direct
 	"testdata/pi.py:7:5",           // direct

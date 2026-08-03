@@ -29,8 +29,41 @@ type span struct {
 	site string
 	// receiver is the builder variable text for Java statement sites.
 	receiver string
+	// group identifies the builder INSTANCE for Java dedupe: same-named
+	// builders in different functions, and distinct chains in one file, must
+	// not collapse onto each other.
+	group string
+	// scope is the text checked for an already-present companion: the param
+	// bag for pair languages, the whole chain for chain links, the enclosing
+	// function for builder statements.
+	scope string
+	// funcText is the enclosing function's text, for create-evidence checks
+	// that the anchor alone cannot answer (Go's shared params struct).
+	funcText string
 	// replace, when non-empty, turns the deletion into a splice.
 	replace string
+}
+
+// climbLast walks ancestors of n and returns the OUTERMOST node whose kind is
+// in kinds (nil when none).
+func climbLast(n *ts.Node, kinds []string, lang *ts.Language) *ts.Node {
+	var last *ts.Node
+	for cur := n.Parent(); cur != nil; cur = cur.Parent() {
+		if containsStr(kinds, cur.Type(lang)) {
+			last = cur
+		}
+	}
+	return last
+}
+
+// climbFirst returns the NEAREST ancestor of n whose kind is in kinds.
+func climbFirst(n *ts.Node, kinds []string, lang *ts.Language) *ts.Node {
+	for cur := n.Parent(); cur != nil; cur = cur.Parent() {
+		if containsStr(kinds, cur.Type(lang)) {
+			return cur
+		}
+	}
+	return nil
 }
 
 // removalSpan computes the byte range that deletes a matched parameter
@@ -52,17 +85,34 @@ func removalSpan(key *ts.Node, spec langSpec, lang *ts.Language, src []byte) (sp
 		// whole statement; chain link (.addX("card")) → remove from the end
 		// of the receiver through the end of this link.
 		recv := inv.NamedChild(0)
+		fn := climbFirst(inv, spec.funcKinds, lang)
+		fnStart := uint32(0)
+		if fn != nil {
+			fnStart = fn.StartByte()
+		}
 		if p := inv.Parent(); p != nil && p.Type(lang) == "expression_statement" {
-			receiver := ""
-			if recv != nil {
-				receiver = string(src[recv.StartByte():recv.EndByte()])
-			}
-			return span{start: p.StartByte(), end: p.EndByte(), label: "statement", site: "statement", receiver: receiver}, true
+			receiver := nodeText(recv, src)
+			return span{start: p.StartByte(), end: p.EndByte(), label: "statement", site: "statement",
+				receiver: receiver,
+				// Builder instance = receiver name scoped to its function.
+				group:    fmt.Sprintf("stmt|%d|%s", fnStart, receiver),
+				scope:    nodeText(fn, src),
+				funcText: nodeText(fn, src)}, true
 		}
 		if recv == nil {
 			return span{}, false
 		}
-		return span{start: recv.EndByte(), end: inv.EndByte(), label: "chain-link", site: "chain-link"}, true
+		// Every link of one chain shares the same OUTERMOST invocation node,
+		// which is exactly the builder-instance identity we need.
+		outer := climbLast(key, spec.anchorKinds, lang)
+		outerStart := inv.StartByte()
+		if outer != nil {
+			outerStart = outer.StartByte()
+		}
+		return span{start: recv.EndByte(), end: inv.EndByte(), label: "chain-link", site: "chain-link",
+			group:    fmt.Sprintf("chain|%d", outerStart),
+			scope:    nodeText(outer, src),
+			funcText: nodeText(fn, src)}, true
 	}
 
 	// Pair-shaped languages: the enclosing pair node plus one separator.
@@ -77,15 +127,23 @@ func removalSpan(key *ts.Node, spec langSpec, lang *ts.Language, src []byte) (sp
 		return span{}, false
 	}
 	site := pair.Type(lang)
+	// The companion checks are scoped to THIS param bag (the pair's parent
+	// literal) and this call's enclosing function — never the whole file.
+	base := span{site: site,
+		scope:    nodeText(pair.Parent(), src),
+		funcText: nodeText(climbFirst(pair, spec.funcKinds, lang), src)}
 	s, e := pair.StartByte(), pair.EndByte()
 	// Prefer swallowing the trailing comma; else the leading one.
 	if i := skipWS(src, int(e), +1); i < len(src) && src[i] == ',' {
-		return span{start: s, end: uint32(i + 1), label: "pair+trailing-comma", site: site}, true
+		base.start, base.end, base.label = s, uint32(i+1), "pair+trailing-comma"
+		return base, true
 	}
 	if i := skipWS(src, int(s)-1, -1); i >= 0 && src[i] == ',' {
-		return span{start: uint32(i), end: e, label: "pair+leading-comma", site: site}, true
+		base.start, base.end, base.label = uint32(i), e, "pair+leading-comma"
+		return base, true
 	}
-	return span{start: s, end: e, label: "pair", site: site}, true
+	base.start, base.end, base.label = s, e, "pair"
+	return base, true
 }
 
 // expandToLine widens a pure removal to whole lines when only whitespace
@@ -135,10 +193,9 @@ type companionDecision struct {
 // companion is semantically a no-op at/after the cutoff and load-bearing
 // below it, so inserting is the only choice that is correct at any version.
 func resolveCompanion(rule Rule, profile string, offline bool) *companionDecision {
-	cutoff := rule.IntroducedIn
 	unknown := func(why string) *companionDecision {
 		return &companionDecision{insert: true,
-			reason: why + " — traffic API versions unknown; inserting " + rule.Companion.Param + " (a no-op at/after " + cutoff + ", required below it)"}
+			reason: why + " — traffic API versions unknown; inserting " + rule.Companion.Param + " (a no-op at/after " + rule.IntroducedIn + ", required below it)"}
 	}
 	if offline {
 		return unknown("--offline")
@@ -147,34 +204,94 @@ func resolveCompanion(rule Rule, profile string, offline bool) *companionDecisio
 	if err != nil {
 		return unknown("no credentials")
 	}
-	var facts *accountFacts
-	if facts, err = fetchAccountFacts(key); err != nil {
+	facts, err := fetchAccountFacts(key)
+	if err != nil {
 		return unknown("account lookup failed")
 	}
+	return decideCompanion(rule, facts)
+}
+
+// decideCompanion is the pure fork: it recomputes the version census against
+// THIS rule's cutoff (accountFacts' own VersionsOK is bound to the dpm
+// constant, which only coincidentally matches) and folds in the Dashboard-
+// configuration caveat the doctor would raise on the same facts.
+func decideCompanion(rule Rule, facts *accountFacts) *companionDecision {
+	cutoff := rule.IntroducedIn
+	total, atOrAfter := 0, 0
+	for v, n := range facts.EventVersions {
+		total += n
+		if datePrefix(v) >= cutoff {
+			atOrAfter += n
+		}
+	}
+	configNote := ""
+	if !facts.ConfiguredOK {
+		configNote = "; NOTE: no active Dashboard payment-method configuration — doctor reports BLOCKED until methods are configured"
+	}
 	switch {
-	case facts.NoEvents:
-		return unknown("no recent events")
-	case facts.VersionsOK:
+	case total == 0:
+		return &companionDecision{insert: true,
+			reason: "no recent events — traffic API versions unknown; inserting " + rule.Companion.Param + " (a no-op at/after " + cutoff + ", required below it)" + configNote}
+	case atOrAfter == total:
 		return &companionDecision{insert: false, oldest: facts.OldestVersion,
-			reason: "all recent traffic runs at/after " + cutoff + " — " + rule.Companion.Param + " is default-enabled there; plain removal is behavior-preserving"}
+			reason: "all recent traffic runs at/after " + cutoff + " — " + rule.Companion.Param + " is default-enabled there; plain removal is behavior-preserving" + configNote}
 	default:
 		return &companionDecision{insert: true, oldest: facts.OldestVersion,
-			reason: "recent traffic runs below " + cutoff + " (oldest " + facts.OldestVersion + ") — bare removal would silently drop methods; inserting " + rule.Companion.Param}
+			reason: "recent traffic runs below " + cutoff + " (oldest " + facts.OldestVersion + ") — bare removal would silently drop methods; inserting " + rule.Companion.Param + configNote}
 	}
 }
 
-// companionResourceFor maps a finding's resolved anchor text onto one of the
-// companion's eligible API resources ("" = not eligible, e.g. a Checkout
-// Session, which has no automatic_payment_methods parameter).
-func companionResourceFor(anchor string, resources []string) string {
+// companionResourceFor maps a removal site onto one of the companion's
+// eligible API resources ("" = not eligible). Eligibility needs CREATE
+// evidence, not just the resource name: automatic_payment_methods is a
+// create-only parameter, so update/confirm/modify sites must never gain it
+// (the API rejects it there), and a Checkout Session builder that merely
+// mentions PaymentIntentData must not match payment_intents.
+func companionResourceFor(spec langSpec, anchor, funcText string, resources []string) string {
 	for _, r := range resources {
-		for _, tok := range []string{pascalSingular(r), lowerCamelPlural(r), r} {
-			if strings.Contains(anchor, tok) {
+		single := pascalSingular(r)
+		switch spec.name {
+		case "java", "csharp":
+			// The create params class is the token; Update/Confirm classes
+			// are distinct and never match.
+			if strings.Contains(anchor, single+"CreateParams") || strings.Contains(anchor, single+"CreateOptions") {
+				return r
+			}
+		case "go":
+			// stripe-go shares one params struct across create/update/confirm;
+			// the verb lives at the call site. Require create evidence (.New)
+			// and no update/confirm evidence in the enclosing function.
+			if strings.Contains(anchor, single+"Params") &&
+				strings.Contains(funcText, ".New(") &&
+				!strings.Contains(funcText, ".Update(") && !strings.Contains(funcText, ".Confirm(") {
+				return r
+			}
+		default:
+			// Dynamic SDKs name the verb in the call itself.
+			if (strings.Contains(anchor, single) || strings.Contains(anchor, lowerCamelPlural(r))) &&
+				strings.Contains(strings.ToLower(anchor), "create") &&
+				!strings.Contains(strings.ToLower(anchor), "update") &&
+				!strings.Contains(strings.ToLower(anchor), "confirm") &&
+				!strings.Contains(strings.ToLower(anchor), "modify") {
 				return r
 			}
 		}
 	}
 	return ""
+}
+
+// alreadyHasCompanion reports whether the removal site's own scope (param
+// bag / builder chain / function for builder statements) already sets the
+// companion — scoped per call site, so a half-migrated file still gets the
+// insert on its remaining calls.
+func alreadyHasCompanion(sp span, param string) bool {
+	switch sp.site {
+	case "statement":
+		return strings.Contains(sp.scope, sp.receiver+".set"+pascal(param))
+	case "chain-link":
+		return strings.Contains(sp.scope, ".set"+pascal(param))
+	}
+	return strings.Contains(sp.scope, param) || strings.Contains(sp.scope, pascal(param))
 }
 
 // companionText renders the language-correct insertion of
@@ -299,16 +416,14 @@ func fixRun(root string, rule Rule, apply, includeAll bool, dec *companionDecisi
 			continue
 		}
 		// Companion fork: eligible removals become replacements. Eligible =
-		// the companioned top-level param, on a resource that accepts the
-		// companion, in a file that doesn't already set it (spike-level
-		// idempotence: one check per file, both spellings).
+		// the companioned top-level param, on a CREATE call of a resource
+		// that accepts the companion, at a site that doesn't already set it.
 		if dec != nil && dec.insert && rule.Companion != nil &&
 			f.Param == rule.Companion.ForParam &&
-			!strings.Contains(string(src), rule.Companion.Param) &&
-			!strings.Contains(string(src), pascal(rule.Companion.Param)) {
-			if res := companionResourceFor(f.Anchor, rule.Companion.Resources); res != "" {
-				jkey := f.File + "|" + sp.site + "|" + sp.receiver
-				if sp.site != "statement" && sp.site != "chain-link" || !javaSeen[jkey] {
+			!alreadyHasCompanion(sp, rule.Companion.Param) {
+			if res := companionResourceFor(spec, f.Anchor, sp.funcText, rule.Companion.Resources); res != "" {
+				jkey := f.File + "|" + sp.group
+				if sp.group == "" || !javaSeen[jkey] {
 					if text, ok := companionText(spec, sp.site, res, sp.receiver); ok {
 						sp.replace = spliceFor(sp.label, text)
 						sp.label += "→+" + rule.Companion.Param

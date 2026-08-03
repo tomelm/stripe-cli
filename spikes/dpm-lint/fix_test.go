@@ -207,6 +207,216 @@ class Demo {
 	}
 }
 
+func TestCompanionDistinctBuildersEachGetInsert(t *testing.T) {
+	// Review finding: the dedupe key must identify a builder INSTANCE. Two
+	// chains in one file, and same-named builders in different methods, must
+	// each get their own companion.
+	dir := t.TempDir()
+	chains := `import com.stripe.param.PaymentIntentCreateParams;
+import com.stripe.param.SetupIntentCreateParams;
+
+class Demo {
+  void a() {
+    PaymentIntentCreateParams p = PaymentIntentCreateParams.builder().setAmount(1099L).addPaymentMethodType("card").build();
+  }
+  void b() {
+    SetupIntentCreateParams s = SetupIntentCreateParams.builder().addPaymentMethodType("card").build();
+  }
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "Chains.java"), []byte(chains), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stmts := `import com.stripe.param.PaymentIntentCreateParams;
+
+class Demo {
+  void a() {
+    PaymentIntentCreateParams.Builder paramsBuilder = PaymentIntentCreateParams.builder();
+    paramsBuilder.addPaymentMethodType("card");
+    paramsBuilder.build();
+  }
+  void b() {
+    PaymentIntentCreateParams.Builder paramsBuilder = PaymentIntentCreateParams.builder();
+    paramsBuilder.addPaymentMethodType("card");
+    paramsBuilder.build();
+  }
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "Stmts.java"), []byte(stmts), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := fixRun(dir, dpmRule, true, false, &companionDecision{insert: true, reason: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.AllClean {
+		t.Fatal("expected reparse clean")
+	}
+	chainsOut := mustRead(t, dir, "Chains.java")
+	if n := strings.Count(chainsOut, "setAutomaticPaymentMethods"); n != 2 {
+		t.Errorf("two distinct chains must each get a companion, got %d:\n%s", n, chainsOut)
+	}
+	if !strings.Contains(chainsOut, "SetupIntentCreateParams.AutomaticPaymentMethods") {
+		t.Errorf("the SetupIntent chain must use the SetupIntent params class:\n%s", chainsOut)
+	}
+	stmtsOut := mustRead(t, dir, "Stmts.java")
+	if n := strings.Count(stmtsOut, "setAutomaticPaymentMethods"); n != 2 {
+		t.Errorf("same-named builders in different methods must each get a companion, got %d:\n%s", n, stmtsOut)
+	}
+}
+
+func TestCompanionHalfMigratedFileStillInserts(t *testing.T) {
+	// Review finding: the already-present check must be per call site, not
+	// per file — a half-migrated file's remaining call still needs the insert.
+	dir := t.TempDir()
+	src := `const stripe = require('stripe')('sk_test_x');
+async function a() {
+  await stripe.paymentIntents.create({
+    amount: 1099,
+    currency: 'eur',
+    automatic_payment_methods: {enabled: true},
+  });
+}
+async function b() {
+  await stripe.paymentIntents.create({
+    amount: 2099,
+    currency: 'eur',
+    payment_method_types: ['card', 'link'],
+  });
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "half.js"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := fixRun(dir, dpmRule, true, false, &companionDecision{insert: true, reason: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.AllClean {
+		t.Fatal("expected reparse clean")
+	}
+	if rep.Companion.Inserts != 1 {
+		t.Errorf("the un-migrated call must get the insert, got %d", rep.Companion.Inserts)
+	}
+	out := mustRead(t, dir, "half.js")
+	if n := strings.Count(out, "automatic_payment_methods"); n != 2 {
+		t.Errorf("expected both calls to carry the companion, got %d:\n%s", n, out)
+	}
+}
+
+func TestCompanionCreateOnlyOperations(t *testing.T) {
+	// Review finding: automatic_payment_methods is CREATE-only — update,
+	// confirm, and modify sites must be bare-removed, never companioned.
+	dir := t.TempDir()
+	files := map[string]string{
+		"update.js": `const stripe = require('stripe')('sk_test_x');
+await stripe.paymentIntents.update('pi_123', {
+  payment_method_types: ['card', 'ideal'],
+});
+`,
+		"confirm.py": `import stripe
+
+stripe.PaymentIntent.confirm(
+    "pi_123",
+    payment_method_types=["card", "ideal"],
+)
+`,
+		"update.go": `package main
+
+import (
+	"github.com/stripe/stripe-go/v79"
+	"github.com/stripe/stripe-go/v79/paymentintent"
+)
+
+func main() {
+	params := &stripe.PaymentIntentParams{
+		PaymentMethodTypes: stripe.StringSlice([]string{"card", "ideal"}),
+	}
+	pi, _ := paymentintent.Update("pi_123", params)
+	_ = pi
+}
+`,
+	}
+	for name, src := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rep, err := fixRun(dir, dpmRule, true, false, &companionDecision{insert: true, reason: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.AllClean {
+		t.Fatal("expected reparse clean")
+	}
+	if rep.Companion.Inserts != 0 {
+		t.Errorf("update/confirm sites must never gain the companion, got %d inserts", rep.Companion.Inserts)
+	}
+	for name := range files {
+		out := mustRead(t, dir, name)
+		if strings.Contains(out, "payment_method_types") || strings.Contains(out, "PaymentMethodTypes") {
+			t.Errorf("%s: param must still be removed:\n%s", name, out)
+		}
+		if strings.Contains(out, "automatic_payment_methods") || strings.Contains(out, "AutomaticPaymentMethods") {
+			t.Errorf("%s: create-only companion must not appear:\n%s", name, out)
+		}
+	}
+}
+
+func TestCompanionJavaSessionBuilderNotMatched(t *testing.T) {
+	// Review finding: a Checkout Session builder mentioning
+	// setPaymentIntentData must not be mistaken for a PaymentIntent create.
+	dir := t.TempDir()
+	src := `import com.stripe.param.checkout.SessionCreateParams;
+
+class Demo {
+  void go() {
+    SessionCreateParams params = SessionCreateParams.builder().addPaymentMethodType("card").setPaymentIntentData(SessionCreateParams.PaymentIntentData.builder().build()).build();
+  }
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "Sess.java"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := fixRun(dir, dpmRule, true, false, &companionDecision{insert: true, reason: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Companion.Inserts != 0 {
+		t.Errorf("session builder must not gain the companion, got %d inserts", rep.Companion.Inserts)
+	}
+	out := mustRead(t, dir, "Sess.java")
+	if strings.Contains(out, "AutomaticPaymentMethods") {
+		t.Errorf("no companion belongs in a Session builder:\n%s", out)
+	}
+}
+
+func TestDecideCompanionUsesRuleCutoffAndConfigNote(t *testing.T) {
+	// Review findings: the fork must be computed against THIS rule's cutoff
+	// (not the dpm package constant), and must surface the missing-Dashboard-
+	// config caveat the doctor raises on the same facts.
+	rule := dpmRule
+	rule.IntroducedIn = "2024-01-01"
+	facts := &accountFacts{
+		EventVersions: map[string]int{"2023-10-16": 5},
+		OldestVersion: "2023-10-16",
+		ConfiguredOK:  true,
+	}
+	// 2023-10-16 is >= the dpm constant but < this rule's cutoff: must insert.
+	if dec := decideCompanion(rule, facts); !dec.insert {
+		t.Errorf("traffic below the RULE's cutoff must insert, got %+v", dec)
+	}
+	facts.EventVersions = map[string]int{"2024-06-20": 3}
+	facts.OldestVersion = "2024-06-20"
+	if dec := decideCompanion(rule, facts); dec.insert {
+		t.Errorf("traffic at/after the rule's cutoff must omit, got %+v", dec)
+	}
+	facts.ConfiguredOK = false
+	if dec := decideCompanion(rule, facts); !strings.Contains(dec.reason, "no active Dashboard") {
+		t.Errorf("missing Dashboard config must be surfaced in the reason, got %q", dec.reason)
+	}
+}
+
 func TestRemovalLeavesNoBlankArtifacts(t *testing.T) {
 	// The bed-A review finding: every deleted entry used to leave a
 	// whitespace-only line. Full-line expansion must prevent that in every
