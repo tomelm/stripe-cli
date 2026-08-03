@@ -15,6 +15,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -186,13 +187,17 @@ type companionDecision struct {
 	insert bool
 	reason string
 	oldest string
+	// returnURL, when set (--return-url), is inserted alongside the companion
+	// at server-side-confirmation sites so redirect-based payment methods
+	// keep working; without it those sites get allow_redirects:"never".
+	returnURL string
 }
 
 // resolveCompanion decides the fork from account facts. Every unknowable
 // branch (offline, no credentials, no recent events) resolves to INSERT: the
 // companion is semantically a no-op at/after the cutoff and load-bearing
 // below it, so inserting is the only choice that is correct at any version.
-func resolveCompanion(rule Rule, profile string, offline bool) *companionDecision {
+func resolveCompanion(rule Rule, profile, stripeAccount string, offline bool) *companionDecision {
 	unknown := func(why string) *companionDecision {
 		return &companionDecision{insert: true,
 			reason: why + " — traffic API versions unknown; inserting " + rule.Companion.Param + " (a no-op at/after " + rule.IntroducedIn + ", required below it)"}
@@ -204,7 +209,7 @@ func resolveCompanion(rule Rule, profile string, offline bool) *companionDecisio
 	if err != nil {
 		return unknown("no credentials")
 	}
-	facts, err := fetchAccountFacts(key)
+	facts, err := fetchAccountFacts(key, stripeAccount)
 	if err != nil {
 		return unknown("account lookup failed")
 	}
@@ -294,30 +299,116 @@ func alreadyHasCompanion(sp span, param string) bool {
 	return strings.Contains(sp.scope, param) || strings.Contains(sp.scope, pascal(param))
 }
 
+// companionOpts selects the companion variant for a site. Server-side
+// confirmation (confirm:true) with automatic_payment_methods and no
+// return_url is a 400 at runtime
+// (payment_intent_automatic_payment_method_confirmation_allow_redirects_
+// without_return_url): such sites must either gain a merchant-provided
+// return_url or pin allow_redirects to "never".
+type companionOpts struct {
+	allowRedirectsNever bool
+	returnURL           string
+}
+
+// confirmTrueRe matches confirm being set truthy across the pair-shaped
+// SDKs (confirm: true / confirm=True / 'confirm' => true / Confirm =
+// true / Confirm: stripe.Bool(true)); confirmation_method etc. do not match
+// because a word character follows "confirm".
+var confirmTrueRe = regexp.MustCompile(`(?i)['"]?confirm['"]?\s*(=>|=|:)\s*(stripe\.Bool\()?\s*true`)
+
+// javaConfirmRe matches the builder spelling.
+var javaConfirmRe = regexp.MustCompile(`setConfirm\(\s*true`)
+
+func siteConfirms(sp span) bool {
+	text := sp.scope + "\n" + sp.funcText
+	return confirmTrueRe.MatchString(text) || javaConfirmRe.MatchString(text)
+}
+
+// siteHasReturnURL is deliberately NARROW (the bag/chain only): claiming a
+// return_url exists when it doesn't yields the runtime 400 this logic
+// prevents; the reverse merely pins allow_redirects conservatively.
+func siteHasReturnURL(sp span) bool {
+	for _, tok := range []string{"return_url", "ReturnURL", "ReturnUrl", "setReturnUrl"} {
+		if strings.Contains(sp.scope, tok) {
+			return true
+		}
+	}
+	return false
+}
+
 // companionText renders the language-correct insertion of
 // automatic_payment_methods[enabled]=true for a removal site. site is the
 // pair node kind (or statement/chain-link for Java builders); resource picks
 // the typed SDKs' params-class prefix.
-func companionText(spec langSpec, site, resource, receiver string) (string, bool) {
+func companionText(spec langSpec, site, resource, receiver string, opts companionOpts) (string, bool) {
 	prefix := pascalSingular(resource) // PaymentIntent | SetupIntent
 	switch spec.name {
-	case "ruby":
-		return "automatic_payment_methods: {enabled: true}", true
+	case "ruby", "javascript", "typescript", "tsx":
+		apm := "automatic_payment_methods: {enabled: true}"
+		if opts.allowRedirectsNever {
+			apm = "automatic_payment_methods: {enabled: true, allow_redirects: 'never'}"
+		}
+		if opts.returnURL != "" {
+			apm += ", return_url: '" + opts.returnURL + "'"
+		}
+		return apm, true
 	case "python":
 		if site == "keyword_argument" {
-			return `automatic_payment_methods={"enabled": True}`, true
+			apm := `automatic_payment_methods={"enabled": True}`
+			if opts.allowRedirectsNever {
+				apm = `automatic_payment_methods={"enabled": True, "allow_redirects": "never"}`
+			}
+			if opts.returnURL != "" {
+				apm += `, return_url="` + opts.returnURL + `"`
+			}
+			return apm, true
 		}
-		return `"automatic_payment_methods": {"enabled": True}`, true
+		apm := `"automatic_payment_methods": {"enabled": True}`
+		if opts.allowRedirectsNever {
+			apm = `"automatic_payment_methods": {"enabled": True, "allow_redirects": "never"}`
+		}
+		if opts.returnURL != "" {
+			apm += `, "return_url": "` + opts.returnURL + `"`
+		}
+		return apm, true
 	case "php":
-		return "'automatic_payment_methods' => ['enabled' => true]", true
-	case "javascript", "typescript", "tsx":
-		return "automatic_payment_methods: {enabled: true}", true
+		apm := "'automatic_payment_methods' => ['enabled' => true]"
+		if opts.allowRedirectsNever {
+			apm = "'automatic_payment_methods' => ['enabled' => true, 'allow_redirects' => 'never']"
+		}
+		if opts.returnURL != "" {
+			apm += ", 'return_url' => '" + opts.returnURL + "'"
+		}
+		return apm, true
 	case "go":
-		return "AutomaticPaymentMethods: &stripe." + prefix + "AutomaticPaymentMethodsParams{Enabled: stripe.Bool(true)}", true
+		inner := "Enabled: stripe.Bool(true)"
+		if opts.allowRedirectsNever {
+			inner += `, AllowRedirects: stripe.String("never")`
+		}
+		apm := "AutomaticPaymentMethods: &stripe." + prefix + "AutomaticPaymentMethodsParams{" + inner + "}"
+		if opts.returnURL != "" {
+			apm += `, ReturnURL: stripe.String("` + opts.returnURL + `")`
+		}
+		return apm, true
 	case "csharp":
-		return "AutomaticPaymentMethods = new " + prefix + "AutomaticPaymentMethodsOptions { Enabled = true }", true
+		inner := "Enabled = true"
+		if opts.allowRedirectsNever {
+			inner += `, AllowRedirects = "never"`
+		}
+		apm := "AutomaticPaymentMethods = new " + prefix + "AutomaticPaymentMethodsOptions { " + inner + " }"
+		if opts.returnURL != "" {
+			apm += `, ReturnUrl = "` + opts.returnURL + `"`
+		}
+		return apm, true
 	case "java":
-		call := ".setAutomaticPaymentMethods(" + prefix + "CreateParams.AutomaticPaymentMethods.builder().setEnabled(true).build())"
+		builder := prefix + "CreateParams.AutomaticPaymentMethods.builder().setEnabled(true)"
+		if opts.allowRedirectsNever {
+			builder += ".setAllowRedirects(" + prefix + "CreateParams.AutomaticPaymentMethods.AllowRedirects.NEVER)"
+		}
+		call := ".setAutomaticPaymentMethods(" + builder + ".build())"
+		if opts.returnURL != "" {
+			call += `.setReturnUrl("` + opts.returnURL + `")`
+		}
 		switch site {
 		case "statement":
 			if receiver == "" {
@@ -367,6 +458,8 @@ func fixRun(root string, rule Rule, apply, includeAll bool, dec *companionDecisi
 	// builder; only the first replacement per builder may insert the
 	// companion or the call would set it twice.
 	javaSeen := map[string]bool{}
+	// Server-side-confirmation site counters for the companion notes.
+	confirmNever, confirmWithURL := 0, 0
 
 	findings, _, _, err := scan(root, rule)
 	if err != nil {
@@ -424,7 +517,23 @@ func fixRun(root string, rule Rule, apply, includeAll bool, dec *companionDecisi
 			if res := companionResourceFor(spec, f.Anchor, sp.funcText, rule.Companion.Resources); res != "" {
 				jkey := f.File + "|" + sp.group
 				if sp.group == "" || !javaSeen[jkey] {
-					if text, ok := companionText(spec, sp.site, res, sp.receiver); ok {
+					// Server-side confirmation: APM + confirm:true without a
+					// return_url is a runtime 400 (redirect-based methods
+					// demand one at confirmation; SetupIntents carry the
+					// same mechanics — verified against the SDKs). A
+					// merchant-provided --return-url keeps redirect methods;
+					// otherwise pin allow_redirects to "never".
+					var opts companionOpts
+					if siteConfirms(sp) && !siteHasReturnURL(sp) {
+						if dec.returnURL != "" {
+							opts.returnURL = dec.returnURL
+							confirmWithURL++
+						} else {
+							opts.allowRedirectsNever = true
+							confirmNever++
+						}
+					}
+					if text, ok := companionText(spec, sp.site, res, sp.receiver, opts); ok {
 						sp.replace = spliceFor(sp.label, text)
 						sp.label += "→+" + rule.Companion.Param
 						javaSeen[jkey] = true
@@ -495,6 +604,16 @@ func fixRun(root string, rule Rule, apply, includeAll bool, dec *companionDecisi
 			}
 		}
 		report.Files = append(report.Files, ff)
+	}
+	if report.Companion != nil {
+		if confirmNever > 0 {
+			report.Companion.Notes = append(report.Companion.Notes, fmt.Sprintf(
+				"%d server-side-confirmation site(s) got allow_redirects:\"never\" (no return_url present): APM+confirm without a return_url is a runtime 400; rerun with --return-url <url> to enable redirect-based payment methods instead", confirmNever))
+		}
+		if confirmWithURL > 0 {
+			report.Companion.Notes = append(report.Companion.Notes, fmt.Sprintf(
+				"%d server-side-confirmation site(s) gained the provided return_url alongside the companion", confirmWithURL))
+		}
 	}
 	return report, nil
 }

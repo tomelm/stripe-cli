@@ -41,15 +41,19 @@ type accountFacts struct {
 	OldestVersion string
 
 	// PMConfigs summarizes /v1/payment_method_configurations.
-	ConfigCount    int
-	ActiveConfig   string
-	MethodsOn      int
-	MethodsOff     int
-	EnabledMethods []string // method names ON in the chosen config
-	ConfiguredOK   bool
-	NoEvents       bool // no recent events: version facts are unknowable
-	VersionsOK     bool // every sampled event version >= dpmCutoff
-	VersionsMixed  bool // some but not all versions >= dpmCutoff
+	ConfigCount  int
+	ActiveConfig string
+	MethodsOn    int
+	MethodsOff   int
+	// EnabledMethods are toggled ON in the chosen config;
+	// UnavailableMethods is the subset whose `available` is false (toggle on
+	// but capability inactive — they will NOT render; both are required).
+	EnabledMethods     []string
+	UnavailableMethods []string
+	ConfiguredOK       bool
+	NoEvents           bool // no recent events: version facts are unknowable
+	VersionsOK         bool // every sampled event version >= dpmCutoff
+	VersionsMixed      bool // some but not all versions >= dpmCutoff
 }
 
 // loadTestKey resolves a test-mode key without ever exposing it: env var
@@ -79,12 +83,15 @@ func loadTestKey(profile string) (string, error) {
 	return "", fmt.Errorf("profile %q has no test_mode_api_key", profile)
 }
 
-func stripeGET(key, path string, out any) error {
+func stripeGET(key, stripeAccount, path string, out any) error {
 	req, err := http.NewRequest("GET", "https://api.stripe.com"+path, nil)
 	if err != nil {
 		return err
 	}
 	req.SetBasicAuth(key, "")
+	if stripeAccount != "" {
+		req.Header.Set("Stripe-Account", stripeAccount)
+	}
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -100,7 +107,11 @@ func stripeGET(key, path string, out any) error {
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
-func fetchAccountFacts(key string) (*accountFacts, error) {
+// fetchAccountFacts pulls the read-only account evidence. stripeAccount, when
+// non-empty, is sent as the Stripe-Account header so Connect direct-charge
+// integrations resolve the CONNECTED account's payment-method configuration
+// (the platform's own config does not govern those charges).
+func fetchAccountFacts(key, stripeAccount string) (*accountFacts, error) {
 	f := &accountFacts{EventVersions: map[string]int{}}
 
 	var acct struct {
@@ -111,22 +122,23 @@ func fetchAccountFacts(key string) (*accountFacts, error) {
 			} `json:"dashboard"`
 		} `json:"settings"`
 	}
-	if err := stripeGET(key, "/v1/account", &acct); err != nil {
+	if err := stripeGET(key, stripeAccount, "/v1/account", &acct); err != nil {
 		return nil, err
 	}
 	f.AccountID, f.DisplayName = acct.ID, acct.Settings.Dashboard.DisplayName
 
 	// Payment method configurations: each payment-method field is an object
-	// with display_preference.value on|off. Parse generically.
+	// with display_preference.value on|off plus `available` (enabled AND the
+	// capability is active — what will actually render). Parse generically.
 	var pmc struct {
 		Data []map[string]any `json:"data"`
 	}
-	if err := stripeGET(key, "/v1/payment_method_configurations", &pmc); err != nil {
+	if err := stripeGET(key, stripeAccount, "/v1/payment_method_configurations", &pmc); err != nil {
 		return nil, err
 	}
-	// Choose ONE governing config — the default if present, else the first
-	// active — and count/collect methods from it alone (summing across
-	// configs double-counted before).
+	// Choose ONE governing config — strictly the default (the one the API
+	// uses when payment_method_configuration is not specified), else the
+	// first active — and count/collect methods from it alone.
 	var chosen map[string]any
 	for _, cfg := range pmc.Data {
 		active, _ := cfg["active"].(bool)
@@ -158,11 +170,17 @@ func fetchAccountFacts(key string) (*accountFacts, error) {
 			case "on":
 				f.MethodsOn++
 				f.EnabledMethods = append(f.EnabledMethods, field)
+				// Toggled on but capability inactive → will NOT render;
+				// per DPM guidance both are required.
+				if avail, ok := m["available"].(bool); ok && !avail {
+					f.UnavailableMethods = append(f.UnavailableMethods, field)
+				}
 			case "off":
 				f.MethodsOff++
 			}
 		}
 		sort.Strings(f.EnabledMethods)
+		sort.Strings(f.UnavailableMethods)
 	}
 	f.ConfiguredOK = f.ConfigCount > 0 && f.MethodsOn > 0
 
@@ -172,7 +190,7 @@ func fetchAccountFacts(key string) (*accountFacts, error) {
 			APIVersion string `json:"api_version"`
 		} `json:"data"`
 	}
-	if err := stripeGET(key, "/v1/events?limit=20", &evts); err != nil {
+	if err := stripeGET(key, stripeAccount, "/v1/events?limit=20", &evts); err != nil {
 		return nil, err
 	}
 	ge := 0
@@ -270,20 +288,31 @@ func verdict(intent, value string, f *accountFacts) string {
 		return "BLOCKED: no active Dashboard payment-method configuration — configure methods before removing"
 	}
 	// The doc's loudest warning: migration only keeps methods the Dashboard
-	// has ON. Diff the hardcoded list against the governing config.
+	// has ON *and available* (toggle + active capability — both required to
+	// render). Diff the hardcoded list against the governing config.
 	if intent == "default-shaped" || intent == "static" {
-		var missing []string
+		var missing, inactive []string
 		enabled := map[string]bool{}
 		for _, m := range f.EnabledMethods {
 			enabled[m] = true
 		}
+		unavailable := map[string]bool{}
+		for _, m := range f.UnavailableMethods {
+			unavailable[m] = true
+		}
 		for _, m := range quotedMethods(value) {
-			if !enabled[m] {
+			switch {
+			case !enabled[m]:
 				missing = append(missing, m)
+			case unavailable[m]:
+				inactive = append(inactive, m)
 			}
 		}
 		if len(missing) > 0 {
 			return "CAUTION: " + strings.Join(missing, ", ") + " hardcoded here but OFF in the Dashboard config — enable in the Dashboard first or customers lose them on removal"
+		}
+		if len(inactive) > 0 {
+			return "CAUTION: " + strings.Join(inactive, ", ") + " toggled ON but not available (capability inactive) — it will not render after removal; activate the capability first"
 		}
 	}
 	switch intent {
@@ -302,12 +331,12 @@ func verdict(intent, value string, f *accountFacts) string {
 // decides the judgment style: the dpm pack gets full account verdicts;
 // advise packs get ADVISE verdicts carrying the rule's remediation message
 // (their account precondition is the version window, shown as context).
-func buildDoctorReport(findings []Finding, profile string, rule Rule) (*DoctorReport, error) {
+func buildDoctorReport(findings []Finding, profile, stripeAccount string, rule Rule) (*DoctorReport, error) {
 	key, err := loadTestKey(profile)
 	if err != nil {
 		return nil, err
 	}
-	facts, err := fetchAccountFacts(key)
+	facts, err := fetchAccountFacts(key, stripeAccount)
 	if err != nil {
 		return nil, err
 	}
@@ -326,6 +355,7 @@ func buildDoctorReport(findings []Finding, profile string, rule Rule) (*DoctorRe
 			MethodsOn:      facts.MethodsOn,
 			MethodsOff:     facts.MethodsOff,
 			EnabledMethods: facts.EnabledMethods,
+			Unavailable:    facts.UnavailableMethods,
 			NoRecentEvents: facts.NoEvents,
 			ConfiguredOK:   facts.ConfiguredOK,
 		},

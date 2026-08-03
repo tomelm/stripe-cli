@@ -417,6 +417,113 @@ func TestDecideCompanionUsesRuleCutoffAndConfigNote(t *testing.T) {
 	}
 }
 
+func TestCompanionConfirmSites(t *testing.T) {
+	// DPM-lead feedback: APM + confirm:true without a return_url is a
+	// runtime 400. Sites like that must get allow_redirects:"never" (or the
+	// merchant's --return-url); sites that already pass return_url stay plain.
+	write := func(t *testing.T, dir, name, src string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	confirmJS := `const stripe = require('stripe')('sk_test_x');
+await stripe.paymentIntents.create({
+  amount: 1099,
+  currency: 'eur',
+  payment_method_types: ['card'],
+  confirm: true,
+  payment_method: 'pm_x',
+});
+`
+	confirmWithURLJS := `const stripe = require('stripe')('sk_test_x');
+await stripe.paymentIntents.create({
+  amount: 1099,
+  currency: 'eur',
+  payment_method_types: ['card'],
+  confirm: true,
+  return_url: 'https://example.com/return',
+});
+`
+	confirmJava := `import com.stripe.param.PaymentIntentCreateParams;
+
+class Demo {
+  void go() {
+    PaymentIntentCreateParams params = PaymentIntentCreateParams.builder().setAmount(1099L).addPaymentMethodType("card").setConfirm(true).build();
+  }
+}
+`
+
+	t.Run("no return_url pins allow_redirects never", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, "confirm.js", confirmJS)
+		write(t, dir, "Confirm.java", confirmJava)
+		rep, err := fixRun(dir, dpmRule, true, false, &companionDecision{insert: true, reason: "test"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !rep.AllClean {
+			t.Fatal("expected reparse clean")
+		}
+		if out := mustRead(t, dir, "confirm.js"); !strings.Contains(out, "allow_redirects: 'never'") {
+			t.Errorf("confirm site must pin allow_redirects:\n%s", out)
+		}
+		if out := mustRead(t, dir, "Confirm.java"); !strings.Contains(out, "AllowRedirects.NEVER") {
+			t.Errorf("java confirm site must pin AllowRedirects.NEVER:\n%s", out)
+		}
+		if len(rep.Companion.Notes) == 0 || !strings.Contains(rep.Companion.Notes[0], "allow_redirects") {
+			t.Errorf("notes must surface the pinned sites, got %v", rep.Companion.Notes)
+		}
+	})
+
+	t.Run("--return-url adds return_url instead", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, "confirm.js", confirmJS)
+		rep, err := fixRun(dir, dpmRule, true, false,
+			&companionDecision{insert: true, reason: "test", returnURL: "https://example.com/complete"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := mustRead(t, dir, "confirm.js")
+		if !strings.Contains(out, "return_url: 'https://example.com/complete'") {
+			t.Errorf("provided return_url must be inserted:\n%s", out)
+		}
+		if strings.Contains(out, "allow_redirects") {
+			t.Errorf("with a return_url the redirects pin must not appear:\n%s", out)
+		}
+		if len(rep.Companion.Notes) == 0 || !strings.Contains(rep.Companion.Notes[0], "return_url") {
+			t.Errorf("notes must record the return_url insertions, got %v", rep.Companion.Notes)
+		}
+	})
+
+	t.Run("existing return_url stays plain", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, "confirm.js", confirmWithURLJS)
+		rep, err := fixRun(dir, dpmRule, true, false, &companionDecision{insert: true, reason: "test"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := mustRead(t, dir, "confirm.js")
+		if !strings.Contains(out, "automatic_payment_methods: {enabled: true}") || strings.Contains(out, "allow_redirects") {
+			t.Errorf("return_url already present: plain companion expected:\n%s", out)
+		}
+		if len(rep.Companion.Notes) != 0 {
+			t.Errorf("no notes expected, got %v", rep.Companion.Notes)
+		}
+	})
+
+	t.Run("non-confirm create stays plain", func(t *testing.T) {
+		dir := copyFixtures(t, "pi.js")
+		_, err := fixRun(dir, dpmRule, true, false, &companionDecision{insert: true, reason: "test"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out := mustRead(t, dir, "pi.js"); strings.Contains(out, "allow_redirects") {
+			t.Errorf("plain create must not gain allow_redirects:\n%s", out)
+		}
+	})
+}
+
 func TestRemovalLeavesNoBlankArtifacts(t *testing.T) {
 	// The bed-A review finding: every deleted entry used to leave a
 	// whitespace-only line. Full-line expansion must prevent that in every

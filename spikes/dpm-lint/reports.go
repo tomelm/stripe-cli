@@ -101,8 +101,10 @@ type AccountSummary struct {
 	MethodsOn      int            `json:"methods_on"`
 	MethodsOff     int            `json:"methods_off"`
 	EnabledMethods []string       `json:"enabled_methods,omitempty"`
-	NoRecentEvents bool           `json:"no_recent_events"`
-	ConfiguredOK   bool           `json:"dashboard_configured"`
+	// Unavailable: toggled ON but capability inactive — will not render.
+	Unavailable    []string `json:"enabled_but_unavailable,omitempty"`
+	NoRecentEvents bool     `json:"no_recent_events"`
+	ConfiguredOK   bool     `json:"dashboard_configured"`
 }
 
 type DoctorFinding struct {
@@ -137,6 +139,9 @@ type CompanionReport struct {
 	Reason        string `json:"reason"`
 	OldestVersion string `json:"oldest_traffic_version,omitempty"`
 	Inserts       int    `json:"inserts"` // replacements actually made
+	// Notes surface site-level caveats: server-side-confirmation sites that
+	// were pinned to allow_redirects:"never", or that gained --return-url.
+	Notes []string `json:"notes,omitempty"`
 }
 
 type SkippedFinding struct {

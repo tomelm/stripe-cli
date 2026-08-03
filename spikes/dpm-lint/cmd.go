@@ -27,9 +27,10 @@ import (
 )
 
 var (
-	flagJSON    bool
-	flagProfile string
-	flagYes     bool
+	flagJSON          bool
+	flagProfile       string
+	flagStripeAccount string
+	flagYes           bool
 )
 
 // Pack pairs a rule with its declared signals (expected webhook events,
@@ -121,6 +122,7 @@ Humans: start with ` + "`stripe demo dpm`" + `. Agents: start with ` + "`stripe 
 	}
 	root.PersistentFlags().BoolVar(&flagJSON, "json", false, "machine-readable output on stdout, logs on stderr")
 	root.PersistentFlags().StringVar(&flagProfile, "profile", "default", "Stripe CLI config profile for account access")
+	root.PersistentFlags().StringVar(&flagStripeAccount, "stripe-account", "", "Connect: connected account (acct_...) whose configuration governs direct charges")
 	root.PersistentFlags().BoolVarP(&flagYes, "yes", "y", false, "assume yes for confirmations (non-interactive)")
 
 	root.AddCommand(newDoctorCmd(), newFixCmd(), newDemoCmd(), newGuideCmd(),
@@ -160,7 +162,7 @@ runtime behavior (webhook round-trip via stripe listen/trigger).`,
 			} else {
 				err := withSpinnerUnlessJSON("Fetching account facts (read-only)", func() error {
 					var derr error
-					rep, derr = buildDoctorReport(findings, flagProfile, rule)
+					rep, derr = buildDoctorReport(findings, flagProfile, flagStripeAccount, rule)
 					return derr
 				})
 				if err != nil {
@@ -357,6 +359,7 @@ func renderDoctor(r *DoctorReport) {
 
 func newFixCmd() *cobra.Command {
 	var apply, all, offline bool
+	var returnURL string
 	c := &cobra.Command{
 		Use:   "fix [topic] [dir]",
 		Short: "Remediate findings: span-verified removals (dry-run; --apply writes)",
@@ -376,9 +379,10 @@ func newFixCmd() *cobra.Command {
 			var dec *companionDecision
 			if rule.Companion != nil {
 				_ = withSpinnerUnlessJSON("Checking account API versions (read-only)", func() error {
-					dec = resolveCompanion(rule, flagProfile, offline)
+					dec = resolveCompanion(rule, flagProfile, flagStripeAccount, offline)
 					return nil
 				})
+				dec.returnURL = returnURL
 			}
 			rep, err := fixRun(dir, rule, apply, all, dec)
 			if err != nil {
@@ -399,6 +403,7 @@ func newFixCmd() *cobra.Command {
 	c.Flags().BoolVar(&apply, "apply", false, "write changes (dry-run without this flag)")
 	c.Flags().BoolVar(&all, "all", false, "include dynamic/deliberate findings the gate would skip")
 	c.Flags().BoolVar(&offline, "offline", false, "skip account lookups (companion rules then insert, the safe-at-any-version choice)")
+	c.Flags().StringVar(&returnURL, "return-url", "", "return_url to add at server-side-confirmation sites (enables redirect-based payment methods; without it those sites get allow_redirects:\"never\")")
 	return c
 }
 
@@ -413,6 +418,9 @@ func renderFix(r *FixReport) {
 			fmt.Println(infoLine("companion: inserting " + c.Param + " — " + c.Reason))
 		} else {
 			fmt.Println(infoLine("companion: not needed — " + c.Reason))
+		}
+		for _, n := range c.Notes {
+			fmt.Println(warnLine(n))
 		}
 	}
 	for _, f := range r.Files {
@@ -519,7 +527,7 @@ func runDemo(topic, dir string, skipLive bool) {
 	} else {
 		err := withSpinner("Fetching account facts (read-only)", func() error {
 			var derr error
-			rep, derr = buildDoctorReport(findings, flagProfile, rule)
+			rep, derr = buildDoctorReport(findings, flagProfile, flagStripeAccount, rule)
 			return derr
 		})
 		if err != nil {
@@ -537,7 +545,7 @@ func runDemo(topic, dir string, skipLive bool) {
 	fmt.Print(stepHeader(2, total, "Remediation preview (dry-run, span-verified)"))
 	var dec *companionDecision
 	if rule.Companion != nil {
-		dec = resolveCompanion(rule, flagProfile, skipLive)
+		dec = resolveCompanion(rule, flagProfile, flagStripeAccount, skipLive)
 	}
 	if fr, err := fixRun(dir, rule, false, false, dec); err == nil {
 		renderFix(fr)
@@ -689,6 +697,16 @@ traffic is all at/after the cutoff and plain removal preserves behavior.
 .companion.reason carries the account evidence; --offline forces the
 insert branch (the only choice correct at any version). Checkout
 Sessions/Payment Links never get the insert (no such parameter there).
+Server-side confirmation: a PaymentIntent create with confirm:true and
+no return_url would 400 at runtime once automatic_payment_methods is on
+(...allow_redirects_without_return_url). fix detects those sites: pass
+--return-url <url> to add it alongside the companion (keeps redirect-
+based methods usable), else the insert pins allow_redirects:"never" and
+.companion.notes tells you what happened. ASK THE HUMAN for a return_url
+when notes report pinned sites — it is the better end state.
+Connect: for direct charges (Stripe-Account header in the user's code),
+pass --stripe-account acct_... so the CONNECTED account's configuration
+and traffic govern the fork and the doctor's verdicts.
 The gate skips dynamic values and deliberate single-method restrictions
 (.skipped, with reasons) — that is intentional; --all overrides, but only
 after a human reviews each skipped finding.
