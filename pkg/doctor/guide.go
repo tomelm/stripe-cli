@@ -134,8 +134,11 @@ Connect: for direct charges (Stripe-Account header in the user's code),
 pass --stripe-account acct_... so the CONNECTED account's configuration
 and traffic govern the fork and the doctor's verdicts.
 The gate skips dynamic values and deliberate single-method restrictions
-(.skipped, with reasons) — that is intentional; --all overrides, but only
-after a human reviews each skipped finding.
+(.skipped, with reasons) — that is intentional and FINAL for you: agents
+must NEVER pass --all. You are not the reviewer; a human is. Report each
+.skipped entry with its reason and stop there. No account fact (dashboard
+configuration, API version, enabled methods) makes overriding the gate
+safe — the gate exists precisely because those facts are insufficient.
 
 ## 3. Apply
     stripe doctor fix dpm <dir> --apply --yes --json
@@ -144,7 +147,11 @@ failure is recorded in .files[].error and does not abort the rest.
 
 ## 4. Confirm the code change
     stripe doctor dpm <dir> --json
-Exit 0 proves the parameter is gone.
+Exit 0 means every finding is resolved. Exit 1 with ONLY gate-skipped
+findings remaining (.skipped intents: dynamic, deliberate,
+confirm-redirect) is the CORRECT end state of an agent migration — those
+are a human's to resolve. Do not chase exit 0 through --all; report the
+skipped findings and finish.
 
 ## 5. Confirm runtime behavior (recommended)
     stripe doctor dpm --live --json
