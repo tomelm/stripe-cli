@@ -51,7 +51,7 @@ type CLIAnalyticsEventMetadata struct {
 	GeneratedResource bool   `url:"generated_resource"`         // whether or not this was a generated resource
 	AIAgent           string `url:"ai_agent,omitempty"`         // the AI coding agent that invoked the CLI, if any
 	AgentHostKind     string `url:"agent_host_kind,omitempty"`  // where the agent ran: desktop, terminal, ide, remote, sdk, mcp, or other
-	AgentHostRaw      string `url:"agent_host_raw,omitempty"`   // the host as reported, only when agent_host_kind is "other", so an unmapped host is identifiable without a release
+	AgentHostRaw      string `url:"agent_host_raw,omitempty"`   // the normalized host underneath agent_host_kind, so a coarsely mapped or unmapped host stays recoverable
 	AgentVersion      string `url:"agent_version,omitempty"`    // the agent's own version, when it reports one
 	InstallMethod     string `url:"install_method,omitempty"`   // how the CLI was installed
 	InTmux            bool   `url:"in_tmux"`                    // whether the CLI was invoked from within tmux

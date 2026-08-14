@@ -125,16 +125,18 @@ func DetectAIAgent(getEnv func(string) string) string {
 	return ""
 }
 
-// DetectAgentHost reports where the agent ran. kind is a bounded category --
-// "desktop", "terminal", "ide", "remote", "sdk", "mcp", "other", or "" when no agent
-// reported a host.
+// DetectAgentHost reports where the agent ran, as a bounded category and as the host
+// value itself. Both are empty when no agent reported a host.
 //
-// raw carries the underlying host value, and only when kind is "other". Recognized
-// hosts report nothing there, since the category already says everything and the raw
-// spelling is a per-vendor detail every consumer would have to enumerate. Unrecognized
-// ones report it because the category alone cannot identify them, and vendors add and
-// rename hosts often enough -- Claude Code ships 25 -- that waiting for a release
-// before an unmapped host is even visible loses months of data.
+// kind is what to group by: "desktop", "terminal", "ide", "remote", "sdk", "mcp", or
+// "other" for a host we have not categorized. raw is the normalized host underneath it,
+// reported for every host rather than only uncategorized ones, so that a value we map
+// too coarsely stays recoverable. "claude-desktop" and "claude-desktop-3p" are both
+// desktop, for instance, and without raw nothing downstream can tell them apart.
+//
+// Reporting raw also means an unmapped host can be identified from the data rather than
+// from a vendor's source, which matters because mapping one otherwise costs a code
+// change, a release, and users upgrading before it is even visible.
 func DetectAgentHost(getEnv func(string) string) (kind string, raw string) {
 	host := getEnv("CLAUDE_CODE_ENTRYPOINT")
 	if host == "" {
@@ -153,10 +155,10 @@ func DetectAgentHost(getEnv func(string) string) (kind string, raw string) {
 	// but this field describes where the CLI itself ran, and that is the remote host,
 	// not the user's machine. Matching "desktop" anywhere would put it in the wrong one.
 	if host == "remote" || strings.HasPrefix(host, "remote-") {
-		return "remote", ""
+		return "remote", host
 	}
 	if kind, ok := agentHostKinds[host]; ok {
-		return kind, ""
+		return kind, host
 	}
 
 	return "other", host
@@ -247,8 +249,9 @@ var agentHostKinds = map[string]string{
 // disagree on formatting, and Claude Code disagrees with itself: it ships both
 // "claude_in_slack" and "claude-in-slack", while Codex reports "Codex Desktop".
 //
-// Normalizing before reporting matters now that an unrecognized host is reported
-// verbatim: it keeps one host from arriving under several spellings.
+// Normalizing before reporting matters because the host is reported as well as
+// categorized: it keeps one host from arriving under several spellings, including
+// across platforms.
 func normalizeAgentHost(host string) string {
 	host = strings.Map(func(r rune) rune {
 		switch {
