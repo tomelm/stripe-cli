@@ -125,41 +125,41 @@ func DetectAIAgent(getEnv func(string) string) string {
 	return ""
 }
 
-// DetectAgentHostKind reports where the agent ran: "desktop", "terminal", "ide",
-// "remote", "sdk", "mcp", or "other", and "" when no agent reported a host.
+// DetectAgentHost reports where the agent ran. kind is a bounded category --
+// "desktop", "terminal", "ide", "remote", "sdk", "mcp", "other", or "" when no agent
+// reported a host.
 //
-// Only the category is exposed. The underlying values are per-vendor spellings that
-// every consumer would otherwise have to enumerate, and the vendor is already carried
-// by DetectAIAgent.
-func DetectAgentHostKind(getEnv func(string) string) string {
+// raw carries the underlying host value, and only when kind is "other". Recognized
+// hosts report nothing there, since the category already says everything and the raw
+// spelling is a per-vendor detail every consumer would have to enumerate. Unrecognized
+// ones report it because the category alone cannot identify them, and vendors add and
+// rename hosts often enough -- Claude Code ships 25 -- that waiting for a release
+// before an unmapped host is even visible loses months of data.
+func DetectAgentHost(getEnv func(string) string) (kind string, raw string) {
 	host := getEnv("CLAUDE_CODE_ENTRYPOINT")
 	if host == "" {
 		// Codex Desktop sets this alongside the generic Codex signals, and it is
 		// currently the only inherited value separating Desktop from the Codex CLI.
 		host = getEnv("CODEX_INTERNAL_ORIGINATOR_OVERRIDE")
 	}
-	if host == "" {
-		return ""
-	}
 
-	// Vendors disagree on formatting, and Claude Code disagrees with itself: it ships
-	// both "claude_in_slack" and "claude-in-slack", while Codex reports "Codex Desktop".
-	host = strings.ToLower(strings.TrimSpace(host))
-	host = strings.NewReplacer(" ", "-", "_", "-").Replace(host)
+	host = normalizeAgentHost(host)
+	if host == "" {
+		return "", ""
+	}
 
 	// Checked first and by prefix. "remote-desktop" is Claude Desktop driving a session
 	// that executes remotely -- Claude Code labels it "Claude Desktop" as a surface --
 	// but this field describes where the CLI itself ran, and that is the remote host,
 	// not the user's machine. Matching "desktop" anywhere would put it in the wrong one.
 	if host == "remote" || strings.HasPrefix(host, "remote-") {
-		return "remote"
+		return "remote", ""
 	}
 	if kind, ok := agentHostKinds[host]; ok {
-		return kind
+		return kind, ""
 	}
-	// Reported rather than dropped, so a host we have not categorized stays
-	// distinguishable from no host at all while the field stays bounded.
-	return "other"
+
+	return "other", host
 }
 
 // DetectAgentVersion returns the agent's own version, parsed out of the identifier it
@@ -213,16 +213,19 @@ var encodedUserAgent string
 // Private constants
 //
 
-// maxVersionLength bounds a parsed version before it is reported, so an unexpected or
-// hostile value cannot bloat a request.
-const maxVersionLength = 32
+// maxVersionLength and maxHostLength bound values before they are reported, so an
+// unexpected or hostile value cannot bloat a request.
+const (
+	maxVersionLength = 32
+	maxHostLength    = 32
+)
 
 //
 // Private variables
 //
 
 // agentHostKinds categorizes the hosts we know about. "remote*" hosts are handled by
-// prefix in DetectAgentHostKind rather than enumerated here.
+// prefix in DetectAgentHost rather than enumerated here.
 var agentHostKinds = map[string]string{
 	"claude-desktop":    "desktop",
 	"claude-desktop-3p": "desktop",
@@ -238,6 +241,32 @@ var agentHostKinds = map[string]string{
 //
 // Private functions
 //
+
+// normalizeAgentHost lowercases a reported host, collapses spaces and underscores to
+// dashes, drops anything outside printable ASCII, and bounds the length. Vendors
+// disagree on formatting, and Claude Code disagrees with itself: it ships both
+// "claude_in_slack" and "claude-in-slack", while Codex reports "Codex Desktop".
+//
+// Normalizing before reporting matters now that an unrecognized host is reported
+// verbatim: it keeps one host from arriving under several spellings.
+func normalizeAgentHost(host string) string {
+	host = strings.Map(func(r rune) rune {
+		switch {
+		case r == ' ' || r == '_':
+			return '-'
+		case r < ' ' || r > '~':
+			return -1
+		default:
+			return r
+		}
+	}, strings.ToLower(strings.TrimSpace(host)))
+
+	if len(host) > maxHostLength {
+		host = host[:maxHostLength]
+	}
+
+	return host
+}
 
 // validVersion returns the candidate if it is a dot-separated numeric version, and ""
 // otherwise. Deliberately strict: the identifier formats this parses are undocumented,
